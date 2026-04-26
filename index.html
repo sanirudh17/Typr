@@ -28,7 +28,14 @@
           </div>
         </div>
         <nav id="sidebar-nav">
-          <a class="nav-item active" data-section="general">
+          <a class="nav-item active" data-section="home">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2.5 7L8 2.5 13.5 7v6.5a1 1 0 01-1 1h-9a1 1 0 01-1-1V7z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              <path d="M6 14V9.5h4V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Home
+          </a>
+          <a class="nav-item" data-section="general">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/>
               <path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -55,7 +62,42 @@
       </aside>
 
       <main id="content">
-        <section id="section-general" class="content-section active">
+        <section id="section-home" class="content-section active">
+          <div class="section-header">
+            <h2 class="section-title">Home</h2>
+            <p class="section-desc">Your transcription history and statistics</p>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Total Transcribed</span>
+                <span class="label-hint">Aggregate statistics across all recordings</span>
+              </div>
+              <div class="setting-control" style="display: flex; gap: 24px; justify-content: flex-end;">
+                <div style="text-align: right;">
+                  <div style="font-size: 20px; font-weight: 600; color: var(--text);" id="stat-words">0</div>
+                  <div style="font-size: 12px; color: var(--text-secondary);">words</div>
+                </div>
+                <div style="text-align: right;">
+                  <div style="font-size: 20px; font-weight: 600; color: var(--text);" id="stat-wpm">0</div>
+                  <div style="font-size: 12px; color: var(--text-secondary);">wpm</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 16px;">
+              <div class="setting-label" style="margin-bottom: 8px;">
+                <span class="label-text">History</span>
+                <span class="label-hint">Recent transcriptions</span>
+              </div>
+              <div id="transcription-feed" style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;">
+                <!-- Feed items injected via JS -->
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-general" class="content-section">
           <div class="section-header">
             <h2 class="section-title">General</h2>
             <p class="section-desc">Configure your audio input device</p>

@@ -25,6 +25,7 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  outline: none;
 }
 
 body {
@@ -50,10 +51,7 @@ body {
 }
 
 #titlebar {
-  height: 38px;
-  width: 100%;
-  flex-shrink: 0;
-  background: var(--sidebar-bg);
+  display: none;
 }
 
 #app-body {
@@ -71,20 +69,25 @@ body {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 16px 0;
+  padding: 0 0 16px 0;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .sidebar-header {
-  padding: 0 16px 16px;
+  padding: 16px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
 }
 
 .app-identity {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 14px;
 }
 
 .app-icon {
@@ -93,7 +96,7 @@ body {
 }
 
 .app-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.01em;
@@ -104,14 +107,14 @@ body {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: var(--surface);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
+  background: var(--surface-active);
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
 }
 
 #status-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--green);
   flex-shrink: 0;
@@ -141,9 +144,11 @@ body {
 }
 
 #status-text {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 /* ── Navigation ─────────────────────────────────────── */
@@ -458,6 +463,7 @@ kbd {
   color: var(--text-secondary);
   letter-spacing: 0.02em;
 }
+
 
 /* ── Utility ────────────────────────────────────────── */
 

@@ -21,7 +21,7 @@ pub fn paste_text(text: &str) -> Result<(), String> {
         use enigo::{Enigo, Keyboard, Settings, Key, Direction};
         let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
         enigo.key(Key::Control, Direction::Press).map_err(|e| e.to_string())?;
-        enigo.key(Key::Unicode('v'), Direction::Click).map_err(|e| e.to_string())?;
+        enigo.key(Key::V, Direction::Click).map_err(|e| e.to_string())?;
         enigo.key(Key::Control, Direction::Release).map_err(|e| e.to_string())?;
     }
 

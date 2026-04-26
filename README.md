@@ -1,7 +1,18 @@
-# Tauri + Vanilla TS
+# Typr
 
-This template should help get you started developing with Tauri in vanilla HTML, CSS and Typescript.
+Version 0.1.0
 
-## Recommended IDE Setup
+A typing application with voice recording and transcription capabilities.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Features
+
+- Voice recording and playback
+- Local speech-to-text transcription
+- Overlay support
+- Audio management
+- Paste functionality
+- Recording history
+
+## Development
+
+Built with Tauri.

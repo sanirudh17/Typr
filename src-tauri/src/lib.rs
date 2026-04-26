@@ -6,6 +6,7 @@ pub mod cleanup;
 pub mod paste;
 pub mod recorder;
 pub mod downloader;
+pub mod history;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

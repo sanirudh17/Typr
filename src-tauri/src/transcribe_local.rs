@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 
 pub async fn transcribe_local(
@@ -13,16 +13,25 @@ pub async fn transcribe_local(
 
     println!("[Typr] Running whisper.cpp sidecar with model {:?}", model_path);
 
+    let resource_path = app.path().resource_dir().unwrap().join("binaries");
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
+
     let output = app
         .shell()
         .sidecar("whisper-cpp")
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+        .env("PATH", new_path)
         .args([
             "-m",
             model_path.to_str().unwrap(),
             "-f",
             audio_path.to_str().unwrap(),
             "--no-timestamps",
+            "-t",
+            "8",
+            "-bs",
+            "1",
             "-l",
             "en",
         ])

@@ -16,53 +16,171 @@
         justify-content: center;
         height: 100vh;
       }
-      .mic {
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        background: rgba(30, 30, 30, 0.85);
+      .pill {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        height: 32px;
+        padding: 0 14px;
+        border-radius: 16px;
+        background: rgba(18, 18, 22, 0.92);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(94, 106, 210, 0.25);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+      .pill.recording {
+        display: flex;
+        animation: fadeIn 0.15s ease;
+      }
+      .pill.processing {
+        display: flex;
+        animation: fadeIn 0.15s ease;
+      }
+      .pill.hidden {
+        opacity: 0;
+        transform: translateY(10px) scale(0.96);
+        pointer-events: none;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px) scale(0.96); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+
+      .waveform {
         display: flex;
         align-items: center;
         justify-content: center;
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        transition: all 0.3s ease;
-      }
-      .mic svg {
-        width: 18px;
+        gap: 2px;
         height: 18px;
-        fill: #888;
-        transition: fill 0.3s ease;
       }
-      .mic.recording {
-        background: rgba(244, 67, 54, 0.9);
-        border-color: rgba(244, 67, 54, 0.5);
-        animation: pulse 1.2s ease-in-out infinite;
+      .wave-bar {
+        width: 2px;
+        background: linear-gradient(to top, #4a5bc7, #7b8aed);
+        border-radius: 1px;
+        transition: height 0.04s ease-out;
       }
-      .mic.recording svg {
-        fill: #fff;
+
+      .spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(94, 106, 210, 0.25);
+        border-top-color: #7b8aed;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
       }
-      .mic.transcribing {
-        background: rgba(255, 152, 0, 0.9);
-        border-color: rgba(255, 152, 0, 0.5);
-        animation: pulse 1.5s ease-in-out infinite;
-      }
-      .mic.transcribing svg {
-        fill: #fff;
-      }
-      @keyframes pulse {
-        0%, 100% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(1.15); opacity: 0.8; }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
       }
     </style>
   </head>
   <body>
-    <div class="mic" id="mic">
-      <svg viewBox="0 0 24 24">
-        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5z"/>
-        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-      </svg>
+    <div class="pill" id="pill">
+      <div class="waveform" id="waveform">
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+      </div>
+      <div class="spinner" id="spinner" style="display: none;"></div>
     </div>
+    <script type="module">
+      import { invoke } from "@tauri-apps/api/core";
+
+      const pill = document.getElementById("pill");
+      const waveform = document.getElementById("waveform");
+      const spinner = document.getElementById("spinner");
+      const bars = waveform.querySelectorAll(".wave-bar");
+
+      const NUM_BARS = bars.length;
+      const smoothing = 0.4;
+      let currentLevels = new Array(NUM_BARS).fill(0);
+      let animationId = null;
+      let isRunning = false;
+      let pollInterval = null;
+
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      function updateVisuals(levels) {
+        const maxH = 16;
+        const minH = 2;
+
+        for (let i = 0; i < NUM_BARS; i++) {
+          currentLevels[i] = lerp(currentLevels[i], levels[i], smoothing);
+          const h = minH + (maxH - minH) * currentLevels[i];
+          bars[i].style.height = `${h}px`;
+        }
+
+        if (isRunning) {
+          animationId = requestAnimationFrame(() => updateVisuals(levels));
+        }
+      }
+
+      async function pollFrequency() {
+        try {
+          const bands = await invoke("get_frequency_bands");
+          
+          // Map 16 frequency bands to 16 visual bars
+          let levels = new Array(NUM_BARS).fill(0);
+          for (let i = 0; i < NUM_BARS; i++) {
+            levels[i] = bands[i] || 0;
+          }
+          
+          updateVisuals(levels);
+        } catch (e) {
+          console.error("freq error:", e);
+        }
+      }
+
+      window.__setPillState = function(state) {
+        isRunning = false;
+        if (animationId) {
+          cancelAnimationFrame(animationId);
+          animationId = null;
+        }
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+
+        pill.className = "pill";
+
+        if (state === "recording") {
+          pill.classList.add("recording");
+          waveform.style.display = "flex";
+          spinner.style.display = "none";
+          
+          currentLevels = new Array(NUM_BARS).fill(0);
+          isRunning = true;
+          pollFrequency();
+          pollInterval = setInterval(pollFrequency, 20);
+        } else if (state === "processing") {
+          pill.classList.add("processing");
+          waveform.style.display = "none";
+          spinner.style.display = "block";
+        } else {
+          pill.classList.add("hidden");
+          waveform.style.display = "flex";
+          spinner.style.display = "none";
+          currentLevels = new Array(NUM_BARS).fill(0);
+          bars.forEach(bar => bar.style.height = "2px");
+        }
+      };
+    </script>
   </body>
 </html>
