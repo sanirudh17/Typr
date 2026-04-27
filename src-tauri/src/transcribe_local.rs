@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 
@@ -11,7 +12,15 @@ pub async fn transcribe_local(
         return Err("Whisper model not found. Please download a model first.".to_string());
     }
 
-    println!("[Typr] Running whisper.cpp sidecar with model {:?}", model_path);
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get().max(1).to_string())
+        .unwrap_or_else(|_| "4".to_string());
+    let started_at = Instant::now();
+
+    println!(
+        "[Typr] Running whisper.cpp sidecar with model {:?} using {} threads",
+        model_path, threads
+    );
 
     let resource_path = app.path().resource_dir().unwrap().join("binaries");
     let current_path = std::env::var("PATH").unwrap_or_default();
@@ -29,9 +38,9 @@ pub async fn transcribe_local(
             audio_path.to_str().unwrap(),
             "--no-timestamps",
             "-t",
-            "8",
+            &threads,
             "-bs",
-            "1",
+            "8",
             "-l",
             "en",
         ])
@@ -45,7 +54,11 @@ pub async fn transcribe_local(
     }
 
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    println!("[Typr] Whisper output: {}", text);
+    println!(
+        "[Typr] Whisper completed in {:?}. Output: {}",
+        started_at.elapsed(),
+        text
+    );
     Ok(text)
 }
 

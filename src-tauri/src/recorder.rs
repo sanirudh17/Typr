@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
@@ -88,6 +89,8 @@ impl Recorder {
         history: &std::sync::Mutex<crate::history::History>,
         app_dir: &PathBuf,
     ) -> Result<String, String> {
+        let transcription_started_at = Instant::now();
+
         // Stop recording
         {
             let mut state = self.state.lock().unwrap();
@@ -102,6 +105,7 @@ impl Recorder {
         let temp_path = app_dir.join("temp_recording.wav");
 
         // Save audio
+        let save_started_at = Instant::now();
         let save_result = {
             let mut recorder = self.audio_recorder.lock().unwrap();
             recorder.stop_and_save(&temp_path)
@@ -117,6 +121,10 @@ impl Recorder {
                 return Err(e);
             }
         };
+        println!(
+            "[Typr] Audio save and preprocessing completed in {:?}",
+            save_started_at.elapsed()
+        );
 
         // Transcribe
         let transcribe_result = match settings.engine.as_str() {
@@ -152,6 +160,11 @@ impl Recorder {
             let _ = history.lock().unwrap().add_item(cleaned.clone(), duration_secs, app_dir);
             let _ = app.emit("history-updated", ());
         }
+
+        println!(
+            "[Typr] Full stop-to-text pipeline completed in {:?}",
+            transcription_started_at.elapsed()
+        );
 
         Ok(cleaned)
     }

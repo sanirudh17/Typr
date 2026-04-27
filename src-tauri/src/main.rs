@@ -13,6 +13,11 @@ use typr_lib::transcribe_local;
 
 use typr_lib::history::History;
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CreateMutexW;
+
 struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
@@ -20,10 +25,70 @@ struct AppState {
     app_dir: PathBuf,
 }
 
+#[cfg(windows)]
+struct SingleInstanceGuard(HANDLE);
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_single_instance() -> Result<SingleInstanceGuard, String> {
+    let mutex_name: Vec<u16> = "Local\\TyprSingleInstanceMutex"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+    if handle.is_null() {
+        return Err("Failed to create single-instance mutex".to_string());
+    }
+
+    let last_error = unsafe { GetLastError() };
+    if last_error == ERROR_ALREADY_EXISTS {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return Err("Another Typr instance is already running".to_string());
+    }
+
+    Ok(SingleInstanceGuard(handle))
+}
+
+#[cfg(not(windows))]
+struct SingleInstanceGuard;
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> Result<SingleInstanceGuard, String> {
+    Ok(SingleInstanceGuard)
+}
+
 fn get_app_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.typr.app")
+}
+
+fn hotkey_candidates(preferred: &str) -> Vec<String> {
+    let mut candidates = vec![preferred.to_string()];
+    for fallback in [
+        "CmdOrCtrl+Alt+Space",
+        "CmdOrCtrl+Shift+D",
+        "CmdOrCtrl+Alt+D",
+        "CmdOrCtrl+Shift+V",
+    ] {
+        if fallback != preferred {
+            candidates.push(fallback.to_string());
+        }
+    }
+    candidates
 }
 
 #[tauri::command]
@@ -116,6 +181,16 @@ async fn do_toggle_recording(
 }
 
 fn main() {
+    let _single_instance = match acquire_single_instance() {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("[Typr] {}", message);
+            return;
+        }
+    };
+
+    println!("[Typr] Starting process PID {}", std::process::id());
+
     let app_dir = get_app_dir();
     let settings = Settings::load(&app_dir);
     let history = History::load(&app_dir);
@@ -143,6 +218,18 @@ fn main() {
             get_history,
         ])
         .setup(move |app| {
+            // Handle window close to properly exit the app
+            let main_window = app.get_webview_window("main");
+            if let Some(window) = main_window {
+                let _window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                        println!("[Typr] Main window close requested, exiting app");
+                        std::process::exit(0);
+                    }
+                });
+            }
+
             // Create the overlay window (floating pill, bottom center, always on top)
             let monitor = app.primary_monitor().ok().flatten();
             let (x, y) = if let Some(m) = monitor {
@@ -230,17 +317,45 @@ fn main() {
                 }
             });
 
-            println!("[Typr] Registering global shortcut: {}", initial_hotkey);
+            let mut registered_hotkey = None;
+            for candidate in hotkey_candidates(&initial_hotkey) {
+                println!("[Typr] Registering global shortcut: {}", candidate);
+                let tx_for_hotkey = tx.clone();
+                match app.global_shortcut().on_shortcut(
+                    candidate.as_str(),
+                    move |_app, shortcut, event| {
+                        println!("[Typr] Hotkey event: {:?} state={:?}", shortcut, event.state);
+                        let _ = tx_for_hotkey.try_send(event.state);
+                    },
+                ) {
+                    Ok(_) => {
+                        registered_hotkey = Some(candidate);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("[Typr] Hotkey unavailable: {}", e);
+                    }
+                }
+            }
 
-            match app.global_shortcut().on_shortcut(
-                initial_hotkey.as_str(),
-                move |_app, shortcut, event| {
-                    println!("[Typr] Hotkey event: {:?} state={:?}", shortcut, event.state);
-                    let _ = tx.try_send(event.state);
-                },
-            ) {
-                Ok(_) => println!("[Typr] Global shortcut registered successfully"),
-                Err(e) => eprintln!("[Typr] ERROR: Failed to register global shortcut: {}", e),
+            match registered_hotkey {
+                Some(active_hotkey) => {
+                    println!("[Typr] Global shortcut registered successfully: {}", active_hotkey);
+                    if active_hotkey != initial_hotkey {
+                        let state = app.state::<AppState>();
+                        let mut settings = state.settings.lock().unwrap();
+                        settings.hotkey = active_hotkey.clone();
+                        if let Err(e) = settings.save(&state.app_dir) {
+                            eprintln!("[Typr] Failed to persist fallback hotkey: {}", e);
+                        } else {
+                            println!("[Typr] Saved fallback hotkey: {}", active_hotkey);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("[Typr] ERROR: No available global shortcut could be registered.");
+                    app.handle().exit(1);
+                }
             }
 
             Ok(())

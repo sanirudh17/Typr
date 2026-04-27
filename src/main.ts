@@ -251,7 +251,7 @@ async function loadHistory() {
     } else if (date.toDateString() === yesterday.toDateString()) {
       groupKey = "Yesterday";
     } else {
-      groupKey = date.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+      groupKey = date.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
     }
     
     if (!groups.has(groupKey)) {
@@ -262,7 +262,7 @@ async function loadHistory() {
 
   for (const [groupName, items] of groups.entries()) {
     const header = document.createElement("div");
-    header.style.cssText = "font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-tertiary); margin: 16px 0 4px 4px;";
+    header.style.cssText = "font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text); margin: 16px 0 6px 4px;";
     header.textContent = groupName;
     transcriptionFeed.appendChild(header);
 

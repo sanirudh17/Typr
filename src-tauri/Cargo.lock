@@ -4941,6 +4941,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-shell",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

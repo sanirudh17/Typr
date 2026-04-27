@@ -1,6 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
@@ -42,16 +43,19 @@ pub struct AudioRecorder {
     source_channels: u16,
     amplitude_ring: Arc<Mutex<Vec<f32>>>,
     amplitude_index: Arc<Mutex<usize>>,
-    fft_planner: Arc<Mutex<FftPlanner<f32>>>,
+    fft: StdArc<dyn Fft<f32>>,
     fft_buffer: Arc<Mutex<Vec<Complex<f32>>>>,
     frequency_bands: Arc<Mutex<Vec<f32>>>,
+    fft_callback_divider: Arc<Mutex<u8>>,
 }
 
 impl AudioRecorder {
     pub fn new() -> Self {
-        let fft_size = 512;
+        let fft_size = 4096;
         let mut fft_buffer = Vec::with_capacity(fft_size);
         fft_buffer.resize(fft_size, Complex::new(0.0, 0.0));
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
         
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
@@ -60,9 +64,10 @@ impl AudioRecorder {
             source_channels: 1,
             amplitude_ring: Arc::new(Mutex::new(vec![0.0; 64])),
             amplitude_index: Arc::new(Mutex::new(0)),
-            fft_planner: Arc::new(Mutex::new(FftPlanner::new())),
+            fft,
             fft_buffer: Arc::new(Mutex::new(fft_buffer)),
             frequency_bands: Arc::new(Mutex::new(vec![0.0; 16])),
+            fft_callback_divider: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -125,9 +130,10 @@ impl AudioRecorder {
         let samples = self.samples.clone();
         let amplitude_ring = self.amplitude_ring.clone();
         let amplitude_index = self.amplitude_index.clone();
-        let fft_planner = self.fft_planner.clone();
+        let fft = self.fft.clone();
         let fft_buffer = self.fft_buffer.clone();
         let frequency_bands = self.frequency_bands.clone();
+        let fft_callback_divider = self.fft_callback_divider.clone();
         
         let stream = device
             .build_input_stream(
@@ -146,15 +152,14 @@ impl AudioRecorder {
                     
                     let fft_size = 4096;
                     let buf_len = buf.len();
-                    if buf_len >= fft_size {
-                        let mut planner = fft_planner.lock().unwrap();
-                        let fft = planner.plan_fft_forward(fft_size);
-                        
+                    let should_update_fft = {
+                        let mut divider = fft_callback_divider.lock().unwrap();
+                        *divider = (*divider + 1) % 4;
+                        *divider == 0
+                    };
+
+                    if should_update_fft && buf_len >= fft_size {
                         let mut buffer = fft_buffer.lock().unwrap();
-                        if buffer.len() != fft_size {
-                            buffer.resize(fft_size, Complex::new(0.0, 0.0));
-                        }
-                        
                         let window_start = buf_len - fft_size;
                         for i in 0..fft_size {
                             let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (fft_size - 1) as f32).cos());
