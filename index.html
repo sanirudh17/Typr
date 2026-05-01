@@ -55,6 +55,14 @@
             </svg>
             Recording
           </a>
+          <a class="nav-item" data-section="dictionary">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M3 2.5h8.5a1 1 0 011 1v9a1 1 0 01-1 1H3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 2.5v11M3 11h8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              <path d="M6 6h4M6 8.5h2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Dictionary
+          </a>
         </nav>
         <div class="sidebar-footer">
           <span class="version-text">v0.1.0</span>
@@ -188,6 +196,34 @@
               </div>
               <div class="setting-control">
                 <kbd id="hotkey-text">Cmd+Shift+D</kbd>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-dictionary" class="content-section">
+          <div class="section-header">
+            <h2 class="section-title">Dictionary</h2>
+            <p class="section-desc">Add words or names the AI frequently gets wrong. Providing them as context helps it spell them correctly.</p>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+              <div class="setting-label" style="margin-bottom: 0;">
+                <span class="label-text" style="font-size: 14px; font-weight: 600;">Add Word</span>
+                <span class="label-hint">Enter a specific word, name, or acronym</span>
+              </div>
+              <div class="dict-add-row">
+                <input type="text" id="dict-word" class="dict-input" placeholder="e.g. Tauri" />
+                <button id="dict-add-btn" class="btn-primary">Add</button>
+              </div>
+            </div>
+            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+              <div class="setting-label" style="margin-bottom: 0;">
+                <span class="label-text" style="font-size: 14px; font-weight: 600;">Dictionary List</span>
+                <span class="label-hint">These words are passed as context to the transcription engine</span>
+              </div>
+              <div id="dictionary-list" style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+                <!-- Dictionary entries injected via JS -->
               </div>
             </div>
           </div>

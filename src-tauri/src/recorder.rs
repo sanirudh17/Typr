@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
 use crate::cleanup::cleanup_text;
+use crate::dictionary::Dictionary;
 use crate::paste::paste_text;
 use crate::settings::Settings;
 use crate::transcribe_local;
@@ -87,6 +88,7 @@ impl Recorder {
         app: &AppHandle,
         settings: &Settings,
         history: &std::sync::Mutex<crate::history::History>,
+        dictionary: &std::sync::Mutex<Dictionary>,
         app_dir: &PathBuf,
     ) -> Result<String, String> {
         let transcription_started_at = Instant::now();
@@ -127,13 +129,18 @@ impl Recorder {
         );
 
         // Transcribe
+        let prompt = {
+            let dict = dictionary.lock().unwrap();
+            dict.get_prompt()
+        };
+
         let transcribe_result = match settings.engine.as_str() {
             "local" => {
                 let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
-                transcribe_local::transcribe_local(app, &model_path, &temp_path).await
+                transcribe_local::transcribe_local(app, &model_path, &temp_path, &prompt).await
             }
             "cloud" => {
-                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path).await
+                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt).await
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };

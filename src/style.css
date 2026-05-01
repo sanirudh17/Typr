@@ -496,3 +496,155 @@ kbd {
   background: var(--accent-subtle);
   color: var(--text);
 }
+
+/* ── Nav Badge ─────────────────────────────────────── */
+
+.nav-badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 9px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  padding: 0 5px;
+}
+
+.nav-badge:empty,
+.nav-badge[data-count="0"] {
+  display: none;
+}
+
+/* ── Dictionary ────────────────────────────────────── */
+
+.dict-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dict-input {
+  flex: 1;
+  padding: 7px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.dict-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.dict-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.dict-arrow {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.dict-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  transition: background var(--transition);
+}
+
+.dict-entry:hover {
+  background: var(--surface-hover);
+}
+
+.dict-entry-word {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+  flex: 1;
+}
+
+.dict-entry-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.dict-entry:hover .dict-entry-actions {
+  opacity: 1;
+}
+
+.dict-btn {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.dict-btn-edit {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.dict-btn-edit:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.dict-btn-delete {
+  background: rgba(229, 72, 77, 0.1);
+  color: var(--red);
+}
+
+.dict-btn-delete:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* Dictionary edit mode inputs */
+.dict-edit-input {
+  flex: 1;
+  padding: 4px 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 12px;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.dict-btn-save {
+  background: var(--green);
+  color: #fff;
+}
+
+.dict-btn-save:hover {
+  opacity: 0.85;
+}
+
+.dict-btn-cancel {
+  background: var(--surface-active);
+  color: var(--text-secondary);
+}
+
+.dict-btn-cancel:hover {
+  color: var(--text);
+}

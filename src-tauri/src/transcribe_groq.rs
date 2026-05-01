@@ -8,7 +8,7 @@ fn groq_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf) -> Result<String, String> {
+pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("Groq API key not set. Please enter your API key in settings.".to_string());
     }
@@ -23,11 +23,15 @@ pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf) -> Result<Stri
         .mime_str("audio/wav")
         .map_err(|e| e.to_string())?;
 
-    let form = multipart::Form::new()
+    let mut form = multipart::Form::new()
         .text("model", "whisper-large-v3-turbo")
         .text("language", "en")
         .text("response_format", "json")
         .part("file", file_part);
+
+    if !prompt.is_empty() {
+        form = form.text("prompt", prompt.to_string());
+    }
 
     let response = groq_client()
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
@@ -68,7 +72,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_api_key() {
         let path = PathBuf::from("/tmp/test.wav");
-        let result = transcribe_groq("", &path).await;
+        let result = transcribe_groq("", &path, "").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("API key not set"));
     }

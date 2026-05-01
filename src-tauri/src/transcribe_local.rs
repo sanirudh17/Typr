@@ -7,14 +7,20 @@ pub async fn transcribe_local(
     app: &AppHandle,
     model_path: &PathBuf,
     audio_path: &PathBuf,
+    prompt: &str,
 ) -> Result<String, String> {
     if !model_path.exists() {
         return Err("Whisper model not found. Please download a model first.".to_string());
     }
 
     let threads = std::thread::available_parallelism()
-        .map(|count| count.get().max(1).to_string())
-        .unwrap_or_else(|_| "4".to_string());
+        .map(|count| {
+            // Whisper.cpp is highly memory bandwidth bound on consumer CPUs.
+            // User requested testing with exactly 8 threads. (Bypassing physical core check)
+            let optimal_threads = count.get().min(8);
+            optimal_threads.to_string()
+        })
+        .unwrap_or_else(|_| "8".to_string());
     let started_at = Instant::now();
 
     println!(
@@ -26,24 +32,34 @@ pub async fn transcribe_local(
     let current_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
 
+    let mut cmd_args = vec![
+        "-m".to_string(),
+        model_path.to_str().unwrap().to_string(),
+        "-f".to_string(),
+        audio_path.to_str().unwrap().to_string(),
+        "--no-timestamps".to_string(),
+        "-t".to_string(),
+        threads.clone(),
+        "-bs".to_string(),
+        "1".to_string(),
+        "-mc".to_string(),
+        "0".to_string(),
+        "-nf".to_string(),
+        "-l".to_string(),
+        "en".to_string(),
+    ];
+
+    if !prompt.is_empty() {
+        cmd_args.push("--prompt".to_string());
+        cmd_args.push(prompt.to_string());
+    }
+
     let output = app
         .shell()
         .sidecar("whisper-cpp")
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?
         .env("PATH", new_path)
-        .args([
-            "-m",
-            model_path.to_str().unwrap(),
-            "-f",
-            audio_path.to_str().unwrap(),
-            "--no-timestamps",
-            "-t",
-            &threads,
-            "-bs",
-            "8",
-            "-l",
-            "en",
-        ])
+        .args(cmd_args)
         .output()
         .await
         .map_err(|e| format!("Failed to run whisper.cpp: {}", e))?;

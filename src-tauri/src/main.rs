@@ -10,6 +10,7 @@ use typr_lib::downloader;
 use typr_lib::recorder::{Recorder, RecordingState};
 use typr_lib::settings::Settings;
 use typr_lib::transcribe_local;
+use typr_lib::dictionary::Dictionary;
 
 use typr_lib::history::History;
 
@@ -22,6 +23,7 @@ struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
     history: Mutex<History>,
+    dictionary: Mutex<Dictionary>,
     app_dir: PathBuf,
 }
 
@@ -109,6 +111,21 @@ fn save_settings(state: State<AppState>, settings: Settings) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn get_dictionary(state: State<AppState>) -> Dictionary {
+    state.dictionary.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn add_dictionary_word(state: State<AppState>, word: String) -> Result<(), String> {
+    state.dictionary.lock().unwrap().add_word(word, &state.app_dir)
+}
+
+#[tauri::command]
+fn remove_dictionary_word(state: State<AppState>, index: usize) -> Result<(), String> {
+    state.dictionary.lock().unwrap().remove_word(index, &state.app_dir)
+}
+
+#[tauri::command]
 fn list_microphones() -> Vec<audio::MicDevice> {
     audio::list_microphones()
 }
@@ -170,7 +187,7 @@ async fn do_toggle_recording(
             let settings = state.settings.lock().unwrap().clone();
             let result = state
                 .recorder
-                .stop_and_transcribe(app, &settings, &state.history, &state.app_dir)
+                .stop_and_transcribe(app, &settings, &state.history, &state.dictionary, &state.app_dir)
                 .await?;
             Ok(result)
         }
@@ -194,6 +211,7 @@ fn main() {
     let app_dir = get_app_dir();
     let settings = Settings::load(&app_dir);
     let history = History::load(&app_dir);
+    let dictionary = Dictionary::load(&app_dir);
     let initial_hotkey = settings.hotkey.clone();
 
     tauri::Builder::default()
@@ -203,6 +221,7 @@ fn main() {
             recorder: Recorder::new(),
             settings: Mutex::new(settings),
             history: Mutex::new(history),
+            dictionary: Mutex::new(dictionary),
             app_dir,
         })
         .invoke_handler(tauri::generate_handler![
@@ -216,6 +235,9 @@ fn main() {
             download_model,
             toggle_recording,
             get_history,
+            get_dictionary,
+            add_dictionary_word,
+            remove_dictionary_word,
         ])
         .setup(move |app| {
             // Handle window close to properly exit the app
@@ -305,6 +327,7 @@ fn main() {
                                         &rx_handle,
                                         &settings,
                                         &state.history,
+                                        &state.dictionary,
                                         &state.app_dir,
                                     ).await {
                                         Ok(result) => println!("[Typr] Transcription: {}", result),

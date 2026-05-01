@@ -135,10 +135,37 @@
         try {
           const bands = await invoke("get_frequency_bands");
           
-          // Map 16 frequency bands to 16 visual bars
+          // Calculate overall volume amplitude for unison movement
+          let amplitude = 0;
+          for (let i = 0; i < 8; i++) {
+            if (bands[i] > amplitude) amplitude = bands[i];
+          }
+          
+          // Apply a rippling bell-curve that also reacts to specific pitches
           let levels = new Array(NUM_BARS).fill(0);
+          const time = Date.now() / 200;
           for (let i = 0; i < NUM_BARS; i++) {
-            levels[i] = bands[i] || 0;
+            // Symmetrical frequency mapping: low pitches in center (index 0), high pitches on edges (index 7)
+            let freqIndex = i < 8 ? 7 - i : i - 8;
+            
+            // Artificially boost higher frequencies since they naturally have much lower energy in human speech
+            let rawPitch = bands[freqIndex] || 0;
+            let localPitch = Math.min(1.0, rawPitch * (1 + freqIndex * 0.5));
+            
+            // Blend global amplitude (unison) with local pitch (distinction)
+            let activeVal = (amplitude * 0.3) + (localPitch * 0.7);
+            
+            // Enforce a subtle bell curve so it remains cohesive and pill-like
+            // Relaxed to 0.6 at the edges so high frequencies can prominently flare up
+            let bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
+            let shape = 0.6 + 0.4 * bell;
+            
+            // Left-to-right traveling ripple for premium fluidity
+            let ripple = Math.sin(i * 0.6 - time);
+            let normalizedRipple = (ripple + 1) / 2;
+            
+            // Combine them all
+            levels[i] = activeVal * shape * (0.7 + 0.3 * normalizedRipple);
           }
           
           updateVisuals(levels);

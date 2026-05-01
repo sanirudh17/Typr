@@ -88,6 +88,7 @@ let currentSettings: Settings;
 async function loadSettings() {
   currentSettings = await invoke<Settings>("get_settings");
   await loadHistory();
+  await loadDictionary();
 
   // Populate mic dropdown
   const mics = await invoke<MicDevice[]>("list_microphones");
@@ -307,6 +308,68 @@ async function loadHistory() {
   const wpm = totalDuration > 0 ? Math.round((totalChars / 5) / (totalDuration / 60)) : 0;
   statWpm.textContent = wpm.toString();
 }
+
+// ── Custom Vocabulary ───────────────────────────────────
+
+interface DictionaryData {
+  words: string[];
+}
+
+const dictWordInput = document.getElementById("dict-word") as HTMLInputElement;
+const dictAddBtn = document.getElementById("dict-add-btn")!;
+const dictionaryList = document.getElementById("dictionary-list")!;
+
+async function loadDictionary() {
+  const data = await invoke<DictionaryData>("get_dictionary");
+  const words = data.words;
+
+  // Render entries
+  dictionaryList.innerHTML = "";
+
+  if (words.length === 0) {
+    dictionaryList.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No dictionary words added yet.</div>';
+    return;
+  }
+
+  words.forEach((word, index) => {
+    const row = document.createElement("div");
+    row.className = "dict-entry";
+
+    const wordSpan = document.createElement("span");
+    wordSpan.className = "dict-entry-word";
+    wordSpan.textContent = word;
+
+    const actions = document.createElement("div");
+    actions.className = "dict-entry-actions";
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "dict-btn dict-btn-delete";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.onclick = async () => {
+      await invoke("remove_dictionary_word", { index });
+      loadDictionary();
+    };
+
+    actions.appendChild(deleteBtn);
+
+    row.appendChild(wordSpan);
+    row.appendChild(actions);
+    dictionaryList.appendChild(row);
+  });
+}
+
+dictAddBtn.addEventListener("click", async () => {
+  const word = dictWordInput.value.trim();
+  if (!word) return;
+  await invoke("add_dictionary_word", { word });
+  dictWordInput.value = "";
+  loadDictionary();
+});
+
+// Allow Enter key to add entries
+dictWordInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") dictAddBtn.click();
+});
 
 // Initialize
 loadSettings();
