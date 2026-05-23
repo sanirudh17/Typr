@@ -11,17 +11,27 @@ pub fn cleanup_text(text: &str) -> String {
         .join(" ");
 
     // Capitalize first letter of each sentence
+    let mut chars = normalized.chars().peekable();
     let mut result = String::new();
     let mut capitalize_next = true;
 
-    for ch in normalized.chars() {
+    while let Some(ch) = chars.next() {
         if capitalize_next && ch.is_alphabetic() {
             result.extend(ch.to_uppercase());
             capitalize_next = false;
         } else {
             result.push(ch);
             if ch == '.' || ch == '!' || ch == '?' {
-                capitalize_next = true;
+                // Peek at the next character. We only trigger sentence capitalization
+                // if the punctuation is followed by a space/whitespace or is at the end of the string.
+                // This prevents capitalized letters inside emails (e.g. gmail.com), numbers (e.g. 3.5), or file extensions (e.g. .exe).
+                if let Some(&next_ch) = chars.peek() {
+                    if next_ch.is_whitespace() {
+                        capitalize_next = true;
+                    }
+                } else {
+                    capitalize_next = true;
+                }
             }
         }
     }
@@ -91,5 +101,21 @@ mod tests {
     #[test]
     fn test_already_clean() {
         assert_eq!(cleanup_text("Hello world."), "Hello world.");
+    }
+
+    #[test]
+    fn test_do_not_capitalize_emails_or_numbers() {
+        assert_eq!(
+            cleanup_text("please contact me@domain.com for info."),
+            "Please contact me@domain.com for info."
+        );
+        assert_eq!(
+            cleanup_text("the version is 1.2.3 and is stable."),
+            "The version is 1.2.3 and is stable."
+        );
+        assert_eq!(
+            cleanup_text("file saved as a .exe file."),
+            "File saved as a .exe file."
+        );
     }
 }

@@ -59,7 +59,7 @@
         width: 2px;
         background: linear-gradient(to top, #4a5bc7, #7b8aed);
         border-radius: 1px;
-        transition: height 0.04s ease-out;
+        transition: none; /* Crucial: remove CSS transition to prevent conflicts with JS requestAnimationFrame! */
       }
 
       .spinner {
@@ -106,69 +106,118 @@
       const bars = waveform.querySelectorAll(".wave-bar");
 
       const NUM_BARS = bars.length;
-      const smoothing = 0.4;
       let currentLevels = new Array(NUM_BARS).fill(0);
-      let animationId = null;
+      let targetLevels = new Array(NUM_BARS).fill(0);
       let isRunning = false;
+      let animationId = null;
       let pollInterval = null;
+      
+      let currentPitchFactor = 0.3;  // Smooth pitch parameter
+      let pitchFactorTarget = 0.3;   // Target pitch parameter based on voice frequencies
 
       function lerp(a, b, t) {
         return a + (b - a) * t;
       }
 
-      function updateVisuals(levels) {
+      // Single render loop running at screen's frame rate
+      function renderLoop() {
+        if (!isRunning) return;
+
         const maxH = 16;
         const minH = 2;
+        
+        // Smooth the pitch factor transitions
+        currentPitchFactor = lerp(currentPitchFactor, pitchFactorTarget, 0.08);
+
+        // Dynamic rise/decay rates reacting to pitch factor
+        // High pitch = fast response and rapid shivering/snappy decay
+        // Low pitch = smooth response and lingering, heavy swells
+        const riseRate = 0.20 + currentPitchFactor * 0.15;   // Ranges 0.20 to 0.35
+        const decayRate = 0.08 + currentPitchFactor * 0.12;  // Ranges 0.08 to 0.20
 
         for (let i = 0; i < NUM_BARS; i++) {
-          currentLevels[i] = lerp(currentLevels[i], levels[i], smoothing);
+          const t = targetLevels[i];
+          const c = currentLevels[i];
+          
+          const lerpFactor = t > c ? riseRate : decayRate;
+          currentLevels[i] = lerp(c, t, lerpFactor);
+          
           const h = minH + (maxH - minH) * currentLevels[i];
           bars[i].style.height = `${h}px`;
         }
 
-        if (isRunning) {
-          animationId = requestAnimationFrame(() => updateVisuals(levels));
-        }
+        animationId = requestAnimationFrame(renderLoop);
       }
 
       async function pollFrequency() {
         try {
           const bands = await invoke("get_frequency_bands");
           
-          // Calculate overall volume amplitude for unison movement
+          // Calculate overall volume amplitude over all 16 bands
           let amplitude = 0;
-          for (let i = 0; i < 8; i++) {
+          for (let i = 0; i < 16; i++) {
             if (bands[i] > amplitude) amplitude = bands[i];
           }
           
-          // Apply a rippling bell-curve that also reacts to specific pitches
-          let levels = new Array(NUM_BARS).fill(0);
-          const time = Date.now() / 200;
-          for (let i = 0; i < NUM_BARS; i++) {
-            // Symmetrical frequency mapping: low pitches in center (index 0), high pitches on edges (index 7)
-            let freqIndex = i < 8 ? 7 - i : i - 8;
-            
-            // Artificially boost higher frequencies since they naturally have much lower energy in human speech
-            let rawPitch = bands[freqIndex] || 0;
-            let localPitch = Math.min(1.0, rawPitch * (1 + freqIndex * 0.5));
-            
-            // Blend global amplitude (unison) with local pitch (distinction)
-            let activeVal = (amplitude * 0.3) + (localPitch * 0.7);
-            
-            // Enforce a subtle bell curve so it remains cohesive and pill-like
-            // Relaxed to 0.6 at the edges so high frequencies can prominently flare up
-            let bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
-            let shape = 0.6 + 0.4 * bell;
-            
-            // Left-to-right traveling ripple for premium fluidity
-            let ripple = Math.sin(i * 0.6 - time);
-            let normalizedRipple = (ripple + 1) / 2;
-            
-            // Combine them all
-            levels[i] = activeVal * shape * (0.7 + 0.3 * normalizedRipple);
+          // Amplify human voice standard ranges to keep it highly active
+          amplitude = Math.min(1.0, amplitude * 2.0);
+          
+          // Calculate spectral centroid as an indicator of pitch across all 16 bands
+          let sumAmplitudes = 0;
+          let weightedSum = 0;
+          for (let j = 0; j < 16; j++) {
+            let amp = bands[j] || 0;
+            sumAmplitudes += amp;
+            weightedSum += amp * j;
           }
           
-          updateVisuals(levels);
+          // Smoothly map centroid value to pitch factor from 0.05 (deep) to 1.0 (squeaky)
+          if (sumAmplitudes > 0.03) {
+            pitchFactorTarget = 0.05 + 0.95 * (weightedSum / sumAmplitudes / 15.0);
+          } else {
+            pitchFactorTarget = 0.3;
+          }
+          
+          // Determine animation variables reacting directly to pitch with wider differentiation
+          const time = Date.now() / 200;
+          const rippleSpeed = 0.3 + currentPitchFactor * 2.2;      // High pitch = faster, energetic traveling waves
+          const rippleFrequency = 0.35 + currentPitchFactor * 0.75;  // High pitch = shivering, low pitch = heavy swells
+          const heightMultiplier = 0.65 + currentPitchFactor * 1.1; // High pitch = tall waves, low pitch = heavy waves
+
+          let levels = new Array(NUM_BARS).fill(0);
+          for (let i = 0; i < NUM_BARS; i++) {
+            // Symmetrical bell curve (1.0 at center, 0.0 at outer edges)
+            let bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
+            
+            // Balanced bell shape giving the ends exactly enough space to move (moves between 2px and ~5px)
+            // while maintaining a premium, tapered curve towards the proud middle peak
+            let shape = 0.18 + 0.82 * Math.pow(bell, 2.2);
+            
+            // Distance from center: 0.0 at absolute center, 1.0 at the outer boundaries
+            let distanceFromCenter = Math.abs(i - (NUM_BARS - 1) / 2) / ((NUM_BARS - 1) / 2);
+            
+            // Symmetrical frequency mapping:
+            // Center (distance = 0) -> maps to index 2 (100Hz - rich human voice fundamental bass)
+            // Ends (distance = 1) -> maps to index 13 (397Hz - higher sibilants, naturally much quieter in voice)
+            let freqIndex = 2 + Math.round(distanceFromCenter * 11);
+            
+            let rawPitch = bands[freqIndex] || 0;
+            // Scale rich voice bands to highlight voice peaks
+            let localPitch = rawPitch * 1.6;
+            
+            // Blend global amplitude (power) with local pitch distinction (dynamics)
+            // Sightly higher global blend ensures ends dance in sync with speech rhythm even if quiet
+            let activeVal = (amplitude * 0.45) + (localPitch * 0.55);
+            
+            // Traveling ripple sine wave
+            let ripple = Math.sin(i * rippleFrequency - time * rippleSpeed);
+            let normalizedRipple = (ripple + 1) / 2;
+            
+            // Calculate individual bar level with tapering
+            levels[i] = Math.min(1.0, activeVal * shape * (0.6 + 0.4 * normalizedRipple) * heightMultiplier);
+          }
+          
+          targetLevels = levels;
         } catch (e) {
           console.error("freq error:", e);
         }
@@ -193,9 +242,14 @@
           spinner.style.display = "none";
           
           currentLevels = new Array(NUM_BARS).fill(0);
+          targetLevels = new Array(NUM_BARS).fill(0);
+          currentPitchFactor = 0.3;
+          pitchFactorTarget = 0.3;
+          
           isRunning = true;
+          renderLoop();
           pollFrequency();
-          pollInterval = setInterval(pollFrequency, 20);
+          pollInterval = setInterval(pollFrequency, 25); // Poll at 40fps (~25ms)
         } else if (state === "processing") {
           pill.classList.add("processing");
           waveform.style.display = "none";

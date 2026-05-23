@@ -32,7 +32,9 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/whisper-cpp"
+      "binaries/whisper-cpp",
+      "binaries/whisper-cpp-cuda",
+      "binaries/whisper-server-cuda"
     ],
     "icon": [
       "icons/32x32.png",

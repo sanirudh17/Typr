@@ -8,6 +8,7 @@ pub mod recorder;
 pub mod downloader;
 pub mod history;
 pub mod dictionary;
+pub mod whisper_server;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

@@ -56,11 +56,6 @@ impl History {
         
         self.items.insert(0, item);
         
-        // Keep max 100 items to avoid large files
-        if self.items.len() > 100 {
-            self.items.truncate(100);
-        }
-        
         self.save(app_dir)
     }
 }

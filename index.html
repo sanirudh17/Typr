@@ -16,14 +16,24 @@
       <aside id="sidebar">
         <div class="sidebar-header">
           <div class="app-identity">
-            <svg class="app-icon" width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <rect width="18" height="18" rx="4" fill="currentColor" opacity="0.15"/>
-              <path d="M5 6.5h8M5 9h5.5M5 11.5h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <svg class="app-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="loop-left" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#FF9F43" />
+                  <stop offset="100%" stop-color="#FF5252" />
+                </linearGradient>
+                <linearGradient id="loop-right" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#00D2FC" />
+                  <stop offset="100%" stop-color="#4FACFE" />
+                </linearGradient>
+              </defs>
+              <path d="M12 12C9.5 9 7.5 7.5 5 7.5C2.5 7.5 1 9.5 1 12C1 14.5 2.5 16.5 5 16.5C7.5 16.5 9.5 15 12 12" stroke="url(#loop-left)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M12 12C14.5 15 16.5 16.5 19 16.5C21.5 16.5 23 14.5 23 12C23 9.5 21.5 7.5 19 7.5C16.5 7.5 14.5 9 12 12" stroke="url(#loop-right)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             <span class="app-name">Typr</span>
           </div>
-          <div id="status-indicator">
-            <span id="status-dot"></span>
+          <div id="status-indicator" class="ready">
+            <span id="status-dot" class="ready"></span>
             <span id="status-text">Ready</span>
           </div>
         </div>
@@ -75,32 +85,34 @@
             <h2 class="section-title">Home</h2>
             <p class="section-desc">Your transcription history and statistics</p>
           </div>
-          <div class="settings-list">
-            <div class="setting-row">
-              <div class="setting-label">
-                <span class="label-text">Total Transcribed</span>
-                <span class="label-hint">Aggregate statistics across all recordings</span>
-              </div>
-              <div class="setting-control" style="display: flex; gap: 24px; justify-content: flex-end;">
-                <div style="text-align: right;">
-                  <div style="font-size: 20px; font-weight: 600; color: var(--text);" id="stat-words">0</div>
-                  <div style="font-size: 12px; color: var(--text-secondary);">words</div>
-                </div>
-                <div style="text-align: right;">
-                  <div style="font-size: 20px; font-weight: 600; color: var(--text);" id="stat-wpm">0</div>
-                  <div style="font-size: 12px; color: var(--text-secondary);">wpm</div>
-                </div>
-              </div>
+          
+          <div class="dashboard-stats">
+            <div class="stat-card">
+              <span class="stat-label">Total Transcriptions</span>
+              <span class="stat-value" id="stat-count">0</span>
+              <span class="stat-hint">Recordings saved</span>
             </div>
+            <div class="stat-card">
+              <span class="stat-label">Total Words</span>
+              <span class="stat-value" id="stat-words">0</span>
+              <span class="stat-hint">Words transcribed</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Average Speed</span>
+              <span class="stat-value" id="stat-wpm">0</span>
+              <span class="stat-hint">Words per minute</span>
+            </div>
+          </div>
 
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 16px;">
+          <div class="history-container">
+            <div class="history-header">
               <div class="setting-label" style="margin-bottom: 0;">
                 <span class="label-text" style="font-size: 14px; font-weight: 600;">History</span>
                 <span class="label-hint">Recent transcriptions</span>
               </div>
-              <div id="transcription-feed" style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;">
-                <!-- Feed items injected via JS -->
-              </div>
+            </div>
+            <div id="transcription-feed">
+              <!-- Feed items injected via JS -->
             </div>
           </div>
         </section>
@@ -204,26 +216,94 @@
         <section id="section-dictionary" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Dictionary</h2>
-            <p class="section-desc">Add words or names the AI frequently gets wrong. Providing them as context helps it spell them correctly.</p>
+            <p class="section-desc">Manage spelling hints for the AI and post-processing text replacement shortcuts.</p>
           </div>
-          <div class="settings-list">
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 14px; font-weight: 600;">Add Word</span>
-                <span class="label-hint">Enter a specific word, name, or acronym</span>
+
+          <div class="dict-tabs">
+            <button id="dict-tab-hints" class="dict-tab-btn active" data-tab="hints">Spelling Hints</button>
+            <button id="dict-tab-replacements" class="dict-tab-btn" data-tab="replacements">Text Replacements</button>
+          </div>
+
+          <!-- Spelling Hints Panel -->
+          <div id="dict-panel-hints" class="dict-panel active">
+            <div class="info-card">
+              <div class="info-card-title">What are Spelling Hints?</div>
+              <div class="info-card-body">Use this to teach the transcription engine (Whisper) how to spell brand names, rare jargon, or specific names (e.g. <code>Tauri</code>, <code>Svelte</code>, <code>IBM Plex</code>). This acts as a statistical hint for the AI model during transcription.</div>
+            </div>
+            
+            <div class="settings-list">
+              <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                <div class="setting-label" style="margin-bottom: 0;">
+                  <span class="label-text" style="font-size: 13px; font-weight: 600;">Add Spelling Hint</span>
+                  <span class="label-hint">Enter a specific word, brand name, or rare term</span>
+                </div>
+                <div class="dict-add-row">
+                  <input type="text" id="dict-hint-word" class="dict-input" placeholder="e.g. Tauri" />
+                  <button id="dict-hint-add-btn" class="btn-primary">Add Hint</button>
+                </div>
               </div>
-              <div class="dict-add-row">
-                <input type="text" id="dict-word" class="dict-input" placeholder="e.g. Tauri" />
-                <button id="dict-add-btn" class="btn-primary">Add</button>
+              <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                <div class="setting-label" style="margin-bottom: 0;">
+                  <span class="label-text" style="font-size: 13px; font-weight: 600;">Active Hints</span>
+                  <span class="label-hint">These terms are sent directly to the AI model's context prompt.</span>
+                </div>
+                <div id="dict-hints-list" class="dict-list-container">
+                  <!-- Injected via JS -->
+                </div>
               </div>
             </div>
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 14px; font-weight: 600;">Dictionary List</span>
-                <span class="label-hint">These words are passed as context to the transcription engine</span>
+          </div>
+
+          <!-- Text Replacements Panel -->
+          <div id="dict-panel-replacements" class="dict-panel">
+            <div class="info-card">
+              <div class="info-card-title">What are Text Replacements?</div>
+              <div class="info-card-body">Strict post-processing rules. Whenever the transcribed text contains the <b>Find</b> phrase (as a separate word), it is replaced by the <b>Replace With</b> text. Excellent for fixing consistent AI spelling errors (e.g. <code>tory</code> &rarr; <code>Tauri</code>) or creating text shortcut expansions (e.g. <code>brb</code> &rarr; <code>be right back</code>, <code>my email</code> &rarr; <code>user@example.com</code>). Non-alphanumeric shortcuts (like <code>:)</code> &rarr; <code>😊</code>) work too!</div>
+            </div>
+
+            <div class="settings-list">
+              <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 16px;">
+                <div class="setting-label" style="margin-bottom: 0;">
+                  <span class="label-text" style="font-size: 13px; font-weight: 600;">Add Text Replacement</span>
+                  <span class="label-hint">Enter the word/shortcut to find and what to replace it with</span>
+                </div>
+                <div class="replacement-add-grid">
+                  <div class="input-group">
+                    <label for="replace-find">Find / Shortcut</label>
+                    <input type="text" id="replace-find" class="dict-input" placeholder="e.g. brb or tory" />
+                  </div>
+                  <div class="input-group">
+                    <label for="replace-with">Replace With</label>
+                    <input type="text" id="replace-with" class="dict-input" placeholder="e.g. be right back or Tauri" />
+                  </div>
+                  <div class="checkbox-group">
+                    <label class="checkbox-container">
+                      <input type="checkbox" id="replace-case" />
+                      <span class="checkbox-label">Case Sensitive</span>
+                    </label>
+                  </div>
+                  <button id="replace-add-btn" class="btn-primary">Add Rule</button>
+                </div>
               </div>
-              <div id="dictionary-list" style="background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
-                <!-- Dictionary entries injected via JS -->
+
+              <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                <div class="setting-label" style="margin-bottom: 0;">
+                  <span class="label-text" style="font-size: 13px; font-weight: 600;">Active Replacement Rules</span>
+                  <span class="label-hint">Rules are executed instantly after transcription in the order defined below.</span>
+                </div>
+                
+                <div id="dict-replacements-table" class="replacements-table-container">
+                  <div class="replacements-table-header">
+                    <div class="col-find">Find</div>
+                    <div class="col-arrow"></div>
+                    <div class="col-replace">Replace With</div>
+                    <div class="col-opts">Settings</div>
+                    <div class="col-action"></div>
+                  </div>
+                  <div id="dict-replacements-list" class="replacements-table-body">
+                    <!-- Injected via JS -->
+                  </div>
+                </div>
               </div>
             </div>
           </div>

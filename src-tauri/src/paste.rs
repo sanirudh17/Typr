@@ -3,8 +3,8 @@ pub fn paste_text(text: &str) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clipboard.set_text(text).map_err(|e| e.to_string())?;
 
-    // Small delay to ensure clipboard is set
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Increased delay to ensure clipboard is fully propagated on Windows/macOS before pasting (150ms)
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     // Simulate Cmd+V via osascript (works from any thread, unlike enigo which
     // calls TSMGetInputSourceProperty requiring the main thread)
@@ -20,8 +20,20 @@ pub fn paste_text(text: &str) -> Result<(), String> {
     {
         use enigo::{Enigo, Keyboard, Settings, Key, Direction};
         let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+        
+        // Press Control
         enigo.key(Key::Control, Direction::Press).map_err(|e| e.to_string())?;
-        enigo.key(Key::V, Direction::Click).map_err(|e| e.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        
+        // Press V
+        enigo.key(Key::V, Direction::Press).map_err(|e| e.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        
+        // Release V
+        enigo.key(Key::V, Direction::Release).map_err(|e| e.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        
+        // Release Control
         enigo.key(Key::Control, Direction::Release).map_err(|e| e.to_string())?;
     }
 

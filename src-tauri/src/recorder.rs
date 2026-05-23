@@ -34,6 +34,7 @@ fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) {
     }
 }
 
+#[derive(Clone)]
 pub struct Recorder {
     state: Arc<Mutex<RecordingState>>,
     audio_recorder: Arc<Mutex<AudioRecorder>>,
@@ -45,6 +46,11 @@ impl Recorder {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
         }
+    }
+
+    pub fn pre_initialize(&self, mic_name: &str) -> Result<(), String> {
+        let mut recorder = self.audio_recorder.lock().unwrap();
+        recorder.ensure_initialized(mic_name)
     }
 
     pub fn get_state(&self) -> RecordingState {
@@ -158,8 +164,14 @@ impl Recorder {
 
         let raw_text = transcribe_result?;
 
+        // Apply dictionary replacements
+        let replaced = {
+            let dict = dictionary.lock().unwrap();
+            dict.apply_replacements(&raw_text)
+        };
+
         // Clean up text
-        let cleaned = cleanup_text(&raw_text);
+        let cleaned = cleanup_text(&replaced);
 
         // Auto-paste and record history
         if !cleaned.is_empty() {

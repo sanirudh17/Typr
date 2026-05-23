@@ -104,9 +104,51 @@ fn get_history(state: State<AppState>) -> History {
 }
 
 #[tauri::command]
-fn save_settings(state: State<AppState>, settings: Settings) -> Result<(), String> {
+async fn save_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<(), String> {
+    let old_settings = state.settings.lock().unwrap().clone();
+    let mic_changed = old_settings.microphone != settings.microphone;
+    let engine_changed = old_settings.engine != settings.engine;
+    let model_changed = old_settings.whisper_model != settings.whisper_model;
+
     settings.save(&state.app_dir)?;
-    *state.settings.lock().unwrap() = settings;
+    *state.settings.lock().unwrap() = settings.clone();
+
+    if mic_changed {
+        let recorder = state.recorder.clone();
+        let mic = settings.microphone.clone();
+        tauri::async_runtime::spawn(async move {
+            println!("[Typr] Re-initializing audio stream in background for new mic: {}", mic);
+            if let Err(e) = recorder.pre_initialize(&mic) {
+                eprintln!("[Typr] Failed to pre-initialize new mic: {}", e);
+            }
+        });
+    }
+
+    // Handle on-demand server management
+    let app_clone = app.clone();
+    let app_dir_clone = state.app_dir.clone();
+    let settings_clone = settings.clone();
+    tauri::async_runtime::spawn(async move {
+        if settings_clone.engine == "local" {
+            // Start/restart if switched from cloud, or if model changed
+            if engine_changed || model_changed {
+                let model_path = app_dir_clone.join(transcribe_local::model_filename(&settings_clone.whisper_model));
+                println!("[Typr] On-demand engine/model change: ensuring Whisper server is running with {:?}", model_path);
+                if let Err(e) = typr_lib::whisper_server::ensure_running(&app_clone, &model_path).await {
+                    eprintln!("[Typr] Failed to start local Whisper HTTP server: {}", e);
+                }
+            }
+        } else if old_settings.engine == "local" && settings_clone.engine == "cloud" {
+            // Switched from local to cloud: stop the server immediately to free VRAM
+            println!("[Typr] Switching to Cloud mode: stopping Whisper HTTP server to free VRAM...");
+            typr_lib::whisper_server::stop_server().await;
+        }
+    });
+
     Ok(())
 }
 
@@ -123,6 +165,31 @@ fn add_dictionary_word(state: State<AppState>, word: String) -> Result<(), Strin
 #[tauri::command]
 fn remove_dictionary_word(state: State<AppState>, index: usize) -> Result<(), String> {
     state.dictionary.lock().unwrap().remove_word(index, &state.app_dir)
+}
+
+#[tauri::command]
+fn add_vocabulary_hint(state: State<AppState>, word: String) -> Result<(), String> {
+    state.dictionary.lock().unwrap().add_vocabulary_hint(word, &state.app_dir)
+}
+
+#[tauri::command]
+fn remove_vocabulary_hint(state: State<AppState>, index: usize) -> Result<(), String> {
+    state.dictionary.lock().unwrap().remove_vocabulary_hint(index, &state.app_dir)
+}
+
+#[tauri::command]
+fn add_replacement(
+    state: State<AppState>,
+    find: String,
+    replace: String,
+    case_sensitive: bool,
+) -> Result<(), String> {
+    state.dictionary.lock().unwrap().add_replacement(find, replace, case_sensitive, &state.app_dir)
+}
+
+#[tauri::command]
+fn remove_replacement(state: State<AppState>, index: usize) -> Result<(), String> {
+    state.dictionary.lock().unwrap().remove_replacement(index, &state.app_dir)
 }
 
 #[tauri::command]
@@ -238,6 +305,10 @@ fn main() {
             get_dictionary,
             add_dictionary_word,
             remove_dictionary_word,
+            add_vocabulary_hint,
+            remove_vocabulary_hint,
+            add_replacement,
+            remove_replacement,
         ])
         .setup(move |app| {
             // Handle window close to properly exit the app
@@ -247,6 +318,9 @@ fn main() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { .. } = event {
                         println!("[Typr] Main window close requested, exiting app");
+                        tauri::async_runtime::block_on(async {
+                            typr_lib::whisper_server::stop_server().await;
+                        });
                         std::process::exit(0);
                     }
                 });
@@ -282,11 +356,40 @@ fn main() {
             .build();
 
             match overlay {
-                Ok(_) => println!("[Typr] Overlay window created"),
+                Ok(window) => {
+                    println!("[Typr] Overlay window created");
+                    let _ = window.set_ignore_cursor_events(true);
+                }
                 Err(e) => eprintln!("[Typr] Failed to create overlay: {}", e),
             }
 
             let handle = app.handle().clone();
+
+            // Pre-initialize the microphone stream in the background
+            let state = handle.state::<AppState>();
+            let mic = state.settings.lock().unwrap().microphone.clone();
+            let handle_for_warmup = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state_clone = handle_for_warmup.state::<AppState>();
+                println!("[Typr] Pre-initializing audio stream in background for mic: {}", mic);
+                if let Err(e) = state_clone.recorder.pre_initialize(&mic) {
+                    eprintln!("[Typr] Failed to pre-initialize audio stream on startup: {}", e);
+                }
+            });
+
+            // Pre-initialize the Whisper HTTP Server if running in local mode
+            let handle_for_server = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state_clone = handle_for_server.state::<AppState>();
+                let settings = state_clone.settings.lock().unwrap().clone();
+                if settings.engine == "local" {
+                    let model_path = state_clone.app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
+                    println!("[Typr] Pre-starting local Whisper HTTP server on startup with model {:?}", model_path);
+                    if let Err(e) = typr_lib::whisper_server::ensure_running(&handle_for_server, &model_path).await {
+                        eprintln!("[Typr] Failed to pre-start local Whisper HTTP server on startup: {}", e);
+                    }
+                }
+            });
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ShortcutState>(32);
             let rx_handle = handle.clone();

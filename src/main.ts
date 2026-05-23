@@ -36,6 +36,7 @@ interface DownloadProgress {
 
 // DOM elements
 const statusDot = document.getElementById("status-dot")!;
+const statusIndicator = document.getElementById("status-indicator")!;
 const statusText = document.getElementById("status-text")!;
 const micSelect = document.getElementById("mic-select") as HTMLSelectElement;
 const engineLocal = document.getElementById("engine-local")!;
@@ -50,6 +51,7 @@ const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyText = document.getElementById("hotkey-text")!;
+const statCount = document.getElementById("stat-count")!;
 const statWords = document.getElementById("stat-words")!;
 const statWpm = document.getElementById("stat-wpm")!;
 const transcriptionFeed = document.getElementById("transcription-feed")!;
@@ -197,14 +199,18 @@ modePtt.addEventListener("click", () => {
 listen<string>("recording-state", (event) => {
   const state = event.payload;
   statusDot.className = "";
+  statusIndicator.className = "";
   if (state === "Recording") {
     statusDot.classList.add("recording");
+    statusIndicator.classList.add("recording");
     statusText.textContent = "Recording...";
   } else if (state === "Transcribing") {
     statusDot.classList.add("transcribing");
+    statusIndicator.classList.add("transcribing");
     statusText.textContent = "Transcribing...";
   } else {
     statusDot.classList.add("ready");
+    statusIndicator.classList.add("ready");
     statusText.textContent = "Ready";
   }
 });
@@ -220,8 +226,16 @@ listen("history-updated", () => {
   loadHistory();
 });
 
-async function loadHistory() {
-  const history = await invoke<History>("get_history");
+let visibleHistoryCount = 50;
+let cachedHistory: History | null = null;
+
+async function loadHistory(forceFetch = true) {
+  if (forceFetch || !cachedHistory) {
+    cachedHistory = await invoke<History>("get_history");
+    visibleHistoryCount = 50;
+  }
+  
+  const history = cachedHistory;
   
   let totalWords = 0;
   let totalChars = 0;
@@ -229,18 +243,30 @@ async function loadHistory() {
 
   transcriptionFeed.innerHTML = "";
 
-  if (history.items.length === 0) {
-    transcriptionFeed.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No transcriptions yet.</div>';
+  if (forceFetch) {
+    transcriptionFeed.scrollTop = 0;
   }
 
-  // Group items
-  const groups = new Map<string, typeof history.items>();
-  
+  if (history.items.length === 0) {
+    transcriptionFeed.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No transcriptions yet.</div>';
+    statWords.textContent = "0";
+    statWpm.textContent = "0";
+    statCount.textContent = "0";
+    return;
+  }
+
+  // Calculate statistics over the entire history
   history.items.forEach(item => {
     totalWords += item.word_count;
     totalChars += item.text.length;
     totalDuration += item.duration_secs;
+  });
 
+  // Group and render only the visible subset of items
+  const itemsToRender = history.items.slice(0, visibleHistoryCount);
+  const groups = new Map<string, typeof history.items>();
+  
+  itemsToRender.forEach(item => {
     const date = new Date(item.timestamp * 1000);
     const today = new Date();
     const yesterday = new Date(today);
@@ -272,28 +298,24 @@ async function loadHistory() {
       const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       const el = document.createElement("div");
-      el.style.cssText = "display: flex; gap: 16px; padding: 12px; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--border-strong); position: relative; align-items: flex-start;";
+      el.className = "feed-item";
       
       const timeEl = document.createElement("div");
-      timeEl.style.cssText = "font-size: 12px; color: var(--text-secondary); white-space: nowrap; padding-top: 2px;";
+      timeEl.className = "feed-item-time";
       timeEl.textContent = timeStr;
 
       const textEl = document.createElement("div");
-      textEl.style.cssText = "font-size: 13px; color: var(--text); line-height: 1.5; flex: 1;";
+      textEl.className = "feed-item-text";
       textEl.textContent = item.text;
 
       const copyBtn = document.createElement("button");
-      copyBtn.className = "btn-primary";
-      copyBtn.style.cssText = "padding: 4px 8px; font-size: 11px; opacity: 0; transition: opacity var(--transition);";
+      copyBtn.className = "btn-primary feed-item-copy-btn";
       copyBtn.textContent = "Copy";
       copyBtn.onclick = () => {
         navigator.clipboard.writeText(item.text);
         copyBtn.textContent = "Copied";
         setTimeout(() => copyBtn.textContent = "Copy", 2000);
       };
-
-      el.onmouseenter = () => copyBtn.style.opacity = "1";
-      el.onmouseleave = () => copyBtn.style.opacity = "0";
 
       el.appendChild(timeEl);
       el.appendChild(textEl);
@@ -302,73 +324,190 @@ async function loadHistory() {
     });
   }
 
+  // Render a clean pagination button if there are more items remaining
+  if (history.items.length > visibleHistoryCount) {
+    const loadMoreBtn = document.createElement("button");
+    loadMoreBtn.className = "load-more-btn";
+    loadMoreBtn.textContent = "Load Older Transcriptions";
+    
+    loadMoreBtn.addEventListener("click", () => {
+      visibleHistoryCount += 50;
+      loadHistory(false); // Quick render from cache without another Tauri IPC call!
+    });
+    
+    transcriptionFeed.appendChild(loadMoreBtn);
+  }
+
   statWords.textContent = totalWords.toLocaleString();
+  statCount.textContent = history.items.length.toLocaleString();
   
   // Standard calculation: (Characters / 5) / (Time in minutes)
   const wpm = totalDuration > 0 ? Math.round((totalChars / 5) / (totalDuration / 60)) : 0;
   statWpm.textContent = wpm.toString();
 }
 
-// ── Custom Vocabulary ───────────────────────────────────
+// ── Custom Vocabulary & Text Replacements ───────────────────
 
-interface DictionaryData {
-  words: string[];
+interface ReplacementEntry {
+  find: string;
+  replace: string;
+  case_sensitive: boolean;
 }
 
-const dictWordInput = document.getElementById("dict-word") as HTMLInputElement;
-const dictAddBtn = document.getElementById("dict-add-btn")!;
-const dictionaryList = document.getElementById("dictionary-list")!;
+interface DictionaryData {
+  vocabulary_hints: string[];
+  replacements: ReplacementEntry[];
+}
+
+// Tab Switching selectors
+const dictTabHints = document.getElementById("dict-tab-hints")!;
+const dictTabReplacements = document.getElementById("dict-tab-replacements")!;
+const dictPanelHints = document.getElementById("dict-panel-hints")!;
+const dictPanelReplacements = document.getElementById("dict-panel-replacements")!;
+
+// Spelling Hints selectors
+const dictHintWordInput = document.getElementById("dict-hint-word") as HTMLInputElement;
+const dictHintAddBtn = document.getElementById("dict-hint-add-btn")!;
+const dictHintsList = document.getElementById("dict-hints-list")!;
+
+// Text Replacements selectors
+const replaceFindInput = document.getElementById("replace-find") as HTMLInputElement;
+const replaceWithInput = document.getElementById("replace-with") as HTMLInputElement;
+const replaceCaseCheckbox = document.getElementById("replace-case") as HTMLInputElement;
+const replaceAddBtn = document.getElementById("replace-add-btn")!;
+const dictReplacementsList = document.getElementById("dict-replacements-list")!;
+
+// Setup tab listeners
+dictTabHints.addEventListener("click", () => {
+  dictTabHints.classList.add("active");
+  dictTabReplacements.classList.remove("active");
+  dictPanelHints.classList.add("active");
+  dictPanelReplacements.classList.remove("active");
+});
+
+dictTabReplacements.addEventListener("click", () => {
+  dictTabReplacements.classList.add("active");
+  dictTabHints.classList.remove("active");
+  dictPanelReplacements.classList.add("active");
+  dictPanelHints.classList.remove("active");
+});
 
 async function loadDictionary() {
   const data = await invoke<DictionaryData>("get_dictionary");
-  const words = data.words;
+  
+  // 1. Render Spelling Hints List
+  dictHintsList.innerHTML = "";
+  const hints = data.vocabulary_hints || [];
+  
+  if (hints.length === 0) {
+    dictHintsList.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No spelling hints added yet.</div>';
+  } else {
+    hints.forEach((word, index) => {
+      const row = document.createElement("div");
+      row.className = "dict-entry";
 
-  // Render entries
-  dictionaryList.innerHTML = "";
+      const wordSpan = document.createElement("span");
+      wordSpan.className = "dict-entry-word";
+      wordSpan.textContent = word;
 
-  if (words.length === 0) {
-    dictionaryList.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No dictionary words added yet.</div>';
-    return;
+      const actions = document.createElement("div");
+      actions.className = "dict-entry-actions";
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "dict-btn dict-btn-delete";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.onclick = async () => {
+        await invoke("remove_vocabulary_hint", { index });
+        loadDictionary();
+      };
+
+      actions.appendChild(deleteBtn);
+      row.appendChild(wordSpan);
+      row.appendChild(actions);
+      dictHintsList.appendChild(row);
+    });
   }
 
-  words.forEach((word, index) => {
+  // 2. Render Text Replacements List
+  dictReplacementsList.innerHTML = "";
+  const replacements = data.replacements || [];
+  
+  replacements.forEach((entry, index) => {
     const row = document.createElement("div");
-    row.className = "dict-entry";
+    row.className = "replacement-row";
 
-    const wordSpan = document.createElement("span");
-    wordSpan.className = "dict-entry-word";
-    wordSpan.textContent = word;
+    const findSpan = document.createElement("div");
+    findSpan.className = "col-find";
+    findSpan.textContent = entry.find;
+
+    const arrowDiv = document.createElement("div");
+    arrowDiv.className = "col-arrow";
+    arrowDiv.innerHTML = "&rarr;";
+
+    const replaceSpan = document.createElement("div");
+    replaceSpan.className = "col-replace";
+    replaceSpan.textContent = entry.replace;
+
+    const optsSpan = document.createElement("div");
+    optsSpan.className = "col-opts";
+    optsSpan.textContent = entry.case_sensitive ? "Case Match" : "Fuzzy Case";
 
     const actions = document.createElement("div");
-    actions.className = "dict-entry-actions";
+    actions.className = "col-action";
 
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "dict-btn dict-btn-delete";
     deleteBtn.textContent = "Delete";
     deleteBtn.onclick = async () => {
-      await invoke("remove_dictionary_word", { index });
+      await invoke("remove_replacement", { index });
       loadDictionary();
     };
 
     actions.appendChild(deleteBtn);
-
-    row.appendChild(wordSpan);
+    row.appendChild(findSpan);
+    row.appendChild(arrowDiv);
+    row.appendChild(replaceSpan);
+    row.appendChild(optsSpan);
     row.appendChild(actions);
-    dictionaryList.appendChild(row);
+    dictReplacementsList.appendChild(row);
   });
 }
 
-dictAddBtn.addEventListener("click", async () => {
-  const word = dictWordInput.value.trim();
+// Add Spelling Hint Handler
+dictHintAddBtn.addEventListener("click", async () => {
+  const word = dictHintWordInput.value.trim();
   if (!word) return;
-  await invoke("add_dictionary_word", { word });
-  dictWordInput.value = "";
+  await invoke("add_vocabulary_hint", { word });
+  dictHintWordInput.value = "";
   loadDictionary();
 });
 
-// Allow Enter key to add entries
-dictWordInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") dictAddBtn.click();
+dictHintWordInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") dictHintAddBtn.click();
+});
+
+// Add Text Replacement Handler
+replaceAddBtn.addEventListener("click", async () => {
+  const find = replaceFindInput.value.trim();
+  const replace = replaceWithInput.value.trim();
+  if (!find) return;
+  
+  const caseSensitive = replaceCaseCheckbox.checked;
+  await invoke("add_replacement", { find, replace, caseSensitive });
+  
+  replaceFindInput.value = "";
+  replaceWithInput.value = "";
+  replaceCaseCheckbox.checked = false;
+  loadDictionary();
+});
+
+// Allow Enter keys on replacements inputs to submit
+replaceFindInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") replaceWithInput.focus();
+});
+
+replaceWithInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") replaceAddBtn.click();
 });
 
 // Initialize

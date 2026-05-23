@@ -13,6 +13,16 @@
           "name": "binaries/whisper-cpp",
           "sidecar": true,
           "args": true
+        },
+        {
+          "name": "binaries/whisper-cpp-cuda",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/whisper-server-cuda",
+          "sidecar": true,
+          "args": true
         }
       ]
     }

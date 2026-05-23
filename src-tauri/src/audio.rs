@@ -39,6 +39,7 @@ unsafe impl Sync for SendStream {}
 pub struct AudioRecorder {
     samples: Arc<Mutex<Vec<f32>>>,
     stream: Option<SendStream>,
+    active_mic: Option<String>,
     source_sample_rate: u32,
     source_channels: u16,
     amplitude_ring: Arc<Mutex<Vec<f32>>>,
@@ -60,6 +61,7 @@ impl AudioRecorder {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             stream: None,
+            active_mic: None,
             source_sample_rate: 48000,
             source_channels: 1,
             amplitude_ring: Arc::new(Mutex::new(vec![0.0; 64])),
@@ -87,15 +89,10 @@ impl AudioRecorder {
         self.frequency_bands.lock().unwrap().clone()
     }
 
-    pub fn start(&mut self, mic_name: &str) -> Result<(), String> {
-        self.samples.lock().unwrap().clear();
-        {
-            let mut ring = self.amplitude_ring.lock().unwrap();
-            for v in ring.iter_mut() {
-                *v = 0.0;
-            }
+    pub fn ensure_initialized(&mut self, mic_name: &str) -> Result<(), String> {
+        if self.stream.is_some() && self.active_mic.as_deref() == Some(mic_name) {
+            return Ok(());
         }
-        *self.amplitude_index.lock().unwrap() = 0;
 
         let host = cpal::default_host();
 
@@ -239,15 +236,37 @@ impl AudioRecorder {
             )
             .map_err(|e| e.to_string())?;
 
-        stream.play().map_err(|e| e.to_string())?;
+        let _ = stream.pause();
         self.stream = Some(SendStream(stream));
+        self.active_mic = Some(mic_name.to_string());
+        println!("[Typr] Audio stream pre-initialized and paused for microphone '{}'", mic_name);
+        Ok(())
+    }
+
+    pub fn start(&mut self, mic_name: &str) -> Result<(), String> {
+        self.ensure_initialized(mic_name)?;
+
+        self.samples.lock().unwrap().clear();
+        {
+            let mut ring = self.amplitude_ring.lock().unwrap();
+            for v in ring.iter_mut() {
+                *v = 0.0;
+            }
+        }
+        *self.amplitude_index.lock().unwrap() = 0;
+
+        if let Some(ref s) = self.stream {
+            s.0.play().map_err(|e| e.to_string())?;
+        }
         println!("[Typr] Audio recording started");
         Ok(())
     }
 
     pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {
-        self.stream = None;
-        println!("[Typr] Audio recording stopped");
+        if let Some(ref s) = self.stream {
+            let _ = s.0.pause();
+        }
+        println!("[Typr] Audio recording paused");
 
         let samples = self.samples.lock().unwrap();
         if samples.is_empty() {
