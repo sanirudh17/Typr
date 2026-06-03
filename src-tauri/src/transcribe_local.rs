@@ -1,7 +1,19 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
+
+static LOCAL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+fn local_client() -> &'static reqwest::Client {
+    LOCAL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5)) // Bounded 5-second timeout to fail-fast and fallback if server hangs
+            .no_proxy() // Disables system proxy detection to prevent WPAD lookup stalls when offline
+            .build()
+            .unwrap_or_default()
+    })
+}
 
 pub async fn transcribe_local(
     app: &AppHandle,
@@ -14,8 +26,8 @@ pub async fn transcribe_local(
     }
 
     let cuda_threads = std::thread::available_parallelism()
-        .map(|count| count.get().min(8).to_string())
-        .unwrap_or_else(|_| "8".to_string());
+        .map(|count| count.get().min(4).to_string())
+        .unwrap_or_else(|_| "4".to_string());
 
     let cpu_threads = std::thread::available_parallelism()
         .map(|count| count.get().min(12).to_string())
@@ -32,73 +44,74 @@ pub async fn transcribe_local(
     );
     let http_start = Instant::now();
 
-    // Ensure the server is running
-    match crate::whisper_server::ensure_running(app, model_path).await {
-        Ok(_) => {
-            // Attempt to send HTTP POST request to local server
-            let client = reqwest::Client::new();
-            let file_bytes = match std::fs::read(audio_path) {
-                Ok(bytes) => bytes,
-                Err(e) => return Err(format!("Failed to read audio file: {}", e)),
-            };
-
-            let part = reqwest::multipart::Part::bytes(file_bytes)
+    // Read audio bytes once
+    let file_bytes_result = std::fs::read(audio_path);
+    if let Ok(file_bytes) = file_bytes_result {
+        // Build the request body helper
+        let make_form = |bytes: Vec<u8>| {
+            let part = reqwest::multipart::Part::bytes(bytes)
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
                 .unwrap();
-
             let mut form = reqwest::multipart::Form::new()
                 .part("file", part)
                 .text("temperature", "0.0")
                 .text("response_format", "json");
-
             if !prompt.is_empty() {
                 form = form.text("prompt", prompt.to_string());
             }
+            form
+        };
 
-            let http_result = client
-                .post("http://127.0.0.1:8080/inference")
-                .multipart(form)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await;
+        // Try direct POST to warm local server first to bypass health check latency overhead on healthy cases
+        let mut http_result = local_client()
+            .post("http://127.0.0.1:8080/inference")
+            .multipart(make_form(file_bytes.clone()))
+            .send()
+            .await;
 
-            match http_result {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        #[derive(serde::Deserialize)]
-                        struct InferenceResponse {
-                            text: String,
-                        }
-                        match response.json::<InferenceResponse>().await {
-                            Ok(inf_res) => {
-                                let text = inf_res.text.trim().to_string();
-                                println!(
-                                    "[Typr] Persistent HTTP Whisper completed in {:?}. Output: {}",
-                                    http_start.elapsed(),
-                                    text
-                                );
-                                return Ok(text);
-                            }
-                            Err(e) => {
-                                println!("[Typr] Failed to parse HTTP JSON response: {}. Falling back to one-shot sidecar...", e);
-                            }
-                        }
-                    } else {
-                        println!("[Typr] HTTP server returned error code: {}. Falling back to one-shot sidecar...", response.status());
-                    }
+        // If direct post fails (e.g. connection refused), ensure the server is running, and retry
+        if http_result.is_err() {
+            println!("[Typr] Direct POST failed. Ensuring persistent server is running...");
+            match crate::whisper_server::ensure_running(app, model_path).await {
+                Ok(_) => {
+                    println!("[Typr] Persistent server ensured healthy. Retrying inference POST...");
+                    http_result = local_client()
+                        .post("http://127.0.0.1:8080/inference")
+                        .multipart(make_form(file_bytes))
+                        .send()
+                        .await;
                 }
                 Err(e) => {
-                    println!("[Typr] HTTP POST to persistent server failed: {}. Falling back to one-shot sidecar...", e);
+                    println!("[Typr] Failed to ensure persistent server: {}. Falling back to sidecars...", e);
                 }
             }
         }
-        Err(e) => {
-            println!(
-                "[Typr] Failed to start/ensure persistent Whisper server: {}. Falling back to one-shot sidecar...",
-                e
-            );
+
+        // Process the final HTTP result if we have a successful connection
+        if let Ok(response) = http_result {
+            if response.status().is_success() {
+                #[derive(serde::Deserialize)]
+                struct InferenceResponse {
+                    text: String,
+                }
+                if let Ok(inf_res) = response.json::<InferenceResponse>().await {
+                    let text = inf_res.text.trim().to_string();
+                    println!(
+                        "[Typr] Persistent HTTP Whisper completed in {:?}. Output: {}",
+                        http_start.elapsed(),
+                        text
+                    );
+                    return Ok(text);
+                }
+            } else {
+                println!("[Typr] HTTP server returned error: {}. Falling back to sidecars...", response.status());
+            }
+        } else {
+            println!("[Typr] Persistent HTTP server failed. Falling back to sidecars...");
         }
+    } else {
+        println!("[Typr] Failed to read audio file. Falling back to sidecars...");
     }
 
     // 2. Try GPU (CUDA) execution as fallback

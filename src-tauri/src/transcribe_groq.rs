@@ -1,11 +1,16 @@
 use reqwest::multipart;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn groq_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5)) // Prevents long hangs on network issues
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str) -> Result<String, String> {
@@ -18,51 +23,80 @@ pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str) 
     let audio_bytes = std::fs::read(audio_path)
         .map_err(|e| format!("Failed to read audio file: {}", e))?;
 
-    let file_part = multipart::Part::bytes(audio_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| e.to_string())?;
+    let max_retries = 3;
+    let mut last_error = String::new();
 
-    let mut form = multipart::Form::new()
-        .text("model", "whisper-large-v3-turbo")
-        .text("language", "en")
-        .text("response_format", "json")
-        .part("file", file_part);
+    for attempt in 1..=max_retries {
+        let file_part = multipart::Part::bytes(audio_bytes.clone())
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| e.to_string())?;
 
-    if !prompt.is_empty() {
-        form = form.text("prompt", prompt.to_string());
+        let mut form = multipart::Form::new()
+            .text("model", "whisper-large-v3-turbo")
+            .text("language", "en")
+            .text("response_format", "json")
+            .part("file", file_part);
+
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt.to_string());
+        }
+
+        println!("[Typr] Sending Groq transcription attempt {}/{}", attempt, max_retries);
+
+        let response_result = groq_client()
+            .post("https://api.groq.com/openai/v1/audio/transcriptions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .multipart(form)
+            .send()
+            .await;
+
+        match response_result {
+            Ok(response) => {
+                if response.status().is_success() {
+                    let json: serde_json::Value = response
+                        .json()
+                        .await
+                        .map_err(|e| format!("Failed to parse Groq response: {}", e))?;
+
+                    let text = json["text"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .ok_or("No 'text' field in Groq response".to_string())?;
+
+                    println!(
+                        "[Typr] Groq transcription completed successfully on attempt {} in {:?}",
+                        attempt,
+                        started_at.elapsed()
+                    );
+
+                    return Ok(text);
+                } else {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    last_error = format!("Groq API error ({}): {}", status, body);
+
+                    // If it is a client error (e.g. 401 Unauthorized, 400 Bad Request) that is NOT a rate limit (429)
+                    // or a request timeout (408), fail fast instead of retrying.
+                    if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS && status != reqwest::StatusCode::REQUEST_TIMEOUT {
+                        println!("[Typr] Non-retryable Groq client error: {}. Aborting retries.", status);
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = format!("Groq API request failed: {}", e);
+            }
+        }
+
+        if attempt < max_retries {
+            let delay = Duration::from_millis(300 * attempt as u64);
+            println!("[Typr] Groq transcription attempt {} failed: {}. Retrying in {:?}...", attempt, last_error, delay);
+            tokio::time::sleep(delay).await;
+        }
     }
 
-    let response = groq_client()
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Groq API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Groq API error ({}): {}", status, body));
-    }
-
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Groq response: {}", e))?;
-
-    let text = json["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or("No 'text' field in Groq response".to_string())?;
-
-    println!(
-        "[Typr] Groq transcription completed in {:?}",
-        started_at.elapsed()
-    );
-
-    Ok(text)
+    Err(format!("Groq transcription failed after {} attempts. Last error: {}", max_retries, last_error))
 }
 
 #[cfg(test)]

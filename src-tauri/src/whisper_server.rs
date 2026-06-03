@@ -1,9 +1,20 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+
+static HEALTH_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+fn health_client() -> &'static reqwest::Client {
+    HEALTH_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .no_proxy() // Disables system proxy detection to prevent WPAD lookup stalls when offline
+            .build()
+            .unwrap_or_default()
+    })
+}
 
 static SERVER_CHILD: Mutex<Option<CommandChild>> = Mutex::new(None);
 static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
@@ -48,8 +59,9 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
     let current_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
 
+    // Optimize threads to 4 when running on GPU to avoid driver thread contention
     let threads = std::thread::available_parallelism()
-        .map(|count| count.get().min(8).to_string())
+        .map(|count| count.get().min(4).to_string())
         .unwrap_or_else(|_| "4".to_string());
 
     let cmd_args = vec![
@@ -152,10 +164,8 @@ pub async fn stop_server() {
 
 /// Pings the server root to verify HTTP health.
 async fn is_server_healthy() -> bool {
-    let client = reqwest::Client::new();
-    match client
+    match health_client()
         .get("http://127.0.0.1:8080/")
-        .timeout(Duration::from_millis(200))
         .send()
         .await
     {

@@ -30,3 +30,10 @@ This changelog documents the major engineering milestones and features added dur
 * **Automated Cleanup Hook**: Created a robust, dedicated lifecycle cleanup module (`src-tauri/src/cleanup.rs`) hooked directly into Tauri's window event listeners.
 * **Zombie Process Prevention**: Ensures that if the app is closed, crashed, or exited, any background-running `whisper-server` executables are instantly terminated.
 * **Memory & Resource Leak Fixes**: Verified that all open file handles (audio recordings) and audio input streams are cleanly freed and closed upon exit.
+
+### 🖥️ 6. Seamless Frameless Window & Custom Titlebar Controls
+* **Borderless Visual Design**: Removed the native OS window frame to allow the sidebar and main panels to extend to the very top edge of the window.
+* **Interactive Window Controls**: Added Windows 11-style Minimize, Maximize/Restore, and Close buttons on the frontend using custom SVGs, layout positioning, and transitions.
+* **Maximize/Restore Icon Toggle**: Integrated dynamic resize listeners to detect when the window state changes and swap between the maximize (single square) and restore (double square) icons.
+* **Custom Drag Region**: Designed draggable areas across the titlebar and sidebar header while maintaining responsiveness on the window control buttons.
+

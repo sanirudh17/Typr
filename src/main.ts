@@ -70,19 +70,57 @@ navItems.forEach((item) => {
   });
 });
 
-// Window drag — titlebar and sidebar empty space
+// Window drag & controls — titlebar and sidebar empty space
 const titlebar = document.getElementById("titlebar")!;
 const sidebar = document.getElementById("sidebar")!;
 const appWindow = getCurrentWindow();
 
 titlebar.addEventListener("mousedown", (e) => {
-  if ((e.target as HTMLElement).closest("button, select, input, a, .nav-item")) return;
+  if ((e.target as HTMLElement).closest("button, select, input, a, .nav-item, .titlebar-button")) return;
   appWindow.startDragging();
 });
 
 sidebar.addEventListener("mousedown", (e) => {
   if ((e.target as HTMLElement).closest("button, select, input, a, .nav-item")) return;
   appWindow.startDragging();
+});
+
+// Custom window controls handlers
+const minimizeBtn = document.getElementById("titlebar-minimize")!;
+const maximizeBtn = document.getElementById("titlebar-maximize")!;
+const closeBtn = document.getElementById("titlebar-close")!;
+const maximizeIcon = document.getElementById("maximize-icon")!;
+const restoreIcon = document.getElementById("restore-icon")!;
+
+minimizeBtn.addEventListener("click", () => {
+  appWindow.minimize();
+});
+
+maximizeBtn.addEventListener("click", () => {
+  appWindow.toggleMaximize();
+});
+
+closeBtn.addEventListener("click", () => {
+  appWindow.close();
+});
+
+async function updateMaximizeIcon() {
+  const isMax = await appWindow.isMaximized();
+  if (isMax) {
+    maximizeIcon.classList.add("hidden");
+    restoreIcon.classList.remove("hidden");
+  } else {
+    maximizeIcon.classList.remove("hidden");
+    restoreIcon.classList.add("hidden");
+  }
+}
+
+// Check initial window state
+updateMaximizeIcon();
+
+// Listen for resize to update state
+appWindow.onResized(() => {
+  updateMaximizeIcon();
 });
 
 let currentSettings: Settings;
@@ -359,12 +397,6 @@ interface DictionaryData {
   replacements: ReplacementEntry[];
 }
 
-// Tab Switching selectors
-const dictTabHints = document.getElementById("dict-tab-hints")!;
-const dictTabReplacements = document.getElementById("dict-tab-replacements")!;
-const dictPanelHints = document.getElementById("dict-panel-hints")!;
-const dictPanelReplacements = document.getElementById("dict-panel-replacements")!;
-
 // Spelling Hints selectors
 const dictHintWordInput = document.getElementById("dict-hint-word") as HTMLInputElement;
 const dictHintAddBtn = document.getElementById("dict-hint-add-btn")!;
@@ -376,21 +408,6 @@ const replaceWithInput = document.getElementById("replace-with") as HTMLInputEle
 const replaceCaseCheckbox = document.getElementById("replace-case") as HTMLInputElement;
 const replaceAddBtn = document.getElementById("replace-add-btn")!;
 const dictReplacementsList = document.getElementById("dict-replacements-list")!;
-
-// Setup tab listeners
-dictTabHints.addEventListener("click", () => {
-  dictTabHints.classList.add("active");
-  dictTabReplacements.classList.remove("active");
-  dictPanelHints.classList.add("active");
-  dictPanelReplacements.classList.remove("active");
-});
-
-dictTabReplacements.addEventListener("click", () => {
-  dictTabReplacements.classList.add("active");
-  dictTabHints.classList.remove("active");
-  dictPanelReplacements.classList.add("active");
-  dictPanelHints.classList.remove("active");
-});
 
 async function loadDictionary() {
   const data = await invoke<DictionaryData>("get_dictionary");

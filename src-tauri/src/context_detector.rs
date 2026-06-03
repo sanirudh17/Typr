@@ -1,0 +1,243 @@
+use serde::{Serialize, Deserialize};
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ContextCategory {
+    Messaging,
+    Email,
+    Professional,
+    Developer,
+    General,
+}
+
+impl std::fmt::Display for ContextCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextCategory::Messaging => write!(f, "Messaging"),
+            ContextCategory::Email => write!(f, "Email"),
+            ContextCategory::Professional => write!(f, "Professional"),
+            ContextCategory::Developer => write!(f, "Developer"),
+            ContextCategory::General => write!(f, "General"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForegroundApp {
+    pub process_name: String,
+    pub window_title: String,
+}
+
+impl ForegroundApp {
+    pub fn detect() -> Self {
+        #[cfg(windows)]
+        {
+            detect_foreground_windows()
+        }
+        #[cfg(not(windows))]
+        {
+            ForegroundApp {
+                process_name: String::new(),
+                window_title: String::new(),
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detect_foreground_windows() -> ForegroundApp {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return ForegroundApp {
+                process_name: String::new(),
+                window_title: String::new(),
+            };
+        }
+
+        // Get window title
+        let mut title_buf = [0u16; 512];
+        let title_len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
+        let window_title = if title_len > 0 {
+            OsString::from_wide(&title_buf[..title_len as usize])
+                .to_string_lossy()
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        // Get process name
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let process_name = if pid != 0 {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !handle.is_null() && handle != -1isize as _ {
+                let mut name_buf = [0u16; 512];
+                let name_len = GetModuleFileNameExW(handle, std::ptr::null_mut(), name_buf.as_mut_ptr(), name_buf.len() as u32);
+                CloseHandle(handle);
+                if name_len > 0 {
+                    let full_path = OsString::from_wide(&name_buf[..name_len as usize])
+                        .to_string_lossy()
+                        .to_string();
+                    full_path.rsplit('\\').next().unwrap_or(&full_path).to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        ForegroundApp {
+            process_name,
+            window_title,
+        }
+    }
+}
+
+/// Maps a detected foreground app to a context category.
+/// First checks custom rules, then default mappings, then browser title heuristics.
+pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> ContextCategory {
+    let proc_lower = app.process_name.to_lowercase();
+    let title_lower = app.window_title.to_lowercase();
+
+    // Check custom rules first
+    for rule in custom_rules {
+        if proc_lower == rule.process_name.to_lowercase() {
+            if let Some(ref title_match) = rule.title_contains {
+                if title_lower.contains(&title_match.to_lowercase()) {
+                    return rule.category.clone();
+                }
+            } else {
+                return rule.category.clone();
+            }
+        }
+    }
+
+    // Default process-name mappings
+    match proc_lower.as_str() {
+        // Messaging
+        "whatsapp.exe" | "telegram.exe" | "discord.exe" | "slack.exe"
+        | "teams.exe" | "signal.exe" | "messenger.exe" => return ContextCategory::Messaging,
+
+        // Email
+        "outlook.exe" | "thunderbird.exe" => return ContextCategory::Email,
+
+        // Developer
+        "code.exe" | "cursor.exe" | "windowsterminal.exe" | "cmd.exe"
+        | "powershell.exe" | "idea64.exe" | "devenv.exe" | "sublime_text.exe"
+        | "alacritty.exe" | "wezterm-gui.exe" | "wt.exe" => return ContextCategory::Developer,
+
+        // Professional
+        "winword.exe" | "excel.exe" | "powerpnt.exe" | "notion.exe"
+        | "onenote.exe" => return ContextCategory::Professional,
+
+        _ => {}
+    }
+
+    // Browser title heuristics
+    if is_browser(&proc_lower) {
+        if title_lower.contains("gmail") || title_lower.contains("outlook") || title_lower.contains("mail") || title_lower.contains("protonmail") {
+            return ContextCategory::Email;
+        }
+        if title_lower.contains("slack") || title_lower.contains("discord") || title_lower.contains("whatsapp") || title_lower.contains("messenger") || title_lower.contains("telegram") {
+            return ContextCategory::Messaging;
+        }
+        if title_lower.contains("github") || title_lower.contains("stackoverflow") || title_lower.contains("localhost") || title_lower.contains("codepen") || title_lower.contains("codesandbox") {
+            return ContextCategory::Developer;
+        }
+        if title_lower.contains("docs.google") || title_lower.contains("notion") || title_lower.contains("confluence") {
+            return ContextCategory::Professional;
+        }
+    }
+
+    ContextCategory::General
+}
+
+fn is_browser(proc: &str) -> bool {
+    matches!(proc, "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe" | "arc.exe")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppRule {
+    pub process_name: String,
+    pub title_contains: Option<String>,
+    pub category: ContextCategory,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_messaging_apps() {
+        let app = ForegroundApp { process_name: "WhatsApp.exe".into(), window_title: String::new() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+    }
+
+    #[test]
+    fn test_email_apps() {
+        let app = ForegroundApp { process_name: "OUTLOOK.exe".into(), window_title: String::new() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Email);
+    }
+
+    #[test]
+    fn test_developer_apps() {
+        let app = ForegroundApp { process_name: "Code.exe".into(), window_title: String::new() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_browser_gmail() {
+        let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Gmail - Inbox - Google Chrome".into() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Email);
+    }
+
+    #[test]
+    fn test_browser_slack() {
+        let app = ForegroundApp { process_name: "msedge.exe".into(), window_title: "Slack | general | Company".into() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+    }
+
+    #[test]
+    fn test_browser_github() {
+        let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "GitHub - Pull Requests".into() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_general_fallback() {
+        let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "Untitled".into() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::General);
+    }
+
+    #[test]
+    fn test_custom_rule_overrides() {
+        let rules = vec![AppRule {
+            process_name: "notepad.exe".into(),
+            title_contains: None,
+            category: ContextCategory::Developer,
+        }];
+        let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "test.rs".into() };
+        assert_eq!(resolve_category(&app, &rules), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_custom_rule_with_title() {
+        let rules = vec![AppRule {
+            process_name: "chrome.exe".into(),
+            title_contains: Some("Jira".into()),
+            category: ContextCategory::Professional,
+        }];
+        let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Jira - Sprint Board".into() };
+        assert_eq!(resolve_category(&app, &rules), ContextCategory::Professional);
+    }
+}

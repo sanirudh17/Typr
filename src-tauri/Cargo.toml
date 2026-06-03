@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["image-png", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
@@ -27,5 +27,5 @@ dirs = "6"
 arboard = "3"
 futures-util = "0.3"
 rustfft = "6.2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus"] }
 regex = "1"

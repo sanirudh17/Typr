@@ -29,3 +29,5 @@ target/
 # App-specific
 src-tauri/binaries/
 whisper.cpp/
+*.exe
+*.msi

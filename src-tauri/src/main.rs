@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{image::Image, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use typr_lib::audio;
@@ -314,6 +314,15 @@ fn main() {
             // Handle window close to properly exit the app
             let main_window = app.get_webview_window("main");
             if let Some(window) = main_window {
+                match Image::from_bytes(include_bytes!("../icons/icon.png")) {
+                    Ok(icon) => {
+                        if let Err(e) = window.set_icon(icon) {
+                            eprintln!("[Typr] Failed to set main window icon: {}", e);
+                        }
+                    }
+                    Err(e) => eprintln!("[Typr] Failed to load main window icon: {}", e),
+                }
+
                 let _window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { .. } = event {

@@ -130,7 +130,12 @@ impl Dictionary {
         let normalized_text = text.split_whitespace().collect::<Vec<&str>>().join(" ");
         let mut result = normalized_text;
 
-        for entry in &self.replacements {
+        // Sort replacements by find field length in descending order,
+        // so that longer phrase/context matches are evaluated and replaced first.
+        let mut sorted_replacements = self.replacements.clone();
+        sorted_replacements.sort_by(|a, b| b.find.len().cmp(&a.find.len()));
+
+        for entry in &sorted_replacements {
             // Normalize spaces in the search term too, just in case
             let find_normalized = entry.find.split_whitespace().collect::<Vec<&str>>().join(" ");
             if find_normalized.is_empty() {
@@ -159,10 +164,48 @@ impl Dictionary {
                 .case_insensitive(!entry.case_sensitive)
                 .build()
             {
-                result = re.replace_all(&result, &entry.replace).to_string();
+                if entry.case_sensitive {
+                    result = re.replace_all(&result, &entry.replace).to_string();
+                } else {
+                    // For case-insensitive replacements, respect the original casing context (e.g. title case or ALL CAPS)
+                    result = re.replace_all(&result, |caps: &regex::Captures| {
+                        preserve_case(&caps[0], &entry.replace)
+                    }).to_string();
+                }
             }
         }
         result
+    }
+}
+
+/// Helper function to preserve the casing of a matched string when replacing it.
+fn preserve_case(matched: &str, replacement: &str) -> String {
+    if matched.is_empty() || replacement.is_empty() {
+        return replacement.to_string();
+    }
+
+    // Check if matched is all uppercase (excluding non-alphabetic chars)
+    let is_all_uppercase = matched.chars().any(|c| c.is_alphabetic())
+        && matched.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+
+    if is_all_uppercase {
+        return replacement.to_uppercase();
+    }
+
+    // Check if matched is capitalized (first alphabetic character is uppercase)
+    let is_capitalized = matched.chars().find(|c| c.is_alphabetic())
+        .map_or(false, |c| c.is_uppercase());
+
+    if is_capitalized {
+        let mut chars = replacement.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(first) => {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            }
+        }
+    } else {
+        replacement.to_string()
     }
 }
 
@@ -222,6 +265,64 @@ mod tests {
 
         // Test punctuation / non-alphanumeric replacement
         assert_eq!(dict.apply_replacements("Hello :)"), "Hello 😊");
+    }
+
+    #[test]
+    fn test_phrase_before_word_ordering() {
+        let mut dict = Dictionary::default();
+        // Add shorter replacement first
+        dict.replacements.push(ReplacementEntry {
+            find: "water".to_string(),
+            replace: "H2O".to_string(),
+            case_sensitive: false,
+        });
+        // Add longer phrase later
+        dict.replacements.push(ReplacementEntry {
+            find: "power water".to_string(),
+            replace: "hydroelectric energy".to_string(),
+            case_sensitive: false,
+        });
+
+        // The longer phrase "power water" should be replaced with "hydroelectric energy"
+        // rather than "water" being replaced first and breaking the phrase to "power H2O".
+        assert_eq!(
+            dict.apply_replacements("We need to produce power water from the river."),
+            "We need to produce hydroelectric energy from the river."
+        );
+    }
+
+    #[test]
+    fn test_case_preservation() {
+        let mut dict = Dictionary::default();
+        // Add lowercase find and replace
+        dict.replacements.push(ReplacementEntry {
+            find: "whisper".to_string(),
+            replace: "speech engine".to_string(),
+            case_sensitive: false,
+        });
+        dict.replacements.push(ReplacementEntry {
+            find: "groq".to_string(),
+            replace: "cloud provider".to_string(),
+            case_sensitive: false,
+        });
+
+        // Test Title Case capitalization preservation (e.g. start of sentence)
+        assert_eq!(
+            dict.apply_replacements("Whisper is a highly accurate tool."),
+            "Speech engine is a highly accurate tool."
+        );
+
+        // Test ALL CAPS preservation
+        assert_eq!(
+            dict.apply_replacements("We love WHISPER for transcription."),
+            "We love SPEECH ENGINE for transcription."
+        );
+
+        // Test keeping custom user casing when matched text is lowercase
+        assert_eq!(
+            dict.apply_replacements("let's search on groq api."),
+            "let's search on cloud provider api."
+        );
     }
 }
 
