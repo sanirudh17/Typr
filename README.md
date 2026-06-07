@@ -41,7 +41,52 @@ To compile or build Typr from source, your system needs:
 - **Rust** & Cargo (Stable channel, version 1.75+)
 - **Nvidia GPU** (Recommended for GPU-accelerated local transcription) along with up-to-date graphics drivers.
 
-### Setup & Local Development
+### First-Time Setup (Installed App)
+
+When launching Typr for the first time after installing a release build:
+
+1. Open the app and navigate to the **Engine** tab via the sidebar.
+2. Select your preferred **Model Size** (`small` ~466 MB or `medium` ~1.5 GB).
+3. Click the **Download** button to fetch the Whisper model file from HuggingFace.
+   *(The model is saved to `C:\Users\<You>\AppData\Roaming\com.typr.app\ggml-<size>.bin`)*
+4. Once the download completes, the engine is ready to transcribe.
+
+> **Note:** A Whisper model must be downloaded before any local transcription can occur. If you switch to the Cloud (Groq) engine, no model download is required — just enter your API key.
+
+### Setup & Local Development (From Source)
+
+The app requires three **whisper.cpp sidecar binaries** in `src-tauri/binaries/` to function:
+- `whisper-cpp` (CPU fallback)
+- `whisper-cpp-cuda` (GPU direct)
+- `whisper-server-cuda` (persistent HTTP server)
+
+These are **not** the model files (which are downloaded later via the app UI) — they are compiled executables from the [whisper.cpp](https://github.com/ggml-org/whisper.cpp) project. The `src-tauri/binaries/` directory is gitignored, so you must build or obtain them yourself.
+
+#### Option A: Build from whisper.cpp source
+
+```bash
+# Clone whisper.cpp alongside the Typr repo
+git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
+cd whisper.cpp
+
+# Build with CUDA support (requires CUDA toolkit)
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release
+
+# Copy the sidecar binaries to the Typr binaries directory
+# (adjust extensions/paths for your platform)
+cp build/bin/whisper-cli.exe ../Typr/src-tauri/binaries/whisper-cpp.exe
+cp build/bin/whisper-cli.exe ../Typr/src-tauri/binaries/whisper-cpp-cuda.exe
+cp build/bin/whisper-server.exe ../Typr/src-tauri/binaries/whisper-server-cuda.exe
+```
+
+> **Note:** All three sidecar entries (`whisper-cpp`, `whisper-cpp-cuda`, `whisper-server-cuda`) in `tauri.conf.json` use the same compiled whisper.cpp binary — the app selects the appropriate execution mode at runtime via command-line flags. You may use the same binary for all three.
+
+#### Option B: Download pre-built releases
+
+Download pre-built whisper.cpp executables for your platform from the [whisper.cpp releases page](https://github.com/ggml-org/whisper.cpp/releases) and place them in `src-tauri/binaries/` with the correct names above.
+
+#### Running the app
 
 1. **Clone the Repository**:
    ```bash
@@ -49,25 +94,34 @@ To compile or build Typr from source, your system needs:
    cd Typr
    ```
 
-2. **Install Frontend Dependencies**:
+2. **Ensure sidecar binaries are in place** (see above).
+
+3. **Install Frontend Dependencies**:
    ```bash
    npm install
    ```
 
-3. **Start the App in Dev Mode**:
+4. **Install CUDA DLLs** (optional, for GPU acceleration):
+   Place `cublas64_12.dll`, `cublasLt64_12.dll`, and `ggml-cuda.dll` into `src-tauri/binaries/`.
+
+5. **Start the App in Dev Mode**:
    ```bash
    npm run tauri dev
    ```
    *This starts the frontend Vite server and compiles the Rust backend, launching the local app window.*
 
+6. **Download a Whisper model** via the Engine settings tab in the app (see "First-Time Setup" above).
+
 ---
 
 ## 📦 Packaging & Compiling for Production
 
-To compile Typr into a single fully-packaged production installer containing the CUDA libraries:
+To compile Typr into a single fully-packaged production installer:
 
-1. Place your target Whisper model files and CUDA binaries into `src-tauri/binaries/`.
-2. Run the production build command:
+1. **Place the whisper.cpp sidecar binaries** (`whisper-cpp.exe`, `whisper-cpp-cuda.exe`, `whisper-server-cuda.exe`) into `src-tauri/binaries/` (see "Setup & Local Development" above for how to obtain these).
+2. **Place CUDA DLLs** (optional) — `cublas64_12.dll`, `cublasLt64_12.dll`, `ggml-cuda.dll` — into `src-tauri/binaries/` for GPU acceleration.
+3. **Bundle a Whisper model** (optional) — to skip the first-run download, place a `ggml-small.bin` into `src-tauri/binaries/`. If omitted, users download a model from within the app's Engine settings on first launch.
+4. Run the production build command:
    ```bash
    npm run tauri build
    ```
