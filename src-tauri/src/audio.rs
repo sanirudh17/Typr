@@ -73,7 +73,8 @@ unsafe impl Sync for SendStream {}
 pub struct AudioRecorder {
     samples: Arc<Mutex<Vec<f32>>>,
     stream: Option<SendStream>,
-    active_mic: Option<String>,
+    active_resolved_name: Option<String>,
+    stream_errored: Arc<std::sync::atomic::AtomicBool>,
     source_sample_rate: u32,
     source_channels: u16,
     amplitude_ring: Arc<Mutex<Vec<f32>>>,
@@ -95,7 +96,8 @@ impl AudioRecorder {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             stream: None,
-            active_mic: None,
+            active_resolved_name: None,
+            stream_errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             source_sample_rate: 48000,
             source_channels: 1,
             amplitude_ring: Arc::new(Mutex::new(vec![0.0; 64])),
@@ -123,21 +125,36 @@ impl AudioRecorder {
         self.frequency_bands.lock().unwrap().clone()
     }
 
-    pub fn ensure_initialized(&mut self, mic_name: &str) -> Result<(), String> {
-        if self.stream.is_some() && self.active_mic.as_deref() == Some(mic_name) {
-            return Ok(());
-        }
-
+    pub fn ensure_initialized(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
         let host = cpal::default_host();
 
+        // Enumerate live devices + default so we can resolve the real target.
+        let default_name = host.default_input_device().and_then(|d| d.name().ok());
+        let available: Vec<String> = host
+            .input_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
+        let res = resolve_mic(mic_name, &available, default_name.as_deref())?;
+
+        // Reuse the cached stream only if it targets the same device and hasn't errored.
+        let errored = self.stream_errored.load(std::sync::atomic::Ordering::Relaxed);
+        if self.stream.is_some()
+            && !errored
+            && self.active_resolved_name.as_deref() == Some(res.target.as_str())
+        {
+            return Ok(MicStartInfo { active_device: res.target, fell_back: false, changed: false });
+        }
+
+        // Open the resolved device. Prefer the default object when the setting is
+        // "default" to avoid a same-name ambiguity between two devices.
         let device = if mic_name == "default" {
             host.default_input_device()
                 .ok_or("No default input device found")?
         } else {
             host.input_devices()
                 .map_err(|e| e.to_string())?
-                .find(|d| d.name().map(|n| n == mic_name).unwrap_or(false))
-                .ok_or(format!("Microphone '{}' not found", mic_name))?
+                .find(|d| d.name().map(|n| n == res.target).unwrap_or(false))
+                .ok_or(format!("Microphone '{}' not found", res.target))?
         };
 
         let default_config = device
@@ -165,7 +182,8 @@ impl AudioRecorder {
         let fft_buffer = self.fft_buffer.clone();
         let frequency_bands = self.frequency_bands.clone();
         let fft_callback_divider = self.fft_callback_divider.clone();
-        
+        let stream_errored = self.stream_errored.clone();
+
         let stream = device
             .build_input_stream(
                 &config,
@@ -263,8 +281,9 @@ impl AudioRecorder {
                         }
                     }
                 },
-                |err| {
+                move |err| {
                     eprintln!("[Typr] Audio stream error: {}", err);
+                    stream_errored.store(true, std::sync::atomic::Ordering::Relaxed);
                 },
                 None,
             )
@@ -272,13 +291,14 @@ impl AudioRecorder {
 
         let _ = stream.pause();
         self.stream = Some(SendStream(stream));
-        self.active_mic = Some(mic_name.to_string());
-        println!("[Typr] Audio stream pre-initialized and paused for microphone '{}'", mic_name);
-        Ok(())
+        self.active_resolved_name = Some(res.target.clone());
+        self.stream_errored.store(false, std::sync::atomic::Ordering::Relaxed);
+        println!("[Typr] Audio stream (re)built for '{}' (device '{}')", mic_name, res.target);
+        Ok(MicStartInfo { active_device: res.target, fell_back: res.fell_back, changed: true })
     }
 
-    pub fn start(&mut self, mic_name: &str) -> Result<(), String> {
-        self.ensure_initialized(mic_name)?;
+    pub fn start(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
+        let info = self.ensure_initialized(mic_name)?;
 
         self.samples.lock().unwrap().clear();
         {
@@ -293,7 +313,7 @@ impl AudioRecorder {
             s.0.play().map_err(|e| e.to_string())?;
         }
         println!("[Typr] Audio recording started");
-        Ok(())
+        Ok(info)
     }
 
     pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {

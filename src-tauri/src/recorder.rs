@@ -50,7 +50,7 @@ impl Recorder {
 
     pub fn pre_initialize(&self, mic_name: &str) -> Result<(), String> {
         let mut recorder = self.audio_recorder.lock().unwrap();
-        recorder.ensure_initialized(mic_name)
+        recorder.ensure_initialized(mic_name).map(|_| ())
     }
 
     pub fn get_state(&self) -> RecordingState {
@@ -78,12 +78,22 @@ impl Recorder {
 
         // Now start the audio recording
         let mut recorder = self.audio_recorder.lock().unwrap();
-        if let Err(e) = recorder.start(mic_name) {
-            // Revert state if starting failed
-            *state = RecordingState::Ready;
-            let _ = app.emit("recording-state", RecordingState::Ready);
-            update_overlay(app, &RecordingState::Ready, false);
-            return Err(e);
+        match recorder.start(mic_name) {
+            Ok(info) => {
+                if info.fell_back || info.changed {
+                    let _ = app.emit("mic-changed", serde_json::json!({
+                        "device": info.active_device,
+                        "fellBack": info.fell_back,
+                    }));
+                }
+            }
+            Err(e) => {
+                // Revert state if starting failed
+                *state = RecordingState::Ready;
+                let _ = app.emit("recording-state", RecordingState::Ready);
+                update_overlay(app, &RecordingState::Ready, false);
+                return Err(e);
+            }
         }
 
         Ok(())
