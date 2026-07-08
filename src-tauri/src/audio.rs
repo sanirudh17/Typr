@@ -295,7 +295,8 @@ impl AudioRecorder {
             samples.clone()
         };
 
-        let resampled = resample(&mono, self.source_sample_rate, 16000);
+        let mut resampled = resample(&mono, self.source_sample_rate, 16000);
+        normalize_peak(&mut resampled, NORM_TARGET_PEAK, NORM_MAX_GAIN);
         println!("[Typr] Resampled to {} samples at 16kHz", resampled.len());
 
         let spec = WavSpec {
@@ -317,6 +318,24 @@ impl AudioRecorder {
 
         println!("[Typr] WAV saved to {:?}", output_path);
         Ok((output_path.clone(), duration_secs))
+    }
+}
+
+const NORM_TARGET_PEAK: f32 = 0.95;
+const NORM_MAX_GAIN: f32 = 15.0;
+const NORM_EPS: f32 = 1e-4;
+
+/// Peak-normalize `samples` toward `target_peak`, but never amplify by more
+/// than `max_gain` (so a near-silent clip's noise floor is not blown up).
+/// Near-silent input is left unchanged.
+fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+    let peak = samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+    if peak < NORM_EPS {
+        return;
+    }
+    let gain = (target_peak / peak).min(max_gain);
+    for s in samples.iter_mut() {
+        *s = (*s * gain).clamp(-1.0, 1.0);
     }
 }
 
@@ -344,4 +363,49 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peak(s: &[f32]) -> f32 {
+        s.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
+    }
+
+    #[test]
+    fn test_normalize_boosts_quiet_signal() {
+        let mut s = vec![0.1, -0.05, 0.08];
+        normalize_peak(&mut s, 0.95, 15.0);
+        // peak 0.1 -> gain 9.5 (< cap) -> new peak ~0.95
+        assert!((peak(&s) - 0.95).abs() < 0.02, "peak was {}", peak(&s));
+    }
+
+    #[test]
+    fn test_normalize_respects_max_gain_on_very_quiet() {
+        let mut s = vec![0.02, -0.01];
+        normalize_peak(&mut s, 0.95, 15.0);
+        // peak 0.02 would need 47x; capped at 15 -> new peak ~0.30
+        assert!(peak(&s) <= 0.95);
+        assert!((peak(&s) - 0.30).abs() < 0.02, "peak was {}", peak(&s));
+    }
+
+    #[test]
+    fn test_normalize_loud_signal_no_clip() {
+        let mut s = vec![0.98, -0.9];
+        normalize_peak(&mut s, 0.95, 15.0);
+        assert!(peak(&s) <= 1.0);
+        assert!((peak(&s) - 0.95).abs() < 0.02, "peak was {}", peak(&s));
+    }
+
+    #[test]
+    fn test_normalize_silent_and_empty_unchanged() {
+        let mut silent = vec![0.0, 0.0, 0.0];
+        normalize_peak(&mut silent, 0.95, 15.0);
+        assert_eq!(silent, vec![0.0, 0.0, 0.0]);
+
+        let mut empty: Vec<f32> = vec![];
+        normalize_peak(&mut empty, 0.95, 15.0); // must not panic
+        assert!(empty.is_empty());
+    }
 }
