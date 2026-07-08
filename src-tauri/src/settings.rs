@@ -13,6 +13,12 @@ pub struct Settings {
     #[serde(rename = "recordingMode")]
     pub recording_mode: String,
     pub hotkey: String,
+    #[serde(rename = "cloudModel", default = "default_cloud_model")]
+    pub cloud_model: String,
+}
+
+fn default_cloud_model() -> String {
+    "accurate".to_string()
 }
 
 impl Default for Settings {
@@ -24,6 +30,7 @@ impl Default for Settings {
             groq_api_key: String::new(),
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
+            cloud_model: "accurate".to_string(),
         }
     }
 }
@@ -101,6 +108,30 @@ mod tests {
         let settings = Settings::load(&dir);
         assert_eq!(settings, Settings::default());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_cloud_model_is_accurate() {
+        assert_eq!(Settings::default().cloud_model, "accurate");
+    }
+
+    #[test]
+    fn test_legacy_config_without_cloud_model_defaults_accurate() {
+        // A config.json written before this field existed must still load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.cloud_model, "accurate");
+    }
+
+    #[test]
+    fn test_cloud_model_roundtrips() {
+        let dir = temp_dir().join("typr_test_cloud_model");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.cloud_model = "fast".to_string();
+        s.save(&dir).unwrap();
+        assert_eq!(Settings::load(&dir).cloud_model, "fast");
         let _ = fs::remove_dir_all(&dir);
     }
 }
