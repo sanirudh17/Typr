@@ -135,15 +135,7 @@ async function loadSettings() {
   await loadDictionary();
 
   // Populate mic dropdown
-  const mics = await invoke<MicDevice[]>("list_microphones");
-  micSelect.innerHTML = "";
-  mics.forEach((mic) => {
-    const option = document.createElement("option");
-    option.value = mic.name;
-    option.textContent = mic.name + (mic.is_default ? " (default)" : "");
-    micSelect.appendChild(option);
-  });
-  micSelect.value = currentSettings.microphone;
+  await populateMics();
 
   // Engine
   setEngine(currentSettings.engine);
@@ -163,6 +155,19 @@ async function loadSettings() {
 
   // Hotkey
   hotkeyText.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
+}
+
+async function populateMics() {
+  const mics = await invoke<MicDevice[]>("list_microphones");
+  const previous = currentSettings.microphone;
+  micSelect.innerHTML = "";
+  mics.forEach((mic) => {
+    const option = document.createElement("option");
+    option.value = mic.name;
+    option.textContent = mic.name + (mic.is_default ? " (default)" : "");
+    micSelect.appendChild(option);
+  });
+  micSelect.value = previous;
 }
 
 function setEngine(engine: string) {
@@ -215,6 +220,10 @@ engineCloud.addEventListener("click", () => {
 
 micSelect.addEventListener("change", () => saveSettings());
 
+micSelect.addEventListener("mousedown", () => {
+  populateMics();
+});
+
 modelSelect.addEventListener("change", async () => {
   await checkModelStatus();
   saveSettings();
@@ -256,6 +265,17 @@ modeToggle.addEventListener("click", () => {
 modePtt.addEventListener("click", () => {
   setRecordingMode("push-to-talk");
   saveSettings();
+});
+
+// Brief notice when the active input device changes or falls back
+let micNoticeTimer: number | undefined;
+listen<{ device: string; fellBack: boolean }>("mic-changed", (event) => {
+  const { device, fellBack } = event.payload;
+  statusText.textContent = fellBack ? `Switched to ${device}` : `Using ${device}`;
+  if (micNoticeTimer !== undefined) clearTimeout(micNoticeTimer);
+  micNoticeTimer = window.setTimeout(() => {
+    statusText.textContent = "Ready";
+  }, 2000);
 });
 
 // Listen for recording state changes
