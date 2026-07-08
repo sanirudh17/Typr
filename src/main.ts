@@ -9,6 +9,7 @@ interface Settings {
   groqApiKey: string;
   recordingMode: string;
   hotkey: string;
+  cloudModel: string;
 }
 
 interface TranscriptionItem {
@@ -48,6 +49,9 @@ const downloadBtn = document.getElementById("download-btn")!;
 const downloadProgress = document.getElementById("download-progress")!;
 const progressFill = document.getElementById("progress-fill")!;
 const groqKey = document.getElementById("groq-key") as HTMLInputElement;
+const cloudModelSettings = document.getElementById("cloud-model-settings")!;
+const modelFast = document.getElementById("model-fast")!;
+const modelAccurate = document.getElementById("model-accurate")!;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyText = document.getElementById("hotkey-text")!;
@@ -151,6 +155,9 @@ async function loadSettings() {
   // Groq key
   groqKey.value = currentSettings.groqApiKey;
 
+  // Cloud model
+  setCloudModel(currentSettings.cloudModel || "accurate");
+
   // Recording mode
   setRecordingMode(currentSettings.recordingMode);
 
@@ -164,6 +171,14 @@ function setEngine(engine: string) {
   engineCloud.classList.toggle("active", engine === "cloud");
   localSettings.classList.toggle("hidden", engine !== "local");
   cloudSettings.classList.toggle("hidden", engine !== "cloud");
+  cloudModelSettings.classList.toggle("hidden", engine !== "cloud");
+}
+
+function setCloudModel(model: string) {
+  const m = model === "fast" ? "fast" : "accurate";
+  currentSettings.cloudModel = m;
+  modelFast.classList.toggle("active", m === "fast");
+  modelAccurate.classList.toggle("active", m === "accurate");
 }
 
 function setRecordingMode(mode: string) {
@@ -222,6 +237,16 @@ downloadBtn.addEventListener("click", async () => {
 });
 
 groqKey.addEventListener("change", () => saveSettings());
+
+modelFast.addEventListener("click", () => {
+  setCloudModel("fast");
+  saveSettings();
+});
+
+modelAccurate.addEventListener("click", () => {
+  setCloudModel("accurate");
+  saveSettings();
+});
 
 modeToggle.addEventListener("click", () => {
   setRecordingMode("toggle");
