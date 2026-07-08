@@ -146,7 +146,7 @@ impl Recorder {
                 transcribe_local::transcribe_local(app, &model_path, &temp_path, &prompt).await
             }
             "cloud" => {
-                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt).await
+                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt, &settings.cloud_model).await
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };

@@ -13,7 +13,16 @@ fn groq_client() -> &'static reqwest::Client {
     })
 }
 
-pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str) -> Result<String, String> {
+/// Map the friendly cloud model value to a Groq model id.
+/// "fast" -> turbo (speed); anything else -> full large-v3 (accuracy).
+fn groq_model_id(model: &str) -> &'static str {
+    match model {
+        "fast" => "whisper-large-v3-turbo",
+        _ => "whisper-large-v3",
+    }
+}
+
+pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str, model: &str) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("Groq API key not set. Please enter your API key in settings.".to_string());
     }
@@ -33,8 +42,9 @@ pub async fn transcribe_groq(api_key: &str, audio_path: &PathBuf, prompt: &str) 
             .map_err(|e| e.to_string())?;
 
         let mut form = multipart::Form::new()
-            .text("model", "whisper-large-v3-turbo")
+            .text("model", groq_model_id(model))
             .text("language", "en")
+            .text("temperature", "0")
             .text("response_format", "json")
             .part("file", file_part);
 
@@ -106,8 +116,16 @@ mod tests {
     #[tokio::test]
     async fn test_empty_api_key() {
         let path = PathBuf::from("/tmp/test.wav");
-        let result = transcribe_groq("", &path, "").await;
+        let result = transcribe_groq("", &path, "", "accurate").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("API key not set"));
+    }
+
+    #[test]
+    fn test_groq_model_id_mapping() {
+        assert_eq!(groq_model_id("fast"), "whisper-large-v3-turbo");
+        assert_eq!(groq_model_id("accurate"), "whisper-large-v3");
+        assert_eq!(groq_model_id(""), "whisper-large-v3");
+        assert_eq!(groq_model_id("anything-else"), "whisper-large-v3");
     }
 }
