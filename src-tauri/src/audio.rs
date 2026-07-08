@@ -32,6 +32,40 @@ pub fn list_microphones() -> Vec<MicDevice> {
     devices
 }
 
+#[derive(Debug, PartialEq)]
+pub struct MicResolution {
+    pub target: String,
+    pub fell_back: bool,
+}
+
+/// Decide which device to actually open.
+/// - "default"              -> the current default device
+/// - a named device present -> itself
+/// - a named device absent  -> fall back to default (fell_back = true)
+/// - nothing usable         -> Err
+pub fn resolve_mic(setting: &str, available: &[String], default: Option<&str>) -> Result<MicResolution, String> {
+    if setting == "default" {
+        return match default {
+            Some(d) => Ok(MicResolution { target: d.to_string(), fell_back: false }),
+            None => Err("No default input device found".to_string()),
+        };
+    }
+    if available.iter().any(|n| n == setting) {
+        return Ok(MicResolution { target: setting.to_string(), fell_back: false });
+    }
+    match default {
+        Some(d) => Ok(MicResolution { target: d.to_string(), fell_back: true }),
+        None => Err(format!("Microphone '{}' not found and no default input device available", setting)),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MicStartInfo {
+    pub active_device: String,
+    pub fell_back: bool,
+    pub changed: bool,
+}
+
 struct SendStream(#[allow(dead_code)] cpal::Stream);
 unsafe impl Send for SendStream {}
 unsafe impl Sync for SendStream {}
@@ -368,6 +402,39 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_default_uses_default_device() {
+        let avail = vec!["Built-in".to_string(), "USB Mic".to_string()];
+        let r = resolve_mic("default", &avail, Some("Built-in")).unwrap();
+        assert_eq!(r, MicResolution { target: "Built-in".to_string(), fell_back: false });
+    }
+
+    #[test]
+    fn test_resolve_named_present() {
+        let avail = vec!["Built-in".to_string(), "USB Mic".to_string()];
+        let r = resolve_mic("USB Mic", &avail, Some("Built-in")).unwrap();
+        assert_eq!(r, MicResolution { target: "USB Mic".to_string(), fell_back: false });
+    }
+
+    #[test]
+    fn test_resolve_named_absent_falls_back_to_default() {
+        let avail = vec!["Built-in".to_string()];
+        let r = resolve_mic("USB Mic", &avail, Some("Built-in")).unwrap();
+        assert_eq!(r, MicResolution { target: "Built-in".to_string(), fell_back: true });
+    }
+
+    #[test]
+    fn test_resolve_named_absent_no_default_errors() {
+        let avail: Vec<String> = vec![];
+        assert!(resolve_mic("USB Mic", &avail, None).is_err());
+    }
+
+    #[test]
+    fn test_resolve_default_no_default_device_errors() {
+        let avail: Vec<String> = vec![];
+        assert!(resolve_mic("default", &avail, None).is_err());
+    }
 
     fn peak(s: &[f32]) -> f32 {
         s.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
