@@ -181,6 +181,44 @@ impl Dictionary {
         words.join(", ")
     }
 
+    /// Bias prompt for the transcription engine: vocabulary hints plus every
+    /// snippet trigger phrase, so the engine is more likely to actually *hear*
+    /// a trigger (so the snippet fires). De-duplicated case-insensitively and
+    /// capped at MAX_BIAS_CHARS, truncated at an entry boundary.
+    pub fn get_bias_prompt(&self) -> String {
+        let mut seen: Vec<String> = Vec::new();
+        let mut terms: Vec<&str> = Vec::new();
+
+        let hints = self.vocabulary_hints.iter().map(|s| s.as_str());
+        let triggers = self.replacements.iter().map(|r| r.find.as_str());
+        for raw in hints.chain(triggers) {
+            let term = raw.trim();
+            if term.is_empty() {
+                continue;
+            }
+            let lower = term.to_lowercase();
+            if seen.iter().any(|s| s == &lower) {
+                continue;
+            }
+            seen.push(lower);
+            terms.push(term);
+        }
+
+        let mut out = String::new();
+        for term in terms {
+            let addition = if out.is_empty() {
+                term.to_string()
+            } else {
+                format!(", {}", term)
+            };
+            if out.len() + addition.len() > MAX_BIAS_CHARS {
+                break;
+            }
+            out.push_str(&addition);
+        }
+        out
+    }
+
     pub fn apply_replacements(&self, text: &str) -> String {
         // Normalize multiple spaces in the input text to a single space
         let normalized_text = text.split_whitespace().collect::<Vec<&str>>().join(" ");
@@ -233,6 +271,10 @@ impl Dictionary {
         result
     }
 }
+
+/// Character budget for the engine bias prompt (Whisper's prompt window is
+/// ~224 tokens; keep it conservative and truncate at an entry boundary).
+const MAX_BIAS_CHARS: usize = 800;
 
 /// True when a replacement encodes its own intentional casing/structure and must
 /// NOT inherit the matched text's casing — emails, URLs, handles, code, acronyms,
@@ -461,6 +503,46 @@ mod tests {
             dict.apply_replacements("We need to produce power water from the river."),
             "We need to produce hydroelectric energy from the river."
         );
+    }
+
+    #[test]
+    fn test_bias_prompt_merges_hints_and_triggers() {
+        let mut dict = Dictionary::default();
+        dict.vocabulary_hints = vec!["Tauri".to_string()];
+        dict.replacements.push(ReplacementEntry {
+            find: "college mail".to_string(),
+            replace: "a@b.edu".to_string(),
+            case_sensitive: false,
+        });
+        let p = dict.get_bias_prompt();
+        assert!(p.contains("Tauri"));
+        assert!(p.contains("college mail"));
+    }
+
+    #[test]
+    fn test_bias_prompt_dedupes_case_insensitively_and_drops_empties() {
+        let mut dict = Dictionary::default();
+        dict.vocabulary_hints = vec!["Claude".to_string(), "  ".to_string()];
+        dict.replacements.push(ReplacementEntry {
+            find: "claude".to_string(),
+            replace: "x".to_string(),
+            case_sensitive: false,
+        });
+        let p = dict.get_bias_prompt();
+        assert_eq!(p.to_lowercase().matches("claude").count(), 1);
+        assert!(!p.contains(",  ,"));
+    }
+
+    #[test]
+    fn test_bias_prompt_truncates_at_entry_boundary_within_budget() {
+        let mut dict = Dictionary::default();
+        // 40 hints of ~27 chars each far exceeds the 800-char budget.
+        dict.vocabulary_hints = (0..40).map(|i| format!("term{:02}_padding_padding_word", i)).collect();
+        let p = dict.get_bias_prompt();
+        assert!(p.len() <= 800, "len was {}", p.len());
+        // No entry is cut mid-term: the string never ends with a partial ", ".
+        assert!(!p.ends_with(','));
+        assert!(!p.ends_with(", "));
     }
 
     #[test]

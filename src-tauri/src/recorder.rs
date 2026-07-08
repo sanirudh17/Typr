@@ -137,7 +137,7 @@ impl Recorder {
         // Transcribe
         let prompt = {
             let dict = dictionary.lock().unwrap();
-            dict.get_prompt()
+            dict.get_bias_prompt()
         };
 
         let transcribe_result = match settings.engine.as_str() {
