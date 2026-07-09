@@ -75,6 +75,10 @@ pub struct AudioRecorder {
     stream: Option<SendStream>,
     active_resolved_name: Option<String>,
     stream_errored: Arc<std::sync::atomic::AtomicBool>,
+    // The stream stays warm (playing) between dictations to avoid WASAPI capture
+    // start-up latency dropping the first ~1-2s of speech. This flag gates whether
+    // the callback actually retains samples, i.e. whether we're "recording".
+    capturing: Arc<std::sync::atomic::AtomicBool>,
     source_sample_rate: u32,
     source_channels: u16,
     amplitude_ring: Arc<Mutex<Vec<f32>>>,
@@ -98,6 +102,7 @@ impl AudioRecorder {
             stream: None,
             active_resolved_name: None,
             stream_errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            capturing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             source_sample_rate: 48000,
             source_channels: 1,
             amplitude_ring: Arc::new(Mutex::new(vec![0.0; 64])),
@@ -183,11 +188,18 @@ impl AudioRecorder {
         let frequency_bands = self.frequency_bands.clone();
         let fft_callback_divider = self.fft_callback_divider.clone();
         let stream_errored = self.stream_errored.clone();
+        let capturing = self.capturing.clone();
 
         let stream = device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    // Warm but idle: keep the device spinning, but don't retain audio
+                    // or run the visualizer until we're actually recording.
+                    if !capturing.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+
                     let mut buf = samples.lock().unwrap();
                     buf.extend_from_slice(data);
 
@@ -289,17 +301,19 @@ impl AudioRecorder {
             )
             .map_err(|e| e.to_string())?;
 
-        let _ = stream.pause();
+        // Start the stream immediately and keep it warm; the `capturing` flag decides
+        // whether the callback retains audio, so idling here costs only empty callbacks.
+        stream.play().map_err(|e| e.to_string())?;
         self.stream = Some(SendStream(stream));
         self.active_resolved_name = Some(res.target.clone());
         self.stream_errored.store(false, std::sync::atomic::Ordering::Relaxed);
-        println!("[Typr] Audio stream (re)built for '{}' (device '{}')", mic_name, res.target);
+        println!("[Typr] Audio stream (re)built and warmed for '{}' (device '{}')", mic_name, res.target);
         Ok(MicStartInfo { active_device: res.target, fell_back: res.fell_back, changed: true })
     }
 
     pub fn start(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
-        let info = self.ensure_initialized(mic_name)?;
-
+        // Clear buffers and begin retaining immediately on the already-warm stream, so
+        // there is no dead window while we re-resolve the device below.
         self.samples.lock().unwrap().clear();
         {
             let mut ring = self.amplitude_ring.lock().unwrap();
@@ -308,19 +322,33 @@ impl AudioRecorder {
             }
         }
         *self.amplitude_index.lock().unwrap() = 0;
+        self.capturing.store(true, std::sync::atomic::Ordering::Relaxed);
 
-        if let Some(ref s) = self.stream {
-            s.0.play().map_err(|e| e.to_string())?;
+        // Re-resolve / (re)build the device stream. Common case: the warm stream already
+        // serves the right device -> no rebuild, and we've been retaining since the flag flip.
+        let info = match self.ensure_initialized(mic_name) {
+            Ok(info) => info,
+            Err(e) => {
+                self.capturing.store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(e);
+            }
+        };
+
+        // If the stream was actually (re)built (first init / device change / prior error),
+        // any samples retained before the rebuild came from the old/abandoned stream — drop them.
+        if info.changed {
+            self.samples.lock().unwrap().clear();
         }
+
         println!("[Typr] Audio recording started");
         Ok(info)
     }
 
     pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {
-        if let Some(ref s) = self.stream {
-            let _ = s.0.pause();
-        }
-        println!("[Typr] Audio recording paused");
+        // Stop retaining audio, but keep the stream playing (warm) so the next dictation
+        // captures instantly with no WASAPI start-up latency.
+        self.capturing.store(false, std::sync::atomic::Ordering::Relaxed);
+        println!("[Typr] Audio recording stopped (stream kept warm)");
 
         let samples = self.samples.lock().unwrap();
         if samples.is_empty() {
