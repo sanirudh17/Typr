@@ -29,6 +29,13 @@ pub fn warm_server_matches(current: Option<&str>, intended: &str) -> bool {
     current == Some(intended)
 }
 
+/// Whether a just-finished download should proactively (re)start the local server:
+/// only when the local engine is selected AND the downloaded model is the selected one.
+/// Don't spin up a local server for a model the user isn't using (or while on cloud).
+pub fn should_warm_after_download(engine: &str, selected_model: &str, downloaded_model: &str) -> bool {
+    engine == "local" && selected_model == downloaded_model
+}
+
 /// Ensures the local Whisper HTTP server is running with the specified model.
 /// If the server is already running with a different model, it stops the old server and starts a new one.
 pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(), String> {
@@ -193,5 +200,15 @@ mod tests {
         assert!(warm_server_matches(Some("/x/ggml-medium.bin"), "/x/ggml-medium.bin"));
         assert!(!warm_server_matches(Some("/x/ggml-small.bin"), "/x/ggml-medium.bin"));
         assert!(!warm_server_matches(None, "/x/ggml-medium.bin"));
+    }
+
+    #[test]
+    fn test_should_warm_after_download() {
+        // local engine + the downloaded model is the selected one -> warm it
+        assert!(should_warm_after_download("local", "medium", "medium"));
+        // local engine but a different model was downloaded -> don't warm
+        assert!(!should_warm_after_download("local", "small", "medium"));
+        // on cloud -> never spin up the local server
+        assert!(!should_warm_after_download("cloud", "medium", "medium"));
     }
 }

@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{image::Image, Manager, State, WebviewUrl, WebviewWindowBuilder};
+#[cfg(not(windows))]
+use tauri::image::Image;
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use typr_lib::audio;
@@ -227,7 +229,26 @@ async fn download_model(
     let url = transcribe_local::model_download_url(&model_size);
     let model_file = transcribe_local::model_filename(&model_size);
     let dest = state.app_dir.join(&model_file);
-    downloader::download_model(app, &url, &dest).await
+    downloader::download_model(app.clone(), &url, &dest).await?;
+
+    // Proactively warm the server if the just-downloaded model is the one in use,
+    // so the first local dictation isn't stalled ~15s by a cold model load.
+    let (engine, selected) = {
+        let s = state.settings.lock().unwrap();
+        (s.engine.clone(), s.whisper_model.clone())
+    };
+    if typr_lib::whisper_server::should_warm_after_download(&engine, &selected, &model_size) {
+        let app_clone = app.clone();
+        let model_path = dest.clone();
+        tauri::async_runtime::spawn(async move {
+            println!("[Typr] Warming local Whisper server after download of {:?}", model_path);
+            if let Err(e) = typr_lib::whisper_server::ensure_running(&app_clone, &model_path).await {
+                eprintln!("[Typr] Post-download warm-up failed: {}", e);
+            }
+        });
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -314,6 +335,7 @@ fn main() {
             // Handle window close to properly exit the app
             let main_window = app.get_webview_window("main");
             if let Some(window) = main_window {
+                #[cfg(not(windows))]
                 match Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     Ok(icon) => {
                         if let Err(e) = window.set_icon(icon) {
