@@ -63,7 +63,25 @@ pub async fn transcribe_local(
             form
         };
 
-        // Try direct POST to warm local server first to bypass health check latency overhead on healthy cases
+        // Guard the hot path on model identity: reuse the warm server only if it is
+        // already serving the selected model; otherwise (re)start it first so we never
+        // transcribe with a stale model (e.g. right after downloading a new model).
+        let intended_key = model_path.to_string_lossy().to_string();
+        let current = crate::whisper_server::current_model_key();
+        if !crate::whisper_server::warm_server_matches(current.as_deref(), &intended_key) {
+            println!(
+                "[Typr] Warm server model mismatch (have {:?}, want {}). Ensuring correct model...",
+                current, intended_key
+            );
+            if let Err(e) = crate::whisper_server::ensure_running(app, model_path).await {
+                println!(
+                    "[Typr] Failed to ensure correct model server: {}. Will still try POST then sidecars...",
+                    e
+                );
+            }
+        }
+
+        // POST to the (now correct) warm server.
         let mut http_result = local_client()
             .post("http://127.0.0.1:8080/inference")
             .multipart(make_form(file_bytes.clone()))
