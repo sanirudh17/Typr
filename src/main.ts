@@ -267,6 +267,10 @@ modePtt.addEventListener("click", () => {
   saveSettings();
 });
 
+// Label reflecting the true recording state, so the transient mic notice can
+// restore to it instead of blindly resetting to "Ready" mid-recording.
+let recordingLabel = "Ready";
+
 // Brief notice when the active input device changes or falls back
 let micNoticeTimer: number | undefined;
 listen<{ device: string; fellBack: boolean }>("mic-changed", (event) => {
@@ -274,7 +278,7 @@ listen<{ device: string; fellBack: boolean }>("mic-changed", (event) => {
   statusText.textContent = fellBack ? `Switched to ${device}` : `Using ${device}`;
   if (micNoticeTimer !== undefined) clearTimeout(micNoticeTimer);
   micNoticeTimer = window.setTimeout(() => {
-    statusText.textContent = "Ready";
+    statusText.textContent = recordingLabel;
   }, 2000);
 });
 
@@ -283,19 +287,25 @@ listen<string>("recording-state", (event) => {
   const state = event.payload;
   statusDot.className = "";
   statusIndicator.className = "";
+  // A real state transition takes authority over any pending mic notice.
+  if (micNoticeTimer !== undefined) {
+    clearTimeout(micNoticeTimer);
+    micNoticeTimer = undefined;
+  }
   if (state === "Recording") {
     statusDot.classList.add("recording");
     statusIndicator.classList.add("recording");
-    statusText.textContent = "Recording...";
+    recordingLabel = "Recording...";
   } else if (state === "Transcribing") {
     statusDot.classList.add("transcribing");
     statusIndicator.classList.add("transcribing");
-    statusText.textContent = "Transcribing...";
+    recordingLabel = "Transcribing...";
   } else {
     statusDot.classList.add("ready");
     statusIndicator.classList.add("ready");
-    statusText.textContent = "Ready";
+    recordingLabel = "Ready";
   }
+  statusText.textContent = recordingLabel;
 });
 
 // Listen for download progress
