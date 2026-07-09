@@ -19,6 +19,16 @@ fn health_client() -> &'static reqwest::Client {
 static SERVER_CHILD: Mutex<Option<CommandChild>> = Mutex::new(None);
 static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
 
+/// The model key (path string) the persistent server is currently serving, if any.
+pub fn current_model_key() -> Option<String> {
+    CURRENT_MODEL.lock().unwrap().clone()
+}
+
+/// Whether the warm server (serving `current`) already has the `intended` model loaded.
+pub fn warm_server_matches(current: Option<&str>, intended: &str) -> bool {
+    current == Some(intended)
+}
+
 /// Ensures the local Whisper HTTP server is running with the specified model.
 /// If the server is already running with a different model, it stops the old server and starts a new one.
 pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(), String> {
@@ -171,5 +181,17 @@ async fn is_server_healthy() -> bool {
     {
         Ok(_) => true,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_warm_server_matches() {
+        assert!(warm_server_matches(Some("/x/ggml-medium.bin"), "/x/ggml-medium.bin"));
+        assert!(!warm_server_matches(Some("/x/ggml-small.bin"), "/x/ggml-medium.bin"));
+        assert!(!warm_server_matches(None, "/x/ggml-medium.bin"));
     }
 }
