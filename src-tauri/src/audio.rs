@@ -59,6 +59,12 @@ pub fn resolve_mic(setting: &str, available: &[String], default: Option<&str>) -
     }
 }
 
+/// Whether the warm (paused) stream can be reused for `requested` without rebuilding —
+/// keeps device enumeration off the record hot path.
+pub fn can_reuse_stream(stream_present: bool, errored: bool, active_setting: Option<&str>, requested: &str) -> bool {
+    stream_present && !errored && active_setting == Some(requested)
+}
+
 #[derive(Debug, Clone)]
 pub struct MicStartInfo {
     pub active_device: String,
@@ -73,12 +79,11 @@ unsafe impl Sync for SendStream {}
 pub struct AudioRecorder {
     samples: Arc<Mutex<Vec<f32>>>,
     stream: Option<SendStream>,
+    // The mic setting (e.g. "default" or a device name) the current stream was built for.
+    // Reuse keys on this so the hot path skips device enumeration entirely.
+    active_setting: Option<String>,
     active_resolved_name: Option<String>,
     stream_errored: Arc<std::sync::atomic::AtomicBool>,
-    // The stream stays warm (playing) between dictations to avoid WASAPI capture
-    // start-up latency dropping the first ~1-2s of speech. This flag gates whether
-    // the callback actually retains samples, i.e. whether we're "recording".
-    capturing: Arc<std::sync::atomic::AtomicBool>,
     source_sample_rate: u32,
     source_channels: u16,
     amplitude_ring: Arc<Mutex<Vec<f32>>>,
@@ -100,9 +105,9 @@ impl AudioRecorder {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             stream: None,
+            active_setting: None,
             active_resolved_name: None,
             stream_errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            capturing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             source_sample_rate: 48000,
             source_channels: 1,
             amplitude_ring: Arc::new(Mutex::new(vec![0.0; 64])),
@@ -131,24 +136,22 @@ impl AudioRecorder {
     }
 
     pub fn ensure_initialized(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
-        let host = cpal::default_host();
+        // Fast path: reuse the warm stream for the same setting without touching cpal
+        // enumeration (that enumeration was the ~1-2s dead window on the record path).
+        let errored = self.stream_errored.load(std::sync::atomic::Ordering::Relaxed);
+        if can_reuse_stream(self.stream.is_some(), errored, self.active_setting.as_deref(), mic_name) {
+            let active = self.active_resolved_name.clone().unwrap_or_else(|| mic_name.to_string());
+            return Ok(MicStartInfo { active_device: active, fell_back: false, changed: false });
+        }
 
-        // Enumerate live devices + default so we can resolve the real target.
+        // Rebuild path: enumerate live devices + default to resolve the real target.
+        let host = cpal::default_host();
         let default_name = host.default_input_device().and_then(|d| d.name().ok());
         let available: Vec<String> = host
             .input_devices()
             .map(|it| it.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default();
         let res = resolve_mic(mic_name, &available, default_name.as_deref())?;
-
-        // Reuse the cached stream only if it targets the same device and hasn't errored.
-        let errored = self.stream_errored.load(std::sync::atomic::Ordering::Relaxed);
-        if self.stream.is_some()
-            && !errored
-            && self.active_resolved_name.as_deref() == Some(res.target.as_str())
-        {
-            return Ok(MicStartInfo { active_device: res.target, fell_back: false, changed: false });
-        }
 
         // Open the resolved device. Prefer the default object when the setting is
         // "default" to avoid a same-name ambiguity between two devices.
@@ -188,18 +191,11 @@ impl AudioRecorder {
         let frequency_bands = self.frequency_bands.clone();
         let fft_callback_divider = self.fft_callback_divider.clone();
         let stream_errored = self.stream_errored.clone();
-        let capturing = self.capturing.clone();
 
         let stream = device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Warm but idle: keep the device spinning, but don't retain audio
-                    // or run the visualizer until we're actually recording.
-                    if !capturing.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-
                     let mut buf = samples.lock().unwrap();
                     buf.extend_from_slice(data);
 
@@ -301,19 +297,37 @@ impl AudioRecorder {
             )
             .map_err(|e| e.to_string())?;
 
-        // Start the stream immediately and keep it warm; the `capturing` flag decides
-        // whether the callback retains audio, so idling here costs only empty callbacks.
-        stream.play().map_err(|e| e.to_string())?;
+        // Leave the freshly built stream paused (idle); start()/the warm-up will play it.
+        let _ = stream.pause();
         self.stream = Some(SendStream(stream));
+        self.active_setting = Some(mic_name.to_string());
         self.active_resolved_name = Some(res.target.clone());
         self.stream_errored.store(false, std::sync::atomic::Ordering::Relaxed);
-        println!("[Typr] Audio stream (re)built and warmed for '{}' (device '{}')", mic_name, res.target);
+        println!("[Typr] Audio stream (re)built (paused) for '{}' (device '{}')", mic_name, res.target);
         Ok(MicStartInfo { active_device: res.target, fell_back: res.fell_back, changed: true })
     }
 
+    /// Play the (pre-built, paused) stream to warm the device without recording — used by
+    /// the one-time startup warm-up. Callbacks that fire during warm-up are discarded by
+    /// `device_pause_idle`/`start`.
+    pub fn device_play(&self) {
+        if let Some(ref s) = self.stream {
+            let _ = s.0.play();
+        }
+    }
+
+    /// Settle the warmed stream back to idle (paused) and drop any warm-up samples.
+    pub fn device_pause_idle(&self) {
+        if let Some(ref s) = self.stream {
+            let _ = s.0.pause();
+        }
+        self.samples.lock().unwrap().clear();
+    }
+
     pub fn start(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
-        // Clear buffers and begin retaining immediately on the already-warm stream, so
-        // there is no dead window while we re-resolve the device below.
+        // Reuse the warm stream (fast, no enumeration) or rebuild if the mic changed.
+        let info = self.ensure_initialized(mic_name)?;
+
         self.samples.lock().unwrap().clear();
         {
             let mut ring = self.amplitude_ring.lock().unwrap();
@@ -322,33 +336,22 @@ impl AudioRecorder {
             }
         }
         *self.amplitude_index.lock().unwrap() = 0;
-        self.capturing.store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Re-resolve / (re)build the device stream. Common case: the warm stream already
-        // serves the right device -> no rebuild, and we've been retaining since the flag flip.
-        let info = match self.ensure_initialized(mic_name) {
-            Ok(info) => info,
-            Err(e) => {
-                self.capturing.store(false, std::sync::atomic::Ordering::Relaxed);
-                return Err(e);
-            }
-        };
-
-        // If the stream was actually (re)built (first init / device change / prior error),
-        // any samples retained before the rebuild came from the old/abandoned stream — drop them.
-        if info.changed {
-            self.samples.lock().unwrap().clear();
+        // Start capture on the (already-activated) device — a fast start after warm-up.
+        if let Some(ref s) = self.stream {
+            s.0.play().map_err(|e| e.to_string())?;
         }
-
         println!("[Typr] Audio recording started");
         Ok(info)
     }
 
     pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {
-        // Stop retaining audio, but keep the stream playing (warm) so the next dictation
-        // captures instantly with no WASAPI start-up latency.
-        self.capturing.store(false, std::sync::atomic::Ordering::Relaxed);
-        println!("[Typr] Audio recording stopped (stream kept warm)");
+        // Pause the stream (mic off between records); the device stays activated so the
+        // next start() is a fast play with no dropped audio.
+        if let Some(ref s) = self.stream {
+            let _ = s.0.pause();
+        }
+        println!("[Typr] Audio recording stopped (mic paused)");
 
         let samples = self.samples.lock().unwrap();
         if samples.is_empty() {
@@ -482,6 +485,18 @@ mod tests {
     fn test_resolve_default_no_default_device_errors() {
         let avail: Vec<String> = vec![];
         assert!(resolve_mic("default", &avail, None).is_err());
+    }
+
+    #[test]
+    fn test_can_reuse_stream() {
+        // healthy stream built for the same setting -> reuse
+        assert!(can_reuse_stream(true, false, Some("default"), "default"));
+        // no stream yet -> rebuild
+        assert!(!can_reuse_stream(false, false, None, "default"));
+        // stream errored (e.g. device unplugged) -> rebuild
+        assert!(!can_reuse_stream(true, true, Some("default"), "default"));
+        // different setting requested -> rebuild
+        assert!(!can_reuse_stream(true, false, Some("default"), "USB Mic"));
     }
 
     fn peak(s: &[f32]) -> f32 {

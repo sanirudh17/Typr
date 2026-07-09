@@ -126,7 +126,13 @@ async fn save_settings(
             println!("[Typr] Re-initializing audio stream in background for new mic: {}", mic);
             if let Err(e) = recorder.pre_initialize(&mic) {
                 eprintln!("[Typr] Failed to pre-initialize new mic: {}", e);
+                return;
             }
+            // Warm the newly selected device so its first record captures instantly.
+            recorder.begin_warm();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            recorder.end_warm();
+            println!("[Typr] New mic warm-up complete (mic idle)");
         });
     }
 
@@ -401,11 +407,19 @@ fn main() {
             let mic = state.settings.lock().unwrap().microphone.clone();
             let handle_for_warmup = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let state_clone = handle_for_warmup.state::<AppState>();
+                // Clone the Recorder out so we don't hold `State` across the await below.
+                let recorder = handle_for_warmup.state::<AppState>().recorder.clone();
                 println!("[Typr] Pre-initializing audio stream in background for mic: {}", mic);
-                if let Err(e) = state_clone.recorder.pre_initialize(&mic) {
+                if let Err(e) = recorder.pre_initialize(&mic) {
                     eprintln!("[Typr] Failed to pre-initialize audio stream on startup: {}", e);
+                    return;
                 }
+                // One-time device warm-up: pay the cold activation up front so even the
+                // first record captures instantly, then settle the mic back to idle (off).
+                recorder.begin_warm();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                recorder.end_warm();
+                println!("[Typr] Audio device warm-up complete (mic idle)");
             });
 
             // Pre-initialize the Whisper HTTP Server if running in local mode

@@ -53,6 +53,20 @@ impl Recorder {
         recorder.ensure_initialized(mic_name).map(|_| ())
     }
 
+    /// Begin the one-time device warm-up: play the pre-built stream so the audio device
+    /// activates (paying the cold ~1-2s cost up front, off the record path).
+    pub fn begin_warm(&self) {
+        self.audio_recorder.lock().unwrap().device_play();
+    }
+
+    /// End the warm-up: settle the stream back to idle (mic off) — but never interrupt an
+    /// active recording, so only pause if we're still Ready.
+    pub fn end_warm(&self) {
+        if *self.state.lock().unwrap() == RecordingState::Ready {
+            self.audio_recorder.lock().unwrap().device_pause_idle();
+        }
+    }
+
     pub fn get_state(&self) -> RecordingState {
         self.state.lock().unwrap().clone()
     }
