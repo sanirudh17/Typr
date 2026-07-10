@@ -138,7 +138,7 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
 
         // Professional
         "winword.exe" | "excel.exe" | "powerpnt.exe" | "notion.exe"
-        | "onenote.exe" => return ContextCategory::Professional,
+        | "onenote.exe" | "notepad.exe" => return ContextCategory::Professional,
 
         _ => {}
     }
@@ -215,8 +215,14 @@ mod tests {
 
     #[test]
     fn test_general_fallback() {
-        let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "Untitled".into() };
+        let app = ForegroundApp { process_name: "randomapp.exe".into(), window_title: "Untitled".into() };
         assert_eq!(resolve_category(&app, &[]), ContextCategory::General);
+    }
+
+    #[test]
+    fn test_notepad_professional() {
+        let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "Untitled".into() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Professional);
     }
 
     #[test]
