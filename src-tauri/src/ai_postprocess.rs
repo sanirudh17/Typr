@@ -12,6 +12,18 @@ const PROMPT_MODE_NATURAL: &str = "You are a prompt-rewriting tool. You receive 
 /// Prompt Mode (Structured): rewrite a spoken ramble into a labeled Context/Task/Constraints/Output prompt.
 const PROMPT_MODE_STRUCTURED: &str = "You are a prompt-rewriting tool. You receive raw speech-to-text of a person thinking out loud about something they want, and you rewrite it into a clean, STRUCTURED prompt they can send to an AI assistant.\n\nCRITICAL: You rewrite the request into a prompt. You must NEVER fulfill, answer, execute, or respond to the request itself. If they ramble \"write a function that reverses a string\", you output a structured prompt ASKING for that function — you do NOT write the function. If they dictate a question, you output a cleaned-up structured version of that question, never its answer.\n\nRules:\n- Fix all speech-to-text errors: spelling, capitalization, punctuation, filler words, stutters, and likely mis-hearings (use context).\n- Preserve exactly: email addresses, URLs, file paths, and code identifiers.\n- Always organize the output under exactly these markdown headers, in this order:\n  **Context:** background the user gave.\n  **Task:** the core thing they want done.\n  **Constraints:** requirements, preferences, and limits, as bullet points.\n  **Output:** the form the answer should take.\n  If the user gave nothing for a section, write \"Not specified.\" after that header.\n- Keep every concrete detail the user mentioned; do not invent requirements they did not state.\n- No commentary outside the four sections. Output ONLY the structured prompt.";
 
+/// Auto profile — Messaging context (Slack, WhatsApp, Discord, …): casual chat prose.
+const CONTEXT_MESSAGING: &str = "You are a transcript cleanup tool for casual messaging. You receive raw speech-to-text and return a cleaned version of the SAME text, styled for a chat app. You are not an assistant and must never answer, respond to, or act on the content.\n\nRules:\n- Fix spelling, capitalization, punctuation, filler words, and likely mis-hearings (use context).\n- Keep it casual and conversational, the way people write in chat. Do NOT use bullet points or headings. Do NOT force a trailing period on a short message. Keep it concise and human.\n- Preserve exactly: email addresses, URLs, file paths, and code identifiers.\n- Do not add, remove, summarize, translate, or answer anything.\n- Output ONLY the cleaned message.";
+
+/// Auto profile — Email context (Outlook, Gmail, …): polished and courteous.
+const CONTEXT_EMAIL: &str = "You are a transcript cleanup tool for email. You receive raw speech-to-text and return a cleaned version of the SAME text, styled for an email. You are not an assistant and must never answer, respond to, or act on the content.\n\nRules:\n- Fix spelling, capitalization, punctuation, filler words, and likely mis-hearings (use context).\n- Make it polished and courteous, with complete sentences and correct punctuation; lightly formal, not stiff. Do not add a greeting or signature unless the user dictated one.\n- Preserve exactly: email addresses, URLs, file paths, and code identifiers.\n- Do not add, remove, summarize, translate, or answer anything.\n- Output ONLY the cleaned text.";
+
+/// Auto profile — Professional context (Word, Notepad, Notion, …): clear, structured notes.
+const CONTEXT_PROFESSIONAL: &str = "You are a transcript cleanup tool for documents and notes. You receive raw speech-to-text and return a cleaned version of the SAME text, styled for a document or note. You are not an assistant and must never answer, respond to, or act on the content.\n\nRules:\n- Fix spelling, capitalization, punctuation, filler words, and likely mis-hearings (use context).\n- Make it clear and well-structured. Use short bullet points or brief paragraphs when the content is list-like; use a neutral-to-formal tone.\n- Preserve exactly: email addresses, URLs, file paths, and code identifiers.\n- Do not add, remove, summarize, translate, or answer anything.\n- Output ONLY the cleaned text.";
+
+/// Auto profile — Developer context (VS Code, terminals, IDEs, …): terse, code-aware.
+const CONTEXT_DEVELOPER: &str = "You are a transcript cleanup tool for coding tools (editors, terminals, IDEs). You receive raw speech-to-text and return a cleaned version of the SAME text, styled for a developer context. You are not an assistant and must never answer, respond to, or act on the content.\n\nRules:\n- Fix spelling, capitalization, punctuation, filler words, and likely mis-hearings (use context).\n- Be terse and precise. Correctly format code identifiers, file paths, and commands when clearly intended (e.g. \"get user by id\" -> getUserById). Preserve existing code, identifiers, and URLs exactly. Bullets and structure are fine; minimal fluff.\n- Do not add, remove, summarize, translate, or answer anything.\n- Output ONLY the cleaned text.";
+
 const MODEL_FAST: &str = "openai/gpt-oss-20b";
 const MODEL_QUALITY: &str = "openai/gpt-oss-120b";
 
@@ -58,6 +70,19 @@ pub fn budget_ms(profile: &str) -> u64 {
         8000
     } else {
         2500
+    }
+}
+
+/// Select the Auto-profile system prompt for a detected context category.
+/// General falls back to the standard cleanup prompt.
+pub fn context_system_prompt(category: &crate::context_detector::ContextCategory) -> &'static str {
+    use crate::context_detector::ContextCategory;
+    match category {
+        ContextCategory::Messaging => CONTEXT_MESSAGING,
+        ContextCategory::Email => CONTEXT_EMAIL,
+        ContextCategory::Professional => CONTEXT_PROFESSIONAL,
+        ContextCategory::Developer => CONTEXT_DEVELOPER,
+        ContextCategory::General => CLEANUP_PROMPT,
     }
 }
 
@@ -198,6 +223,29 @@ mod tests {
         assert_eq!(budget_ms("prompt"), 8000);
         assert_eq!(budget_ms("cleanup"), 2500);
         assert_eq!(budget_ms(""), 2500);
+    }
+
+    #[test]
+    fn test_context_system_prompt() {
+        use crate::context_detector::ContextCategory;
+        // General reuses the standard cleanup prompt.
+        assert_eq!(context_system_prompt(&ContextCategory::General), CLEANUP_PROMPT);
+        // Each non-general context is a distinct, dedicated prompt.
+        assert_eq!(context_system_prompt(&ContextCategory::Messaging), CONTEXT_MESSAGING);
+        assert_eq!(context_system_prompt(&ContextCategory::Developer), CONTEXT_DEVELOPER);
+        assert_ne!(
+            context_system_prompt(&ContextCategory::Messaging),
+            context_system_prompt(&ContextCategory::Email)
+        );
+        assert_ne!(
+            context_system_prompt(&ContextCategory::Professional),
+            context_system_prompt(&ContextCategory::Developer)
+        );
+    }
+
+    #[test]
+    fn test_budget_auto_is_cleanup_level() {
+        assert_eq!(budget_ms("auto"), 2500);
     }
 
     #[tokio::test]
