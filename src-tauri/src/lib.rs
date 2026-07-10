@@ -9,6 +9,7 @@ pub mod downloader;
 pub mod history;
 pub mod dictionary;
 pub mod whisper_server;
+pub mod ai_postprocess;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
