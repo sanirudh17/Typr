@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::ai_postprocess;
 use crate::audio::AudioRecorder;
 use crate::cleanup::cleanup_text;
 use crate::dictionary::Dictionary;
@@ -188,19 +189,43 @@ impl Recorder {
 
         let raw_text = transcribe_result?;
 
-        // Apply dictionary replacements
+        // Apply dictionary replacements (exact snippet/email expansions — kept before the LLM)
         let replaced = {
             let dict = dictionary.lock().unwrap();
             dict.apply_replacements(&raw_text)
         };
 
-        // Clean up text
-        let cleaned = cleanup_text(&replaced);
+        // Deterministic cleanup is the always-available fallback.
+        let deterministic = cleanup_text(&replaced);
+
+        // Optional Groq LLM cleanup with a hard 2.5s budget. On off/offline/slow/error we
+        // paste the deterministic result instead, so a dictation is never blocked.
+        let final_text = if settings.ai_enabled {
+            let llm = match tokio::time::timeout(
+                Duration::from_millis(2500),
+                ai_postprocess::postprocess(&settings.groq_api_key, &replaced, &settings.ai_model),
+            )
+            .await
+            {
+                Ok(Ok(clean)) => Some(clean),
+                Ok(Err(e)) => {
+                    println!("[Typr] AI post-process skipped (error): {}", e);
+                    None
+                }
+                Err(_) => {
+                    println!("[Typr] AI post-process skipped (exceeded 2.5s budget)");
+                    None
+                }
+            };
+            choose_final(llm, deterministic)
+        } else {
+            deterministic
+        };
 
         // Auto-paste and record history
-        if !cleaned.is_empty() {
-            paste_text(&cleaned)?;
-            let _ = history.lock().unwrap().add_item(cleaned.clone(), duration_secs, app_dir);
+        if !final_text.is_empty() {
+            paste_text(&final_text)?;
+            let _ = history.lock().unwrap().add_item(final_text.clone(), duration_secs, app_dir);
             let _ = app.emit("history-updated", ());
         }
 
@@ -209,7 +234,16 @@ impl Recorder {
             transcription_started_at.elapsed()
         );
 
-        Ok(cleaned)
+        Ok(final_text)
+    }
+}
+
+/// Pick the final text to paste: the LLM output when it produced non-empty text, else the
+/// deterministic fallback (LLM off, offline, slow, errored, or returned nothing).
+fn choose_final(llm: Option<String>, fallback: String) -> String {
+    match llm {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => fallback,
     }
 }
 
@@ -221,5 +255,20 @@ mod tests {
     fn test_initial_state_is_ready() {
         let recorder = Recorder::new();
         assert_eq!(recorder.get_state(), RecordingState::Ready);
+    }
+
+    #[test]
+    fn test_choose_final_prefers_nonempty_llm() {
+        assert_eq!(choose_final(Some("clean text".to_string()), "fallback".to_string()), "clean text");
+    }
+
+    #[test]
+    fn test_choose_final_falls_back_on_empty_llm() {
+        assert_eq!(choose_final(Some("   ".to_string()), "fallback".to_string()), "fallback");
+    }
+
+    #[test]
+    fn test_choose_final_falls_back_on_none() {
+        assert_eq!(choose_final(None, "fallback".to_string()), "fallback");
     }
 }
