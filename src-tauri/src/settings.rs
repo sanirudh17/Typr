@@ -26,7 +26,7 @@ impl Default for Settings {
         Self {
             microphone: "default".to_string(),
             engine: "local".to_string(),
-            whisper_model: "small".to_string(),
+            whisper_model: "medium.en-q5_0".to_string(),
             groq_api_key: String::new(),
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
@@ -66,7 +66,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.microphone, "default");
         assert_eq!(settings.engine, "local");
-        assert_eq!(settings.whisper_model, "small");
+        assert_eq!(settings.whisper_model, "medium.en-q5_0");
         assert_eq!(settings.groq_api_key, "");
         assert_eq!(settings.recording_mode, "toggle");
         assert_eq!(settings.hotkey, "CmdOrCtrl+Shift+Space");

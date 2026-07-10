@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 
@@ -8,11 +8,27 @@ static LOCAL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 fn local_client() -> &'static reqwest::Client {
     LOCAL_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5)) // Bounded 5-second timeout to fail-fast and fallback if server hangs
+            // Safety cap only. The real timeout is set per-request, scaled to audio length
+            // (see `post_timeout` below) so a legitimately-slow decode on a battery-throttled
+            // GPU is NOT killed and forced down the cold-sidecar fallback.
+            .timeout(Duration::from_secs(180))
             .no_proxy() // Disables system proxy detection to prevent WPAD lookup stalls when offline
             .build()
             .unwrap_or_default()
     })
+}
+
+/// Estimate recorded audio length (seconds) from a 16 kHz mono s16 WAV's byte length.
+/// Used to scale the inference timeout; not exact, but well within the safety margin.
+fn estimate_wav_seconds(byte_len: usize) -> f64 {
+    // 16000 samples/s * 2 bytes/sample = 32000 B/s of PCM, past the 44-byte header.
+    byte_len.saturating_sub(44) as f64 / 32_000.0
+}
+
+/// Timeout for a warm-server inference POST, scaled to the clip length. Floor keeps short
+/// clips from failing fast into a cold restart on a slow GPU; cap bounds a genuine hang.
+fn post_timeout_for(audio_secs: f64) -> Duration {
+    Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
 pub async fn transcribe_local(
@@ -47,6 +63,16 @@ pub async fn transcribe_local(
     // Read audio bytes once
     let file_bytes_result = std::fs::read(audio_path);
     if let Ok(file_bytes) = file_bytes_result {
+        // Scale the inference timeout to the clip length so a slow-but-fine decode on a
+        // battery-throttled GPU stays on the warm server instead of tripping the fallback.
+        let est_audio_secs = estimate_wav_seconds(file_bytes.len());
+        let post_timeout = post_timeout_for(est_audio_secs);
+        println!(
+            "[Typr] Local inference: ~{:.1}s audio; warm-server POST timeout {:.0}s",
+            est_audio_secs,
+            post_timeout.as_secs_f64()
+        );
+
         // Build the request body helper
         let make_form = |bytes: Vec<u8>| {
             let part = reqwest::multipart::Part::bytes(bytes)
@@ -84,6 +110,7 @@ pub async fn transcribe_local(
         // POST to the (now correct) warm server.
         let mut http_result = local_client()
             .post("http://127.0.0.1:8080/inference")
+            .timeout(post_timeout)
             .multipart(make_form(file_bytes.clone()))
             .send()
             .await;
@@ -96,6 +123,7 @@ pub async fn transcribe_local(
                     println!("[Typr] Persistent server ensured healthy. Retrying inference POST...");
                     http_result = local_client()
                         .post("http://127.0.0.1:8080/inference")
+                        .timeout(post_timeout)
                         .multipart(make_form(file_bytes))
                         .send()
                         .await;
@@ -115,9 +143,12 @@ pub async fn transcribe_local(
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
                     let text = inf_res.text.trim().to_string();
+                    let elapsed = http_start.elapsed();
                     println!(
-                        "[Typr] Persistent HTTP Whisper completed in {:?}. Output: {}",
-                        http_start.elapsed(),
+                        "[Typr] Persistent HTTP Whisper completed in {:?} (~{:.2}x realtime, {:.1}s audio). Output: {}",
+                        elapsed,
+                        elapsed.as_secs_f64() / est_audio_secs.max(0.1),
+                        est_audio_secs,
                         text
                     );
                     return Ok(text);
@@ -272,6 +303,9 @@ mod tests {
     fn test_model_filename() {
         assert_eq!(model_filename("small"), "ggml-small.bin");
         assert_eq!(model_filename("medium"), "ggml-medium.bin");
+        // English quantized IDs (the current defaults) must map to the real HF filenames.
+        assert_eq!(model_filename("small.en-q5_1"), "ggml-small.en-q5_1.bin");
+        assert_eq!(model_filename("medium.en-q5_0"), "ggml-medium.en-q5_0.bin");
     }
 
     #[test]
@@ -280,5 +314,32 @@ mod tests {
             model_download_url("small"),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
         );
+        assert_eq!(
+            model_download_url("medium.en-q5_0"),
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin"
+        );
+    }
+
+    #[test]
+    fn test_estimate_wav_seconds() {
+        // 32000 B/s of PCM after a 44-byte header.
+        assert_eq!(estimate_wav_seconds(44), 0.0);
+        assert_eq!(estimate_wav_seconds(44 + 32_000), 1.0);
+        assert_eq!(estimate_wav_seconds(44 + 320_000), 10.0);
+        // Undersized/garbage input never underflows.
+        assert_eq!(estimate_wav_seconds(0), 0.0);
+    }
+
+    #[test]
+    fn test_post_timeout_for() {
+        // Short clips get the floor, not a fail-fast 5s.
+        assert_eq!(post_timeout_for(0.0), Duration::from_secs(20));
+        assert_eq!(post_timeout_for(1.0), Duration::from_secs(20));
+        // Mid-length scales up (5s -> 30s).
+        assert_eq!(post_timeout_for(5.0), Duration::from_secs(30));
+        // Long clips scale further (34s -> 117s), well past a slow decode.
+        assert_eq!(post_timeout_for(34.0), Duration::from_secs(117));
+        // Cap bounds a genuine hang.
+        assert_eq!(post_timeout_for(1000.0), Duration::from_secs(180));
     }
 }

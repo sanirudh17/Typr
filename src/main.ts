@@ -140,8 +140,17 @@ async function loadSettings() {
   // Engine
   setEngine(currentSettings.engine);
 
-  // Model
+  // Model — select the stored model. All four options (full + English-quantized, small +
+  // medium) are valid selections, so an existing "small"/"medium" choice is kept as-is.
+  // Only rescue a truly unknown/blank value so the dropdown never shows empty.
   modelSelect.value = currentSettings.whisperModel;
+  if (modelSelect.selectedIndex === -1) {
+    modelSelect.value = "medium.en-q5_0";
+    // Persist via the full loaded object so we don't clobber the groq key / cloud model
+    // that haven't been written to the DOM yet at this point in loadSettings.
+    currentSettings.whisperModel = modelSelect.value;
+    await invoke("save_settings", { settings: currentSettings });
+  }
   await checkModelStatus();
 
   // Groq key
