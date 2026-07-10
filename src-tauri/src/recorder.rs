@@ -202,9 +202,19 @@ impl Recorder {
         // Optional Groq LLM cleanup with a hard 2.5s budget. On off/offline/slow/error we
         // paste the deterministic result instead, so a dictation is never blocked.
         let final_text = if settings.ai_enabled {
+            let system_prompt = ai_postprocess::resolve_system_prompt(
+                &settings.ai_profile,
+                &settings.ai_prompt_format,
+            );
+            let budget = ai_postprocess::budget_ms(&settings.ai_profile);
             let llm = match tokio::time::timeout(
-                Duration::from_millis(2500),
-                ai_postprocess::postprocess(&settings.groq_api_key, &replaced, &settings.ai_model),
+                Duration::from_millis(budget),
+                ai_postprocess::postprocess(
+                    &settings.groq_api_key,
+                    &replaced,
+                    &settings.ai_model,
+                    system_prompt,
+                ),
             )
             .await
             {
@@ -214,7 +224,7 @@ impl Recorder {
                     None
                 }
                 Err(_) => {
-                    println!("[Typr] AI post-process skipped (exceeded 2.5s budget)");
+                    println!("[Typr] AI post-process skipped (exceeded {}ms budget)", budget);
                     None
                 }
             };
