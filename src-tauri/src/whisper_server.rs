@@ -18,6 +18,19 @@ fn health_client() -> &'static reqwest::Client {
 
 static SERVER_CHILD: Mutex<Option<CommandChild>> = Mutex::new(None);
 static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
+/// PID of the server currently owning SERVER_CHILD/CURRENT_MODEL. Lets a server's
+/// log-monitor task tell whether it is still the current server before it clears
+/// shared state on exit — see `terminate_should_clear`.
+static CURRENT_PID: Mutex<Option<u32>> = Mutex::new(None);
+
+/// Whether a just-terminated server (`terminated_pid`) may clear the shared
+/// "current server" state. Only the process that is *still* current may: a stale
+/// monitor whose server was already replaced by a model switch must not, or it
+/// would drop the new server's child handle (orphaning its process) and wipe
+/// CURRENT_MODEL (the "have None" self-heal + leaked whisper-server processes).
+fn terminate_should_clear(current_pid: Option<u32>, terminated_pid: u32) -> bool {
+    current_pid == Some(terminated_pid)
+}
 
 /// The model key (path string) the persistent server is currently serving, if any.
 pub fn current_model_key() -> Option<String> {
@@ -64,8 +77,13 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         // If it failed to become healthy, we will stop it and start a new one
     }
 
-    // Stop any existing server process first
+    // Stop any existing server process first, then wait for port 8080 to actually be
+    // released before spawning the replacement. Killing the child does not free the socket
+    // instantly on Windows: binding too early makes the new server exit(1), and the health
+    // check false-positives against the dying old process (the `exited code 1` +
+    // `have None` restart churn seen when switching models).
     stop_server().await;
+    wait_for_port_free().await;
 
     println!(
         "[Typr] Starting persistent GPU Whisper HTTP Server with model {:?}",
@@ -110,6 +128,9 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
 
     match spawn_result {
         Ok((mut rx, child)) => {
+            // Capture the pid before moving the child so the log-monitor task can
+            // identify itself and avoid clobbering a newer server's state on exit.
+            let server_pid = child.pid();
             {
                 let mut child_guard = SERVER_CHILD.lock().unwrap();
                 *child_guard = Some(child);
@@ -117,6 +138,10 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
             {
                 let mut model_guard = CURRENT_MODEL.lock().unwrap();
                 *model_guard = Some(model_key);
+            }
+            {
+                let mut pid_guard = CURRENT_PID.lock().unwrap();
+                *pid_guard = Some(server_pid);
             }
 
             // Spawn log monitor task
@@ -133,11 +158,26 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
                             println!("[whisper-server stderr] {}", text.trim());
                         }
                         CommandEvent::Terminated(status) => {
-                            println!("[Typr] whisper-server exited with code: {:?}", status.code);
-                            let mut child_guard = SERVER_CHILD.lock().unwrap();
-                            *child_guard = None;
-                            let mut model_guard = CURRENT_MODEL.lock().unwrap();
-                            *model_guard = None;
+                            println!(
+                                "[Typr] whisper-server (pid {}) exited with code: {:?}",
+                                server_pid, status.code
+                            );
+                            // Only clear shared state if we are still the current server.
+                            // After a model switch the newer server owns SERVER_CHILD/
+                            // CURRENT_MODEL; clearing them here would orphan its process
+                            // handle and wipe the loaded-model marker.
+                            let is_current =
+                                terminate_should_clear(*CURRENT_PID.lock().unwrap(), server_pid);
+                            if is_current {
+                                *CURRENT_PID.lock().unwrap() = None;
+                                *SERVER_CHILD.lock().unwrap() = None;
+                                *CURRENT_MODEL.lock().unwrap() = None;
+                            } else {
+                                println!(
+                                    "[Typr] (stale monitor for pid {}; a newer server is current — not clearing state)",
+                                    server_pid
+                                );
+                            }
                             break;
                         }
                         _ => {}
@@ -175,8 +215,26 @@ pub async fn stop_server() {
         println!("[Typr] Terminating persistent Whisper Server...");
         let _ = child.kill();
     }
-    let mut model_guard = CURRENT_MODEL.lock().unwrap();
-    *model_guard = None;
+    *CURRENT_MODEL.lock().unwrap() = None;
+    // Clear the current-pid marker too, so the killed server's own Terminated
+    // handler treats itself as stale and doesn't race a replacement's state.
+    *CURRENT_PID.lock().unwrap() = None;
+}
+
+/// After stopping the server, poll until the port stops accepting connections — i.e. the old
+/// process has released the socket — so the replacement can bind it. Bounded so we never hang
+/// if something else holds the port; on timeout we start anyway (the post-spawn health wait
+/// then surfaces any real bind failure).
+async fn wait_for_port_free() {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        // is_server_healthy() returns false the moment the connection is refused (port free).
+        if !is_server_healthy().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    println!("[Typr] Warning: port 8080 still busy after 5s; starting new server anyway");
 }
 
 /// Pings the server root to verify HTTP health.
@@ -200,6 +258,18 @@ mod tests {
         assert!(warm_server_matches(Some("/x/ggml-medium.bin"), "/x/ggml-medium.bin"));
         assert!(!warm_server_matches(Some("/x/ggml-small.bin"), "/x/ggml-medium.bin"));
         assert!(!warm_server_matches(None, "/x/ggml-medium.bin"));
+    }
+
+    #[test]
+    fn test_terminate_should_clear() {
+        // The still-current server terminating clears the shared state.
+        assert!(terminate_should_clear(Some(100), 100));
+        // A stale monitor (an older server replaced by a model switch) must NOT
+        // clear — doing so orphaned the new server's process and wiped the model
+        // marker ("have None" self-heal + leaked whisper-server processes).
+        assert!(!terminate_should_clear(Some(200), 100));
+        // Nothing is current -> nothing to clear.
+        assert!(!terminate_should_clear(None, 100));
     }
 
     #[test]
