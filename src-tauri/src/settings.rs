@@ -19,6 +19,10 @@ pub struct Settings {
     pub ai_enabled: bool,
     #[serde(rename = "aiModel", default = "default_ai_model")]
     pub ai_model: String,
+    #[serde(rename = "aiProfile", default = "default_ai_profile")]
+    pub ai_profile: String,
+    #[serde(rename = "aiPromptFormat", default = "default_ai_prompt_format")]
+    pub ai_prompt_format: String,
 }
 
 fn default_cloud_model() -> String {
@@ -27,6 +31,14 @@ fn default_cloud_model() -> String {
 
 fn default_ai_model() -> String {
     "openai/gpt-oss-20b".to_string()
+}
+
+fn default_ai_profile() -> String {
+    "cleanup".to_string()
+}
+
+fn default_ai_prompt_format() -> String {
+    "natural".to_string()
 }
 
 impl Default for Settings {
@@ -41,6 +53,8 @@ impl Default for Settings {
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
             ai_model: "openai/gpt-oss-20b".to_string(),
+            ai_profile: "cleanup".to_string(),
+            ai_prompt_format: "natural".to_string(),
         }
     }
 }
@@ -161,6 +175,36 @@ mod tests {
         let loaded = Settings::load(&dir);
         assert_eq!(loaded.ai_enabled, true);
         assert_eq!(loaded.ai_model, "openai/gpt-oss-120b");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_prompt_profile_settings() {
+        let s = Settings::default();
+        assert_eq!(s.ai_profile, "cleanup");
+        assert_eq!(s.ai_prompt_format, "natural");
+    }
+
+    #[test]
+    fn test_legacy_config_without_profile_fields_defaults() {
+        // A Slice A config.json (has aiEnabled/aiModel but not the profile fields) must load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space","cloudModel":"accurate","aiEnabled":true,"aiModel":"openai/gpt-oss-20b"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.ai_profile, "cleanup");
+        assert_eq!(s.ai_prompt_format, "natural");
+    }
+
+    #[test]
+    fn test_profile_fields_roundtrip() {
+        let dir = temp_dir().join("typr_test_profile_fields");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.ai_profile = "prompt".to_string();
+        s.ai_prompt_format = "structured".to_string();
+        s.save(&dir).unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.ai_profile, "prompt");
+        assert_eq!(loaded.ai_prompt_format, "structured");
         let _ = fs::remove_dir_all(&dir);
     }
 

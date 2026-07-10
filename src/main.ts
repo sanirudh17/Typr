@@ -12,6 +12,8 @@ interface Settings {
   cloudModel: string;
   aiEnabled: boolean;
   aiModel: string;
+  aiProfile: string;
+  aiPromptFormat: string;
 }
 
 interface TranscriptionItem {
