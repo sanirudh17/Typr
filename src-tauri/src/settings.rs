@@ -15,10 +15,18 @@ pub struct Settings {
     pub hotkey: String,
     #[serde(rename = "cloudModel", default = "default_cloud_model")]
     pub cloud_model: String,
+    #[serde(rename = "aiEnabled", default)]
+    pub ai_enabled: bool,
+    #[serde(rename = "aiModel", default = "default_ai_model")]
+    pub ai_model: String,
 }
 
 fn default_cloud_model() -> String {
     "accurate".to_string()
+}
+
+fn default_ai_model() -> String {
+    "openai/gpt-oss-20b".to_string()
 }
 
 impl Default for Settings {
@@ -31,6 +39,8 @@ impl Default for Settings {
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
             cloud_model: "accurate".to_string(),
+            ai_enabled: false,
+            ai_model: "openai/gpt-oss-20b".to_string(),
         }
     }
 }
@@ -122,6 +132,36 @@ mod tests {
         let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.cloud_model, "accurate");
+    }
+
+    #[test]
+    fn test_default_ai_settings() {
+        let s = Settings::default();
+        assert_eq!(s.ai_enabled, false);
+        assert_eq!(s.ai_model, "openai/gpt-oss-20b");
+    }
+
+    #[test]
+    fn test_legacy_config_without_ai_fields_defaults() {
+        // A config.json written before the AI fields existed must still load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space","cloudModel":"accurate"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.ai_enabled, false);
+        assert_eq!(s.ai_model, "openai/gpt-oss-20b");
+    }
+
+    #[test]
+    fn test_ai_fields_roundtrip() {
+        let dir = temp_dir().join("typr_test_ai_fields");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.ai_enabled = true;
+        s.ai_model = "openai/gpt-oss-120b".to_string();
+        s.save(&dir).unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.ai_enabled, true);
+        assert_eq!(loaded.ai_model, "openai/gpt-oss-120b");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -10,6 +10,8 @@ interface Settings {
   recordingMode: string;
   hotkey: string;
   cloudModel: string;
+  aiEnabled: boolean;
+  aiModel: string;
 }
 
 interface TranscriptionItem {
