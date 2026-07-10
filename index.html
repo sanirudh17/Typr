@@ -59,6 +59,12 @@
             </svg>
             Engine
           </a>
+          <a class="nav-item" data-section="ai">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 2l1.5 3.5L13 7l-3.5 1.5L8 12l-1.5-3.5L3 7l3.5-1.5L8 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+            </svg>
+            AI
+          </a>
           <a class="nav-item" data-section="recording">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <rect x="6" y="2.5" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.2"/>
@@ -202,6 +208,43 @@
                   <button id="model-fast" class="toggle-btn">Fast (Turbo)</button>
                   <button id="model-accurate" class="toggle-btn active">Accurate</button>
                 </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-ai" class="content-section">
+          <div class="section-header">
+            <h2 class="section-title">AI</h2>
+            <p class="section-desc">Optional AI cleanup of your transcripts</p>
+          </div>
+          <div class="info-card">
+            <div class="info-card-title">AI Post-Processing</div>
+            <div class="info-card-body">When enabled, your transcript text is sent to <b>Groq</b> for an AI cleanup pass that fixes spelling, casing, punctuation, filler words, and context-based mis-hearings (e.g. <code>CAT</code> the exam vs <code>cat</code> the animal). <b>Requires internet</b> and sends text to Groq &mdash; it is off by default. If you're offline or it's slow, Typr instantly falls back to the standard cleanup, so dictation never stalls.</div>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">AI Cleanup</span>
+                <span class="label-hint">Send transcripts to Groq for an AI cleanup pass</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="ai-off" class="toggle-btn active">Off</button>
+                  <button id="ai-on" class="toggle-btn">On</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row" id="ai-model-settings">
+              <div class="setting-label">
+                <span class="label-text">AI Model</span>
+                <span class="label-hint">Fast is quicker; Quality is more thorough</span>
+              </div>
+              <div class="setting-control">
+                <select id="ai-model-select">
+                  <option value="openai/gpt-oss-20b">Fast &middot; gpt-oss-20b</option>
+                  <option value="openai/gpt-oss-120b">Quality &middot; gpt-oss-120b</option>
+                </select>
               </div>
             </div>
           </div>

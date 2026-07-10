@@ -54,6 +54,9 @@ const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 const cloudModelSettings = document.getElementById("cloud-model-settings")!;
 const modelFast = document.getElementById("model-fast")!;
 const modelAccurate = document.getElementById("model-accurate")!;
+const aiOff = document.getElementById("ai-off")!;
+const aiOn = document.getElementById("ai-on")!;
+const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyText = document.getElementById("hotkey-text")!;
@@ -166,6 +169,10 @@ async function loadSettings() {
 
   // Hotkey
   hotkeyText.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
+
+  // AI post-processing
+  setAiEnabled(currentSettings.aiEnabled);
+  setAiModel(currentSettings.aiModel || "openai/gpt-oss-20b");
 }
 
 async function populateMics() {
@@ -195,6 +202,18 @@ function setCloudModel(model: string) {
   currentSettings.cloudModel = m;
   modelFast.classList.toggle("active", m === "fast");
   modelAccurate.classList.toggle("active", m === "accurate");
+}
+
+function setAiEnabled(enabled: boolean) {
+  currentSettings.aiEnabled = enabled;
+  aiOff.classList.toggle("active", !enabled);
+  aiOn.classList.toggle("active", enabled);
+}
+
+function setAiModel(model: string) {
+  const m = model === "openai/gpt-oss-120b" ? "openai/gpt-oss-120b" : "openai/gpt-oss-20b";
+  currentSettings.aiModel = m;
+  aiModelSelect.value = m;
 }
 
 function setRecordingMode(mode: string) {
@@ -257,6 +276,21 @@ downloadBtn.addEventListener("click", async () => {
 });
 
 groqKey.addEventListener("change", () => saveSettings());
+
+aiOff.addEventListener("click", () => {
+  setAiEnabled(false);
+  saveSettings();
+});
+
+aiOn.addEventListener("click", () => {
+  setAiEnabled(true);
+  saveSettings();
+});
+
+aiModelSelect.addEventListener("change", () => {
+  setAiModel(aiModelSelect.value);
+  saveSettings();
+});
 
 modelFast.addEventListener("click", () => {
   setCloudModel("fast");
