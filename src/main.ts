@@ -61,6 +61,7 @@ const aiOn = document.getElementById("ai-on")!;
 const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
 const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
+const aiProfileAuto = document.getElementById("ai-profile-auto")!;
 const aiFormatSettings = document.getElementById("ai-format-settings")!;
 const aiFormatNatural = document.getElementById("ai-format-natural")!;
 const aiFormatStructured = document.getElementById("ai-format-structured")!;
@@ -226,10 +227,11 @@ function setAiModel(model: string) {
 }
 
 function setAiProfile(profile: string) {
-  const p = profile === "prompt" ? "prompt" : "cleanup";
+  const p = profile === "prompt" ? "prompt" : profile === "auto" ? "auto" : "cleanup";
   currentSettings.aiProfile = p;
   aiProfileCleanup.classList.toggle("active", p === "cleanup");
   aiProfilePrompt.classList.toggle("active", p === "prompt");
+  aiProfileAuto.classList.toggle("active", p === "auto");
   // Format sub-selector only applies to Prompt Mode.
   aiFormatSettings.classList.toggle("hidden", p !== "prompt");
 }
@@ -324,6 +326,11 @@ aiProfileCleanup.addEventListener("click", () => {
 
 aiProfilePrompt.addEventListener("click", () => {
   setAiProfile("prompt");
+  saveSettings();
+});
+
+aiProfileAuto.addEventListener("click", () => {
+  setAiProfile("auto");
   saveSettings();
 });
 
