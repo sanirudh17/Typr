@@ -202,10 +202,20 @@ impl Recorder {
         // Optional Groq LLM cleanup with a hard 2.5s budget. On off/offline/slow/error we
         // paste the deterministic result instead, so a dictation is never blocked.
         let final_text = if settings.ai_enabled {
-            let system_prompt = ai_postprocess::resolve_system_prompt(
-                &settings.ai_profile,
-                &settings.ai_prompt_format,
-            );
+            let system_prompt = if settings.ai_profile == "auto" {
+                let app = crate::context_detector::ForegroundApp::detect();
+                let category = crate::context_detector::resolve_category(&app, &[]);
+                println!(
+                    "[Typr] Auto context: {} / \"{}\" -> {}",
+                    app.process_name, app.window_title, category
+                );
+                ai_postprocess::context_system_prompt(&category)
+            } else {
+                ai_postprocess::resolve_system_prompt(
+                    &settings.ai_profile,
+                    &settings.ai_prompt_format,
+                )
+            };
             let budget = ai_postprocess::budget_ms(&settings.ai_profile);
             let llm = match tokio::time::timeout(
                 Duration::from_millis(budget),
