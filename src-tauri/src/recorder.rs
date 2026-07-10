@@ -179,15 +179,16 @@ impl Recorder {
         // Cleanup temp file
         let _ = std::fs::remove_file(&temp_path);
 
-        // Reset state
-        {
-            let mut state = self.state.lock().unwrap();
-            *state = RecordingState::Ready;
-            let _ = app.emit("recording-state", RecordingState::Ready);
-            update_overlay(app, &RecordingState::Ready, false);
-        }
-
-        let raw_text = transcribe_result?;
+        // Keep the overlay in its "processing" state through dictionary replacement and the
+        // AI cleanup pass below; we only reset to Ready just before pasting, so the spinner
+        // covers the AI latency instead of clearing ~1-2s early. Every exit path resets.
+        let raw_text = match transcribe_result {
+            Ok(text) => text,
+            Err(e) => {
+                self.reset_ready(app);
+                return Err(e);
+            }
+        };
 
         // Apply dictionary replacements (exact snippet/email expansions — kept before the LLM)
         let replaced = {
@@ -222,6 +223,11 @@ impl Recorder {
             deterministic
         };
 
+        // Transcription + AI cleanup are done; clear the spinner now, then paste so the text
+        // appears right as the overlay disappears. Resetting before paste also guarantees the
+        // overlay clears even if paste_text errors below.
+        self.reset_ready(app);
+
         // Auto-paste and record history
         if !final_text.is_empty() {
             paste_text(&final_text)?;
@@ -235,6 +241,16 @@ impl Recorder {
         );
 
         Ok(final_text)
+    }
+
+    /// Reset the recorder to Ready and clear the processing overlay. Called once the
+    /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
+    /// only after the AI cleanup pass rather than ~1-2s before the paste lands.
+    fn reset_ready(&self, app: &AppHandle) {
+        let mut state = self.state.lock().unwrap();
+        *state = RecordingState::Ready;
+        let _ = app.emit("recording-state", RecordingState::Ready);
+        update_overlay(app, &RecordingState::Ready, false);
     }
 }
 
