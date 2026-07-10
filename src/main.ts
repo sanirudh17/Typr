@@ -59,6 +59,11 @@ const modelAccurate = document.getElementById("model-accurate")!;
 const aiOff = document.getElementById("ai-off")!;
 const aiOn = document.getElementById("ai-on")!;
 const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
+const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
+const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
+const aiFormatSettings = document.getElementById("ai-format-settings")!;
+const aiFormatNatural = document.getElementById("ai-format-natural")!;
+const aiFormatStructured = document.getElementById("ai-format-structured")!;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyText = document.getElementById("hotkey-text")!;
@@ -175,6 +180,8 @@ async function loadSettings() {
   // AI post-processing
   setAiEnabled(currentSettings.aiEnabled);
   setAiModel(currentSettings.aiModel || "openai/gpt-oss-20b");
+  setAiProfile(currentSettings.aiProfile || "cleanup");
+  setAiPromptFormat(currentSettings.aiPromptFormat || "natural");
 }
 
 async function populateMics() {
@@ -216,6 +223,22 @@ function setAiModel(model: string) {
   const m = model === "openai/gpt-oss-120b" ? "openai/gpt-oss-120b" : "openai/gpt-oss-20b";
   currentSettings.aiModel = m;
   aiModelSelect.value = m;
+}
+
+function setAiProfile(profile: string) {
+  const p = profile === "prompt" ? "prompt" : "cleanup";
+  currentSettings.aiProfile = p;
+  aiProfileCleanup.classList.toggle("active", p === "cleanup");
+  aiProfilePrompt.classList.toggle("active", p === "prompt");
+  // Format sub-selector only applies to Prompt Mode.
+  aiFormatSettings.classList.toggle("hidden", p !== "prompt");
+}
+
+function setAiPromptFormat(format: string) {
+  const f = format === "structured" ? "structured" : "natural";
+  currentSettings.aiPromptFormat = f;
+  aiFormatNatural.classList.toggle("active", f === "natural");
+  aiFormatStructured.classList.toggle("active", f === "structured");
 }
 
 function setRecordingMode(mode: string) {
@@ -291,6 +314,26 @@ aiOn.addEventListener("click", () => {
 
 aiModelSelect.addEventListener("change", () => {
   setAiModel(aiModelSelect.value);
+  saveSettings();
+});
+
+aiProfileCleanup.addEventListener("click", () => {
+  setAiProfile("cleanup");
+  saveSettings();
+});
+
+aiProfilePrompt.addEventListener("click", () => {
+  setAiProfile("prompt");
+  saveSettings();
+});
+
+aiFormatNatural.addEventListener("click", () => {
+  setAiPromptFormat("natural");
+  saveSettings();
+});
+
+aiFormatStructured.addEventListener("click", () => {
+  setAiPromptFormat("structured");
   saveSettings();
 });
 
