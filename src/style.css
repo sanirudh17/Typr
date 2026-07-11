@@ -1366,3 +1366,17 @@ kbd {
   pointer-events: none;
   filter: grayscale(0.5);
 }
+
+.custom-instructions {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}

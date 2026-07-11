@@ -272,6 +272,44 @@
                 </select>
               </div>
             </div>
+            <div class="setting-row" id="ai-tone-settings">
+              <div class="setting-label">
+                <span class="label-text">Tone</span>
+                <span class="label-hint">Bias the AI cleanup toward a tone; Default lets the profile decide</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="ai-tone-default" class="toggle-btn active">Default</button>
+                  <button id="ai-tone-formal" class="toggle-btn">Formal</button>
+                  <button id="ai-tone-casual" class="toggle-btn">Casual</button>
+                  <button id="ai-tone-concise" class="toggle-btn">Concise</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row" id="ai-format-style-settings">
+              <div class="setting-label">
+                <span class="label-text">Formatting</span>
+                <span class="label-hint">Shape the output structure; Default lets the profile decide</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="ai-style-default" class="toggle-btn active">Default</button>
+                  <button id="ai-style-bullets" class="toggle-btn">Bullets</button>
+                  <button id="ai-style-paragraphs" class="toggle-btn">Paragraphs</button>
+                  <button id="ai-style-raw" class="toggle-btn">Raw</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row" id="ai-custom-settings">
+              <div class="setting-label">
+                <span class="label-text">Custom Instructions</span>
+                <span class="label-hint">Extra rules applied to every AI cleanup (leave blank for none)</span>
+              </div>
+              <div class="setting-control">
+                <textarea id="ai-custom-instructions" class="custom-instructions" rows="3"
+                  placeholder="e.g. Use British spelling. · Never use em-dashes. · Keep my acronyms as-is."></textarea>
+              </div>
+            </div>
           </div>
         </section>
 

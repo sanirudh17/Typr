@@ -14,6 +14,9 @@ interface Settings {
   aiModel: string;
   aiProfile: string;
   aiPromptFormat: string;
+  aiTone: string;
+  aiFormat: string;
+  aiCustomInstructions: string;
 }
 
 interface TranscriptionItem {
@@ -63,6 +66,15 @@ const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
 const aiProfileAuto = document.getElementById("ai-profile-auto")!;
 const aiFormatSettings = document.getElementById("ai-format-settings")!;
+const aiToneDefault = document.getElementById("ai-tone-default")!;
+const aiToneFormal = document.getElementById("ai-tone-formal")!;
+const aiToneCasual = document.getElementById("ai-tone-casual")!;
+const aiToneConcise = document.getElementById("ai-tone-concise")!;
+const aiStyleDefault = document.getElementById("ai-style-default")!;
+const aiStyleBullets = document.getElementById("ai-style-bullets")!;
+const aiStyleParagraphs = document.getElementById("ai-style-paragraphs")!;
+const aiStyleRaw = document.getElementById("ai-style-raw")!;
+const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
 const aiFormatNatural = document.getElementById("ai-format-natural")!;
 const aiFormatStructured = document.getElementById("ai-format-structured")!;
 const modeToggle = document.getElementById("mode-toggle")!;
@@ -183,6 +195,9 @@ async function loadSettings() {
   setAiModel(currentSettings.aiModel || "openai/gpt-oss-20b");
   setAiProfile(currentSettings.aiProfile || "cleanup");
   setAiPromptFormat(currentSettings.aiPromptFormat || "natural");
+  setAiTone(currentSettings.aiTone || "default");
+  setAiFormat(currentSettings.aiFormat || "default");
+  aiCustomInstructions.value = currentSettings.aiCustomInstructions || "";
 }
 
 async function populateMics() {
@@ -243,6 +258,24 @@ function setAiPromptFormat(format: string) {
   aiFormatStructured.classList.toggle("active", f === "structured");
 }
 
+function setAiTone(tone: string) {
+  const t = ["formal", "casual", "concise"].includes(tone) ? tone : "default";
+  currentSettings.aiTone = t;
+  aiToneDefault.classList.toggle("active", t === "default");
+  aiToneFormal.classList.toggle("active", t === "formal");
+  aiToneCasual.classList.toggle("active", t === "casual");
+  aiToneConcise.classList.toggle("active", t === "concise");
+}
+
+function setAiFormat(format: string) {
+  const f = ["bullets", "paragraphs", "raw"].includes(format) ? format : "default";
+  currentSettings.aiFormat = f;
+  aiStyleDefault.classList.toggle("active", f === "default");
+  aiStyleBullets.classList.toggle("active", f === "bullets");
+  aiStyleParagraphs.classList.toggle("active", f === "paragraphs");
+  aiStyleRaw.classList.toggle("active", f === "raw");
+}
+
 function setRecordingMode(mode: string) {
   currentSettings.recordingMode = mode;
   modeToggle.classList.toggle("active", mode === "toggle");
@@ -261,6 +294,7 @@ async function saveSettings() {
   currentSettings.microphone = micSelect.value;
   currentSettings.whisperModel = modelSelect.value;
   currentSettings.groqApiKey = groqKey.value;
+  currentSettings.aiCustomInstructions = aiCustomInstructions.value;
   await invoke("save_settings", { settings: currentSettings });
 }
 
@@ -328,6 +362,16 @@ aiProfilePrompt.addEventListener("click", () => {
   setAiProfile("prompt");
   saveSettings();
 });
+
+aiToneDefault.addEventListener("click", () => { setAiTone("default"); saveSettings(); });
+aiToneFormal.addEventListener("click", () => { setAiTone("formal"); saveSettings(); });
+aiToneCasual.addEventListener("click", () => { setAiTone("casual"); saveSettings(); });
+aiToneConcise.addEventListener("click", () => { setAiTone("concise"); saveSettings(); });
+aiStyleDefault.addEventListener("click", () => { setAiFormat("default"); saveSettings(); });
+aiStyleBullets.addEventListener("click", () => { setAiFormat("bullets"); saveSettings(); });
+aiStyleParagraphs.addEventListener("click", () => { setAiFormat("paragraphs"); saveSettings(); });
+aiStyleRaw.addEventListener("click", () => { setAiFormat("raw"); saveSettings(); });
+aiCustomInstructions.addEventListener("change", () => saveSettings());
 
 aiProfileAuto.addEventListener("click", () => {
   setAiProfile("auto");
