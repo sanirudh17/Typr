@@ -75,6 +75,11 @@ const aiStyleBullets = document.getElementById("ai-style-bullets")!;
 const aiStyleParagraphs = document.getElementById("ai-style-paragraphs")!;
 const aiStyleRaw = document.getElementById("ai-style-raw")!;
 const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
+const presetEmail = document.getElementById("preset-email")!;
+const presetChat = document.getElementById("preset-chat")!;
+const presetNotes = document.getElementById("preset-notes")!;
+const presetBrief = document.getElementById("preset-brief")!;
+const presetReset = document.getElementById("preset-reset")!;
 const aiFormatNatural = document.getElementById("ai-format-natural")!;
 const aiFormatStructured = document.getElementById("ai-format-structured")!;
 const modeToggle = document.getElementById("mode-toggle")!;
@@ -276,6 +281,13 @@ function setAiFormat(format: string) {
   aiStyleRaw.classList.toggle("active", f === "raw");
 }
 
+// One-click presets set the Tone + Formatting toggles together (no separate backend).
+function applyPreset(tone: string, format: string) {
+  setAiTone(tone);
+  setAiFormat(format);
+  saveSettings();
+}
+
 function setRecordingMode(mode: string) {
   currentSettings.recordingMode = mode;
   modeToggle.classList.toggle("active", mode === "toggle");
@@ -372,6 +384,12 @@ aiStyleBullets.addEventListener("click", () => { setAiFormat("bullets"); saveSet
 aiStyleParagraphs.addEventListener("click", () => { setAiFormat("paragraphs"); saveSettings(); });
 aiStyleRaw.addEventListener("click", () => { setAiFormat("raw"); saveSettings(); });
 aiCustomInstructions.addEventListener("change", () => saveSettings());
+
+presetEmail.addEventListener("click", () => applyPreset("formal", "paragraphs"));
+presetChat.addEventListener("click", () => applyPreset("casual", "default"));
+presetNotes.addEventListener("click", () => applyPreset("default", "bullets"));
+presetBrief.addEventListener("click", () => applyPreset("concise", "default"));
+presetReset.addEventListener("click", () => applyPreset("default", "default"));
 
 aiProfileAuto.addEventListener("click", () => {
   setAiProfile("auto");

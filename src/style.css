@@ -430,6 +430,21 @@ body {
   min-width: 0;
 }
 
+/* Narrow windows: stack the control below the label so multi-button toggle groups
+   keep all buttons on one horizontal line instead of wrapping downward or overlapping. */
+@media (max-width: 1280px) {
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .setting-label {
+    max-width: none;
+  }
+  .setting-control {
+    justify-content: flex-start;
+  }
+}
+
 /* ── Form Controls ──────────────────────────────────── */
 
 select,
@@ -471,6 +486,7 @@ input[type="password"]::placeholder {
 
 .toggle-group {
   display: inline-flex;
+  flex-wrap: nowrap;
   gap: 2px;
   background: var(--surface);
   border-radius: var(--radius);
@@ -1365,6 +1381,45 @@ kbd {
   opacity: 0.35;
   pointer-events: none;
   filter: grayscale(0.5);
+}
+
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-chip .chip-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.preset-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.preset-help {
+  cursor: help;
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-left: 2px;
 }
 
 .custom-instructions {
