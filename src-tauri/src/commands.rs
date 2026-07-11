@@ -67,6 +67,34 @@ pub fn apply_commands(text: &str) -> String {
                     out.push_infix_symbol(s);
                     i += len;
                 }
+                Kind::Scratch => {
+                    out.scratch_sentence();
+                    i += len;
+                }
+                Kind::ClearAll => {
+                    out.clear_all();
+                    i += len;
+                }
+                Kind::DeleteWords(n) => {
+                    out.delete_last_words(n);
+                    i += len;
+                }
+                Kind::DeleteLine => {
+                    out.delete_last_line();
+                    i += len;
+                }
+                Kind::WordCase(c) => {
+                    out.case_last_word(c);
+                    i += len;
+                }
+                Kind::MakeList => {
+                    out.make_list();
+                    i += len;
+                }
+                Kind::QuotePhrase => {
+                    out.quote_phrase();
+                    i += len;
+                }
             },
             None => {
                 out.push_word(words[i]);
@@ -86,6 +114,14 @@ enum Casing {
     Kebab,
 }
 
+/// Case transform applied to the last word by the editing commands.
+#[derive(Clone, Copy)]
+enum WordCase {
+    Capitalize,
+    Upper,
+    Lower,
+}
+
 struct Trigger {
     len: usize,
     kind: Kind,
@@ -100,6 +136,14 @@ enum Kind {
     OpenSym(&'static str),
     CloseSym(&'static str),
     InfixSym(&'static str),
+    // Within-utterance editing commands (mutate the accumulated output).
+    Scratch,
+    ClearAll,
+    DeleteWords(usize),
+    DeleteLine,
+    WordCase(WordCase),
+    MakeList,
+    QuotePhrase,
 }
 
 /// Lowercase a word and keep only alphanumerics — used for trigger matching and casing parts,
@@ -118,6 +162,56 @@ fn capitalize(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+/// Map a spoken small-number word to its value (for "delete last two words").
+fn number_word(w: &str) -> Option<usize> {
+    match w {
+        "two" => Some(2),
+        "three" => Some(3),
+        "four" => Some(4),
+        "five" => Some(5),
+        _ => None,
+    }
+}
+
+/// Split a phrase into list items for "make it a list". If it has a comma, split on commas and,
+/// within each part, on " and " / " or " (stripping a leading "and "/"or "); else a single item.
+/// Best-effort: "milk, eggs and bread" -> 3 items, but "fish and chips" (no comma) -> 1 item.
+fn split_list_items(phrase: &str) -> Vec<String> {
+    if !phrase.contains(',') {
+        return vec![phrase.trim().to_string()];
+    }
+    let mut items = Vec::new();
+    for part in phrase.split(',') {
+        for piece in split_conjunctions(part) {
+            let p = piece.trim();
+            let p = p
+                .strip_prefix("and ")
+                .or_else(|| p.strip_prefix("or "))
+                .unwrap_or(p)
+                .trim();
+            if !p.is_empty() {
+                items.push(p.to_string());
+            }
+        }
+    }
+    items
+}
+
+/// Split a chunk on " and " / " or " conjunctions.
+fn split_conjunctions(s: &str) -> Vec<String> {
+    let mut result = vec![s.to_string()];
+    for sep in [" and ", " or "] {
+        let mut next = Vec::new();
+        for chunk in &result {
+            for sub in chunk.split(sep) {
+                next.push(sub.to_string());
+            }
+        }
+        result = next;
+    }
+    result
 }
 
 /// Join captured words into a single identifier per the casing style. Empty/punctuation-only
@@ -155,13 +249,35 @@ fn capture_end(words: &[&str], start: usize) -> usize {
 /// Match a command trigger phrase starting at word index `i` (longest phrase first).
 fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
     let w = |k: usize| words.get(i + k).map(|s| norm(s));
-    let (w0, w1, w2) = (w(0), w(1), w(2));
+    let (w0, w1, w2, w3) = (w(0), w(1), w(2), w(3));
+
+    // 4-word triggers (checked first so "make it a list" / "delete last two words" win).
+    if let (Some(a), Some(b), Some(c), Some(d)) = (&w0, &w1, &w2, &w3) {
+        let (a, b, c, d) = (a.as_str(), b.as_str(), c.as_str(), d.as_str());
+        if a == "make" && (b == "it" || b == "that") && c == "a" && d == "list" {
+            return Some(Trigger { len: 4, kind: Kind::MakeList });
+        }
+        if a == "delete" && b == "last" && d == "words" {
+            if let Some(n) = number_word(c) {
+                return Some(Trigger { len: 4, kind: Kind::DeleteWords(n) });
+            }
+        }
+    }
 
     // 3-word triggers (must be tried before "snake case").
     if let (Some(a), Some(b), Some(c)) = (&w0, &w1, &w2) {
         match (a.as_str(), b.as_str(), c.as_str()) {
             ("screaming", "snake", "case") | ("upper", "snake", "case") => {
                 return Some(Trigger { len: 3, kind: Kind::Case(Casing::Constant) });
+            }
+            ("delete", "last", "word") => {
+                return Some(Trigger { len: 3, kind: Kind::DeleteWords(1) });
+            }
+            ("delete", "last", "line") => {
+                return Some(Trigger { len: 3, kind: Kind::DeleteLine });
+            }
+            ("all", "caps", "that") => {
+                return Some(Trigger { len: 3, kind: Kind::WordCase(WordCase::Upper) });
             }
             _ => {}
         }
@@ -205,6 +321,24 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
             ("close", "angle") => return Some(Trigger { len: 2, kind: Kind::CloseSym(">") }),
             // Whisper sometimes splits "semicolon" into two words.
             ("semi", "colon") => return Some(Trigger { len: 2, kind: Kind::CloseSym(";") }),
+            // Within-utterance editing commands.
+            ("scratch", "that") | ("strike", "that") => {
+                return Some(Trigger { len: 2, kind: Kind::Scratch })
+            }
+            // "scratch all" only (not "delete everything" — too common in prose, and clearing
+            // the whole dictation on a misfire is destructive).
+            ("scratch", "all") => return Some(Trigger { len: 2, kind: Kind::ClearAll }),
+            // "capitalize that" only (not "cap that" — collides with "a cap that…").
+            ("capitalize", "that") => {
+                return Some(Trigger { len: 2, kind: Kind::WordCase(WordCase::Capitalize) })
+            }
+            ("uppercase", "that") => {
+                return Some(Trigger { len: 2, kind: Kind::WordCase(WordCase::Upper) })
+            }
+            ("lowercase", "that") => {
+                return Some(Trigger { len: 2, kind: Kind::WordCase(WordCase::Lower) })
+            }
+            ("quote", "that") => return Some(Trigger { len: 2, kind: Kind::QuotePhrase }),
             _ => {}
         }
     }
@@ -310,6 +444,137 @@ impl OutBuilder {
         }
         self.buf.push_str("- ");
         self.buf.push_str(text);
+        self.need_space = true;
+    }
+
+    // ── Within-utterance editing commands ──────────────────────────────
+
+    fn trim_trailing_ws(&mut self) {
+        let end = self.buf.trim_end().len();
+        self.buf.truncate(end);
+    }
+
+    /// After a mutation, set need_space so the next word is spaced unless we're at a line start.
+    fn reset_need_space(&mut self) {
+        self.need_space = !self.buf.is_empty() && !self.buf.ends_with('\n');
+    }
+
+    /// "scratch that" — erase the last sentence: strip any trailing terminator/space (it belongs
+    /// to the sentence being scratched), then cut back to the previous terminator/newline, else
+    /// clear all.
+    fn scratch_sentence(&mut self) {
+        let trimmed = self
+            .buf
+            .trim_end_matches(|c: char| c.is_whitespace() || c == '.' || c == '!' || c == '?')
+            .len();
+        self.buf.truncate(trimmed);
+        match self.buf.rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n') {
+            Some(pos) => self.buf.truncate(pos + 1),
+            None => self.buf.clear(),
+        }
+        self.trim_trailing_ws();
+        self.reset_need_space();
+    }
+
+    /// "scratch all" / "delete everything" — clear the whole dictation.
+    fn clear_all(&mut self) {
+        self.buf.clear();
+        self.need_space = false;
+    }
+
+    /// "delete last word" / "delete last N words" — pop the last N whitespace-delimited words.
+    fn delete_last_words(&mut self, n: usize) {
+        for _ in 0..n {
+            self.trim_trailing_ws();
+            while let Some(c) = self.buf.chars().last() {
+                if c.is_whitespace() {
+                    break;
+                }
+                self.buf.pop();
+            }
+        }
+        self.trim_trailing_ws();
+        self.reset_need_space();
+    }
+
+    /// "delete last line" — erase back to the last newline, else clear all.
+    fn delete_last_line(&mut self) {
+        self.trim_trailing_ws();
+        match self.buf.rfind('\n') {
+            Some(pos) => self.buf.truncate(pos),
+            None => self.buf.clear(),
+        }
+        self.trim_trailing_ws();
+        self.reset_need_space();
+    }
+
+    /// "capitalize/uppercase/lowercase that" — transform the last word's case.
+    fn case_last_word(&mut self, case: WordCase) {
+        self.trim_trailing_ws();
+        let end = self.buf.len();
+        if end == 0 {
+            return;
+        }
+        let start = self.buf[..end]
+            .rfind(char::is_whitespace)
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let word = self.buf[start..end].to_string();
+        let new = match case {
+            WordCase::Capitalize => capitalize(&word),
+            WordCase::Upper => word.to_uppercase(),
+            WordCase::Lower => word.to_lowercase(),
+        };
+        self.buf.replace_range(start..end, &new);
+        self.reset_need_space();
+    }
+
+    /// "make it a list" — replace the preceding phrase with `- item` lines.
+    fn make_list(&mut self) {
+        self.trim_trailing_ws();
+        let start = self
+            .buf
+            .rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let phrase = self.buf[start..].trim().to_string();
+        if phrase.is_empty() {
+            return;
+        }
+        let items = split_list_items(&phrase);
+        self.buf.truncate(start);
+        self.trim_trailing_ws();
+        if !self.buf.is_empty() && !self.buf.ends_with('\n') {
+            self.buf.push('\n');
+        }
+        let bullets = items
+            .iter()
+            .map(|it| format!("- {}", it))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.buf.push_str(&bullets);
+        self.need_space = false;
+    }
+
+    /// "quote that" — wrap the preceding phrase in ASCII double quotes.
+    fn quote_phrase(&mut self) {
+        self.trim_trailing_ws();
+        let start = self
+            .buf
+            .rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let phrase = self.buf[start..].trim().to_string();
+        if phrase.is_empty() {
+            return;
+        }
+        self.buf.truncate(start);
+        if !self.buf.is_empty() && !self.buf.ends_with(' ') && !self.buf.ends_with('\n') {
+            self.buf.push(' ');
+        }
+        self.buf.push('"');
+        self.buf.push_str(&phrase);
+        self.buf.push('"');
         self.need_space = true;
     }
 
@@ -581,5 +846,100 @@ mod tests {
         assert!(!contains_command("let's meet tomorrow afternoon"));
         assert!(!contains_command("in this case we proceed"));
         assert!(!contains_command(""));
+    }
+
+    // --- Voice editing commands (within-utterance) ---
+
+    #[test]
+    fn test_scratch_that_clears_to_start_when_no_punctuation() {
+        assert_eq!(
+            apply_commands("we meet monday scratch that we meet tuesday"),
+            "we meet tuesday"
+        );
+    }
+
+    #[test]
+    fn test_scratch_that_keeps_prior_sentence() {
+        assert_eq!(apply_commands("buy milk. buy eggs. scratch that"), "buy milk.");
+    }
+
+    #[test]
+    fn test_strike_that_alias() {
+        assert_eq!(apply_commands("hello world strike that goodbye"), "goodbye");
+    }
+
+    #[test]
+    fn test_scratch_all_clears_everything() {
+        assert_eq!(apply_commands("hello world scratch all new plan"), "new plan");
+    }
+
+    #[test]
+    fn test_delete_last_word_and_n_words() {
+        assert_eq!(apply_commands("call him at five delete last word"), "call him at");
+        assert_eq!(apply_commands("one two three four delete last two words"), "one two");
+        assert_eq!(apply_commands("a b c d e delete last three words"), "a b");
+    }
+
+    #[test]
+    fn test_delete_last_line() {
+        assert_eq!(apply_commands("first new line second delete last line"), "first");
+    }
+
+    #[test]
+    fn test_case_last_word() {
+        assert_eq!(apply_commands("meeting with sarah capitalize that"), "meeting with Sarah");
+        assert_eq!(apply_commands("the api is down uppercase that"), "the api is DOWN");
+        assert_eq!(apply_commands("the api is down all caps that"), "the api is DOWN");
+        assert_eq!(apply_commands("say HELLO lowercase that"), "say hello");
+    }
+
+    #[test]
+    fn test_make_it_a_list() {
+        assert_eq!(
+            apply_commands("milk, eggs and bread make it a list"),
+            "- milk\n- eggs\n- bread"
+        );
+        assert_eq!(
+            apply_commands("milk, eggs, and bread make that a list"),
+            "- milk\n- eggs\n- bread"
+        );
+        assert_eq!(apply_commands("fish and chips make it a list"), "- fish and chips");
+    }
+
+    #[test]
+    fn test_quote_that_wraps_preceding_phrase() {
+        assert_eq!(apply_commands("he said hello quote that"), "\"he said hello\"");
+    }
+
+    #[test]
+    fn test_editing_combined_with_casing() {
+        // camel case captures up to "scratch that", which then clears the buffer.
+        assert_eq!(
+            apply_commands("camel case get user by id scratch that snake case max count"),
+            "max_count"
+        );
+    }
+
+    #[test]
+    fn test_editing_false_positives() {
+        assert_eq!(apply_commands("please delete the file"), "please delete the file");
+        assert_eq!(apply_commands("make it around five"), "make it around five");
+        assert_eq!(apply_commands("a list of names"), "a list of names");
+    }
+
+    #[test]
+    fn test_split_list_items() {
+        assert_eq!(
+            split_list_items("milk, eggs and bread").iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["milk", "eggs", "bread"]
+        );
+        assert_eq!(
+            split_list_items("milk, eggs, and bread").iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["milk", "eggs", "bread"]
+        );
+        assert_eq!(
+            split_list_items("fish and chips").iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["fish and chips"]
+        );
     }
 }
