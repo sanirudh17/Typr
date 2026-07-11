@@ -388,7 +388,8 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 32px;
+  flex-wrap: wrap;
+  gap: 12px 32px;
   padding: 16px 0;
   border-bottom: 1px solid var(--border);
 }
@@ -404,6 +405,7 @@ body {
 .setting-label {
   flex-shrink: 0;
   min-width: 200px;
+  max-width: 340px;
 }
 
 .label-text {
