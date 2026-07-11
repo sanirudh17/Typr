@@ -12,6 +12,7 @@ pub mod whisper_server;
 pub mod ai_postprocess;
 pub mod context_detector;
 pub mod debug_log;
+pub mod commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
