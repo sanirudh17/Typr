@@ -81,24 +81,38 @@ pub fn build_style_suffix(tone: &str, format: &str, custom: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     match tone {
-        "formal" => lines.push("- Tone: use a formal, professional tone.".to_string()),
-        "casual" => lines.push("- Tone: use a casual, relaxed, conversational tone.".to_string()),
-        "concise" => {
-            lines.push("- Tone: be concise — cut redundancy and filler, keep it short.".to_string())
-        }
+        "formal" => lines.push(
+            "- Tone: rewrite it into a formal, professional register — complete sentences, precise \
+             vocabulary, no slang, no contractions."
+                .to_string(),
+        ),
+        "casual" => lines.push(
+            "- Tone: rewrite it into a casual, relaxed register — conversational and friendly, \
+             contractions welcome, keep it light."
+                .to_string(),
+        ),
+        "concise" => lines.push(
+            "- Tone: aggressively condense — remove every filler and redundant word and tighten \
+             the phrasing so the result is clearly shorter, while keeping all key information and \
+             the original meaning."
+                .to_string(),
+        ),
         _ => {}
     }
     match format {
         "bullets" => lines.push(
-            "- Formatting: format the output as short bullet points where the content allows."
+            "- Formatting: restructure the output into a bulleted list — one concise point per \
+             line, each starting with \"- \"."
                 .to_string(),
         ),
         "paragraphs" => lines.push(
-            "- Formatting: format the output as flowing paragraphs; do not use bullet lists."
+            "- Formatting: structure the output as well-formed prose paragraphs; do not use \
+             bullet lists or headings."
                 .to_string(),
         ),
         "raw" => lines.push(
-            "- Formatting: keep the output as plain running text with no added structure or lists."
+            "- Formatting: return the cleaned text with no structural changes at all — no lists, \
+             headings, or added formatting."
                 .to_string(),
         ),
         _ => {}
@@ -306,7 +320,7 @@ mod tests {
     fn test_style_suffix_tone_only() {
         let s = build_style_suffix("formal", "default", "");
         assert!(s.contains("Additional style requirements"));
-        assert!(s.contains("formal, professional tone"));
+        assert!(s.contains("formal, professional register"));
         assert!(!s.contains("Formatting:"));
         assert!(!s.contains("User instructions:"));
     }
@@ -314,7 +328,7 @@ mod tests {
     #[test]
     fn test_style_suffix_format_only() {
         let s = build_style_suffix("default", "bullets", "");
-        assert!(s.contains("bullet points"));
+        assert!(s.contains("bulleted list"));
         assert!(!s.contains("Tone:"));
     }
 
@@ -330,8 +344,8 @@ mod tests {
     fn test_style_suffix_combined_and_ordering() {
         let s = build_style_suffix("concise", "paragraphs", "No em-dashes.");
         assert!(s.starts_with("\n\nAdditional style requirements"));
-        assert!(s.contains("concise"));
-        assert!(s.contains("flowing paragraphs"));
+        assert!(s.contains("condense"));
+        assert!(s.contains("prose paragraphs"));
         assert!(s.contains("- User instructions: No em-dashes."));
     }
 
