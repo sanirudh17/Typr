@@ -23,6 +23,12 @@ pub struct Settings {
     pub ai_profile: String,
     #[serde(rename = "aiPromptFormat", default = "default_ai_prompt_format")]
     pub ai_prompt_format: String,
+    #[serde(rename = "aiTone", default = "default_ai_style")]
+    pub ai_tone: String,
+    #[serde(rename = "aiFormat", default = "default_ai_style")]
+    pub ai_format: String,
+    #[serde(rename = "aiCustomInstructions", default)]
+    pub ai_custom_instructions: String,
 }
 
 fn default_cloud_model() -> String {
@@ -41,6 +47,10 @@ fn default_ai_prompt_format() -> String {
     "natural".to_string()
 }
 
+fn default_ai_style() -> String {
+    "default".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -55,6 +65,9 @@ impl Default for Settings {
             ai_model: "openai/gpt-oss-20b".to_string(),
             ai_profile: "cleanup".to_string(),
             ai_prompt_format: "natural".to_string(),
+            ai_tone: "default".to_string(),
+            ai_format: "default".to_string(),
+            ai_custom_instructions: String::new(),
         }
     }
 }
@@ -205,6 +218,40 @@ mod tests {
         let loaded = Settings::load(&dir);
         assert_eq!(loaded.ai_profile, "prompt");
         assert_eq!(loaded.ai_prompt_format, "structured");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_style_settings() {
+        let s = Settings::default();
+        assert_eq!(s.ai_tone, "default");
+        assert_eq!(s.ai_format, "default");
+        assert_eq!(s.ai_custom_instructions, "");
+    }
+
+    #[test]
+    fn test_legacy_config_without_style_fields_defaults() {
+        // A Slice A–D config (no style fields yet) must still load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space","cloudModel":"accurate","aiEnabled":true,"aiModel":"openai/gpt-oss-20b","aiProfile":"cleanup","aiPromptFormat":"natural"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.ai_tone, "default");
+        assert_eq!(s.ai_format, "default");
+        assert_eq!(s.ai_custom_instructions, "");
+    }
+
+    #[test]
+    fn test_style_fields_roundtrip() {
+        let dir = temp_dir().join("typr_test_style_fields");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.ai_tone = "formal".to_string();
+        s.ai_format = "bullets".to_string();
+        s.ai_custom_instructions = "Use British spelling.".to_string();
+        s.save(&dir).unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.ai_tone, "formal");
+        assert_eq!(loaded.ai_format, "bullets");
+        assert_eq!(loaded.ai_custom_instructions, "Use British spelling.");
         let _ = fs::remove_dir_all(&dir);
     }
 

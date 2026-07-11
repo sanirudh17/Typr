@@ -217,7 +217,7 @@ impl Recorder {
             // is not sentence-formatted. The command pass below does the real work.
             replaced.clone()
         } else if settings.ai_enabled {
-            let system_prompt = if settings.ai_profile == "auto" {
+            let base_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
                 let category = crate::context_detector::resolve_category(&fg, &[]);
                 // Metadata only: log the process name and resolved category, never the
@@ -233,6 +233,18 @@ impl Recorder {
                     &settings.ai_prompt_format,
                 )
             };
+            // Append the user's cross-profile style modifiers (Tone / Formatting / Custom
+            // Instructions). Empty when all default, so the base prompt is used verbatim; placed
+            // after the base so an explicit setting overrides the profile's built-in style.
+            let system_prompt = format!(
+                "{}{}",
+                base_prompt,
+                ai_postprocess::build_style_suffix(
+                    &settings.ai_tone,
+                    &settings.ai_format,
+                    &settings.ai_custom_instructions,
+                )
+            );
             let budget = ai_postprocess::budget_ms(&settings.ai_profile);
             let ai_started_at = Instant::now();
             let llm = match tokio::time::timeout(
@@ -241,7 +253,7 @@ impl Recorder {
                     &settings.groq_api_key,
                     &replaced,
                     &settings.ai_model,
-                    system_prompt,
+                    &system_prompt,
                 ),
             )
             .await
