@@ -203,11 +203,13 @@ impl Recorder {
         // paste the deterministic result instead, so a dictation is never blocked.
         let final_text = if settings.ai_enabled {
             let system_prompt = if settings.ai_profile == "auto" {
-                let app = crate::context_detector::ForegroundApp::detect();
-                let category = crate::context_detector::resolve_category(&app, &[]);
-                println!(
-                    "[Typr] Auto context: {} / \"{}\" -> {}",
-                    app.process_name, app.window_title, category
+                let fg = crate::context_detector::ForegroundApp::detect();
+                let category = crate::context_detector::resolve_category(&fg, &[]);
+                // Metadata only: log the process name and resolved category, never the
+                // window title (it can contain the user's content, email address, etc.).
+                crate::debug_log::log(
+                    app_dir,
+                    &format!("AUTO proc=\"{}\" -> {}", fg.process_name, category),
                 );
                 ai_postprocess::context_system_prompt(&category)
             } else {
@@ -217,6 +219,7 @@ impl Recorder {
                 )
             };
             let budget = ai_postprocess::budget_ms(&settings.ai_profile);
+            let ai_started_at = Instant::now();
             let llm = match tokio::time::timeout(
                 Duration::from_millis(budget),
                 ai_postprocess::postprocess(
@@ -228,13 +231,31 @@ impl Recorder {
             )
             .await
             {
-                Ok(Ok(clean)) => Some(clean),
+                Ok(Ok(clean)) => {
+                    // Metadata only: timing/model/profile, never the dictated text itself.
+                    crate::debug_log::log(
+                        app_dir,
+                        &format!(
+                            "AI ok {}ms model={} profile={}",
+                            ai_started_at.elapsed().as_millis(),
+                            ai_postprocess::resolve_model(&settings.ai_model),
+                            settings.ai_profile,
+                        ),
+                    );
+                    Some(clean)
+                }
                 Ok(Err(e)) => {
-                    println!("[Typr] AI post-process skipped (error): {}", e);
+                    crate::debug_log::log(app_dir, &format!("AI skipped (error): {}", e));
                     None
                 }
                 Err(_) => {
-                    println!("[Typr] AI post-process skipped (exceeded {}ms budget)", budget);
+                    crate::debug_log::log(
+                        app_dir,
+                        &format!(
+                            "AI skipped (exceeded {}ms budget) -> using deterministic cleanup",
+                            budget
+                        ),
+                    );
                     None
                 }
             };

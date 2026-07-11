@@ -122,6 +122,13 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
         }
     }
 
+    // Some modern apps launch under a wrapper/child process name (e.g. the native
+    // WhatsApp desktop app reports "WhatsApp.Root.exe", not "whatsapp.exe"). Match the
+    // family by prefix so process-name variants still resolve.
+    if proc_lower.starts_with("whatsapp") {
+        return ContextCategory::Messaging;
+    }
+
     // Default process-name mappings
     match proc_lower.as_str() {
         // Messaging
@@ -180,6 +187,13 @@ mod tests {
     #[test]
     fn test_messaging_apps() {
         let app = ForegroundApp { process_name: "WhatsApp.exe".into(), window_title: String::new() };
+        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+    }
+
+    #[test]
+    fn test_whatsapp_native_wrapper_process() {
+        // The native WhatsApp desktop app reports "WhatsApp.Root.exe" as its process name.
+        let app = ForegroundApp { process_name: "WhatsApp.Root.exe".into(), window_title: "WhatsApp".into() };
         assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
     }
 
