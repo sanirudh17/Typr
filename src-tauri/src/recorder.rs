@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::ai_postprocess;
 use crate::audio::AudioRecorder;
 use crate::cleanup::cleanup_text;
+use crate::commands;
 use crate::dictionary::Dictionary;
 use crate::paste::paste_text;
 use crate::settings::Settings;
@@ -263,6 +264,11 @@ impl Recorder {
         } else {
             deterministic
         };
+
+        // Final deterministic pass: apply always-on voice commands (casing / layout / symbols).
+        // Runs after cleanup and any AI pass so nothing downstream can undo it; identical
+        // behavior whether AI is on or off.
+        let final_text = commands::apply_commands(&final_text);
 
         // Transcription + AI cleanup are done; clear the spinner now, then paste so the text
         // appears right as the overlay disappears. Resetting before paste also guarantees the
