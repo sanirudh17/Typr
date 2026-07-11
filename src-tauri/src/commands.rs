@@ -38,6 +38,10 @@ pub fn apply_commands(text: &str) -> String {
                     out.push_newline(2);
                     i += len;
                 }
+                Kind::Space => {
+                    out.push_space();
+                    i += len;
+                }
                 Kind::Bullet => {
                     let end = capture_end(&words, i + len);
                     let captured = &words[i + len..end];
@@ -92,6 +96,7 @@ enum Kind {
     NewLine,
     NewParagraph,
     Bullet,
+    Space,
     OpenSym(&'static str),
     CloseSym(&'static str),
     InfixSym(&'static str),
@@ -173,28 +178,67 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
             ("new", "line") => return Some(Trigger { len: 2, kind: Kind::NewLine }),
             ("new", "paragraph") => return Some(Trigger { len: 2, kind: Kind::NewParagraph }),
             ("new", "bullet") => return Some(Trigger { len: 2, kind: Kind::Bullet }),
-            ("open", "paren") => return Some(Trigger { len: 2, kind: Kind::OpenSym("(") }),
-            ("close", "paren") => return Some(Trigger { len: 2, kind: Kind::CloseSym(")") }),
+            ("space", "bar") => return Some(Trigger { len: 2, kind: Kind::Space }),
+            // "paren" is hard for speech-to-text (often heard as "parent"). Accept the whole
+            // family, including the full word "parenthesis" which transcribes more reliably.
+            ("open", "paren")
+            | ("open", "parens")
+            | ("open", "parent")
+            | ("open", "parents")
+            | ("open", "parenthesis")
+            | ("open", "parentheses") => {
+                return Some(Trigger { len: 2, kind: Kind::OpenSym("(") })
+            }
+            ("close", "paren")
+            | ("close", "parens")
+            | ("close", "parent")
+            | ("close", "parents")
+            | ("close", "parenthesis")
+            | ("close", "parentheses") => {
+                return Some(Trigger { len: 2, kind: Kind::CloseSym(")") })
+            }
             ("open", "brace") => return Some(Trigger { len: 2, kind: Kind::OpenSym("{") }),
             ("close", "brace") => return Some(Trigger { len: 2, kind: Kind::CloseSym("}") }),
             ("open", "bracket") => return Some(Trigger { len: 2, kind: Kind::OpenSym("[") }),
             ("close", "bracket") => return Some(Trigger { len: 2, kind: Kind::CloseSym("]") }),
             ("open", "angle") => return Some(Trigger { len: 2, kind: Kind::OpenSym("<") }),
             ("close", "angle") => return Some(Trigger { len: 2, kind: Kind::CloseSym(">") }),
+            // Whisper sometimes splits "semicolon" into two words.
+            ("semi", "colon") => return Some(Trigger { len: 2, kind: Kind::CloseSym(";") }),
             _ => {}
         }
     }
 
-    // 1-word triggers.
+    // 1-word triggers. Include the merged spellings Whisper often produces for the
+    // layout commands ("new line" -> "newline", "new paragraph" -> "newparagraph").
     if let Some(a) = &w0 {
         match a.as_str() {
             "semicolon" => return Some(Trigger { len: 1, kind: Kind::CloseSym(";") }),
             "hyphen" => return Some(Trigger { len: 1, kind: Kind::InfixSym("-") }),
+            "newline" => return Some(Trigger { len: 1, kind: Kind::NewLine }),
+            "newparagraph" => return Some(Trigger { len: 1, kind: Kind::NewParagraph }),
+            "newbullet" => return Some(Trigger { len: 1, kind: Kind::Bullet }),
+            "spacebar" => return Some(Trigger { len: 1, kind: Kind::Space }),
+            // Whisper frequently merges the two-word casing triggers into one token
+            // ("pascal case" -> "PascalCase"); accept those merged spellings too.
+            "camelcase" => return Some(Trigger { len: 1, kind: Kind::Case(Casing::Camel) }),
+            "pascalcase" => return Some(Trigger { len: 1, kind: Kind::Case(Casing::Pascal) }),
+            "snakecase" => return Some(Trigger { len: 1, kind: Kind::Case(Casing::Snake) }),
+            "kebabcase" => return Some(Trigger { len: 1, kind: Kind::Case(Casing::Kebab) }),
+            "constantcase" => return Some(Trigger { len: 1, kind: Kind::Case(Casing::Constant) }),
             _ => {}
         }
     }
 
     None
+}
+
+/// True if the text contains at least one recognized command trigger. Used to bypass the AI
+/// cleanup pass for command-bearing (structured/code) dictations, so the LLM can't reword or
+/// half-apply the command phrases before the deterministic pass runs.
+pub fn contains_command(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    (0..words.len()).any(|i| match_trigger(&words, i).is_some())
 }
 
 /// Builds the output string while controlling spacing around inserted symbols and newlines.
@@ -241,6 +285,13 @@ impl OutBuilder {
     /// (`well-known`, `--verbose`).
     fn push_infix_symbol(&mut self, s: &str) {
         self.buf.push_str(s);
+        self.need_space = false;
+    }
+
+    /// Force a single literal space (from "space bar"). Useful after an attaching symbol; the
+    /// `need_space = false` afterward prevents the next word from doubling it.
+    fn push_space(&mut self) {
+        self.buf.push(' ');
         self.need_space = false;
     }
 
@@ -424,6 +475,37 @@ mod tests {
     }
 
     #[test]
+    fn test_space_bar_forces_space() {
+        // After an opener that normally attaches, "space bar" forces a gap.
+        assert_eq!(apply_commands("open paren space bar x"), "( x");
+        // Between plain words it is effectively one space (no doubling).
+        assert_eq!(apply_commands("foo space bar baz"), "foo baz");
+        assert!(contains_command("space bar"));
+    }
+
+    #[test]
+    fn test_spacebar_merged_spelling() {
+        // Whisper merges "space bar" -> "spacebar".
+        assert_eq!(apply_commands("open paren spacebar x"), "( x");
+        assert_eq!(apply_commands("foo spacebar baz"), "foo baz");
+    }
+
+    #[test]
+    fn test_paren_aliases() {
+        // The whole "paren" family (incl. the "parent" mishearing and full "parenthesis").
+        assert_eq!(apply_commands("call open paren x close paren"), "call (x)");
+        assert_eq!(apply_commands("call open parent x close parent"), "call (x)");
+        assert_eq!(
+            apply_commands("call open parenthesis x close parenthesis"),
+            "call (x)"
+        );
+        assert_eq!(
+            apply_commands("call open parentheses x close parentheses"),
+            "call (x)"
+        );
+    }
+
+    #[test]
     fn test_mixed_utterance() {
         assert_eq!(
             apply_commands("camel case get user by id semicolon new line"),
@@ -453,5 +535,51 @@ mod tests {
     fn test_documented_layout_false_positive() {
         // Documented, accepted risk: the exact phrase "new line" fires anywhere (watch-item).
         assert_eq!(apply_commands("a new line of credit"), "a\nof credit");
+    }
+
+    // --- Transcription-robustness aliases (merged/split spellings from Whisper) ---
+
+    #[test]
+    fn test_newline_merged_spelling() {
+        assert_eq!(apply_commands("first newline second"), "first\nsecond");
+        assert_eq!(
+            apply_commands("camel case get user by id newline done"),
+            "getUserById\ndone"
+        );
+    }
+
+    #[test]
+    fn test_newparagraph_merged_spelling() {
+        assert_eq!(apply_commands("first newparagraph second"), "first\n\nsecond");
+    }
+
+    #[test]
+    fn test_semicolon_split_spelling() {
+        assert_eq!(apply_commands("done semi colon"), "done;");
+    }
+
+    #[test]
+    fn test_merged_casing_triggers() {
+        // Whisper merges "pascal case" -> "PascalCase" (norm -> "pascalcase"), etc.
+        assert_eq!(apply_commands("PascalCase user service"), "UserService");
+        assert_eq!(apply_commands("camelcase get user by id"), "getUserById");
+        assert_eq!(apply_commands("snakecase max retry count"), "max_retry_count");
+        assert_eq!(apply_commands("kebabcase main nav bar"), "main-nav-bar");
+        assert_eq!(apply_commands("constantcase max buffer size"), "MAX_BUFFER_SIZE");
+        // And these merged triggers make the AI-bypass fire.
+        assert!(contains_command("PascalCase user service"));
+    }
+
+    // --- contains_command (drives the AI-bypass in the pipeline) ---
+
+    #[test]
+    fn test_contains_command_detection() {
+        assert!(contains_command("please camel case get user"));
+        assert!(contains_command("first new line second"));
+        assert!(contains_command("done newline"));
+        assert!(contains_command("well hyphen known"));
+        assert!(!contains_command("let's meet tomorrow afternoon"));
+        assert!(!contains_command("in this case we proceed"));
+        assert!(!contains_command(""));
     }
 }

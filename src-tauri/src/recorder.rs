@@ -200,9 +200,23 @@ impl Recorder {
         // Deterministic cleanup is the always-available fallback.
         let deterministic = cleanup_text(&replaced);
 
+        // Command-bearing dictations (casing/layout/symbols) go straight to the deterministic
+        // path: the LLM would otherwise reword or half-apply the command phrases before the
+        // command pass runs. Prompt Mode is exempt — its whole job is to rewrite the utterance.
+        let bypass_ai_for_commands =
+            settings.ai_profile != "prompt" && commands::contains_command(&replaced);
+        if bypass_ai_for_commands {
+            crate::debug_log::log(app_dir, "commands present -> raw text + command pass (skipping AI & prose cleanup)");
+        }
+
         // Optional Groq LLM cleanup with a hard 2.5s budget. On off/offline/slow/error we
         // paste the deterministic result instead, so a dictation is never blocked.
-        let final_text = if settings.ai_enabled {
+        let final_text = if bypass_ai_for_commands {
+            // Command/code dictation: skip prose cleanup too (no forced capitalization or
+            // trailing period) so literal input like "claude --dangerously-skip-permissions"
+            // is not sentence-formatted. The command pass below does the real work.
+            replaced.clone()
+        } else if settings.ai_enabled {
             let system_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
                 let category = crate::context_detector::resolve_category(&fg, &[]);
