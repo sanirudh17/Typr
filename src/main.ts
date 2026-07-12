@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { save } from "@tauri-apps/plugin-dialog";
 
 interface Settings {
   microphone: string;
@@ -96,6 +97,69 @@ historySearch.addEventListener("input", () => {
   visibleHistoryCount = 50; // reset pagination when the query changes
   loadHistory(false);
 });
+
+// The history the user is currently looking at: filtered if a search is
+// active, otherwise everything.
+function currentHistoryView(): TranscriptionItem[] {
+  const all = cachedHistory?.items ?? [];
+  const q = historyQuery.trim().toLowerCase();
+  return q ? all.filter(it => it.text.toLowerCase().includes(q)) : all;
+}
+
+function buildHistoryJson(items: TranscriptionItem[]): string {
+  return JSON.stringify(items, null, 2);
+}
+
+function buildHistoryMarkdown(items: TranscriptionItem[]): string {
+  let out = "# Typr History Export\n";
+  let lastGroup = "";
+  items.forEach(item => {
+    const date = new Date(item.timestamp * 1000);
+    const groupKey = date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
+    if (groupKey !== lastGroup) {
+      out += `\n## ${groupKey}\n\n`;
+      lastGroup = groupKey;
+    }
+    const timeStr = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    out += `**${timeStr}** — ${item.text}\n\n`;
+  });
+  return out;
+}
+
+// Simple auto-dismissing toast (reuses the .undo-toast style, no button).
+function showToast(message: string, ms = 3000) {
+  const toast = document.createElement("div");
+  toast.className = "undo-toast";
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), ms);
+}
+
+async function exportHistory(format: "json" | "markdown") {
+  const items = currentHistoryView();
+  if (items.length === 0) {
+    showToast("Nothing to export");
+    return;
+  }
+  const ext = format === "json" ? "json" : "md";
+  const today = new Date().toISOString().slice(0, 10);
+  const path = await save({
+    defaultPath: `typr-history-${today}.${ext}`,
+    filters: [{ name: format === "json" ? "JSON" : "Markdown", extensions: [ext] }],
+  });
+  if (!path) return; // user cancelled
+  const contents = format === "json" ? buildHistoryJson(items) : buildHistoryMarkdown(items);
+  try {
+    await invoke("write_text_file", { path, contents });
+    showToast(`Exported ${items.length} transcription${items.length === 1 ? "" : "s"}`);
+  } catch (err) {
+    console.error(err);
+    showToast(`Export failed: ${String(err)}`);
+  }
+}
+
+document.getElementById("export-json-btn")!.addEventListener("click", () => exportHistory("json"));
+document.getElementById("export-md-btn")!.addEventListener("click", () => exportHistory("markdown"));
 
 // Section navigation
 const navItems = document.querySelectorAll(".nav-item");
