@@ -1106,6 +1106,32 @@ kbd {
   align-items: center;
 }
 
+/* Narrow windows (app opens at 900px): stop cramming the 4-column add row.
+   Put the two inputs on one row and the checkbox + button on the next. */
+@media (max-width: 1100px) {
+  .replacement-add-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .replacement-add-grid .checkbox-group {
+    height: auto;
+    align-self: center;
+  }
+  .replacement-add-grid #replace-add-btn {
+    justify-self: end;
+    align-self: center;
+  }
+}
+
+/* Very narrow: stack everything into a single column. */
+@media (max-width: 820px) {
+  .replacement-add-grid {
+    grid-template-columns: 1fr;
+  }
+  .replacement-add-grid #replace-add-btn {
+    justify-self: start;
+  }
+}
+
 /* Custom Checkbox */
 .checkbox-container {
   display: flex;
