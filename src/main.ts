@@ -565,6 +565,7 @@ async function maybeOfferCorrection(id: string, oldText: string, newText: string
     }
     try {
       await invoke("add_vocabulary_hint", { word: term });
+      loadDictionary(); // refresh the Dictionary tab so the hint shows immediately
       panel.innerHTML = "";
       const done = document.createElement("span");
       done.className = "learn-panel-label";
