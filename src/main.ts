@@ -569,7 +569,7 @@ async function maybeOfferCorrection(id: string, oldText: string, newText: string
       panel.innerHTML = "";
       const done = document.createElement("span");
       done.className = "learn-panel-label";
-      done.textContent = "Correction saved ✓";
+      done.textContent = "Saved to Snippets ✓";
       panel.appendChild(done);
       setTimeout(() => panel.remove(), 2000);
     } catch (err) {
