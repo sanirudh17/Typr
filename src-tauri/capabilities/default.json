@@ -9,6 +9,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "global-shortcut:default",
+    "dialog:allow-save",
     {
       "identifier": "shell:allow-execute",
       "allow": [

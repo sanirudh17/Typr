@@ -216,6 +216,11 @@ fn propose_correction(old: String, new: String) -> Option<typr_lib::history::Cor
 }
 
 #[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_microphones() -> Vec<audio::MicDevice> {
     audio::list_microphones()
 }
@@ -326,6 +331,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             recorder: Recorder::new(),
             settings: Mutex::new(settings),
@@ -347,6 +353,7 @@ fn main() {
             delete_transcription,
             update_transcription,
             propose_correction,
+            write_text_file,
             get_dictionary,
             add_dictionary_word,
             remove_dictionary_word,
