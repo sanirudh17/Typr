@@ -201,6 +201,21 @@ fn remove_replacement(state: State<AppState>, index: usize) -> Result<(), String
 }
 
 #[tauri::command]
+fn delete_transcription(state: State<AppState>, id: String) -> Result<(), String> {
+    state.history.lock().unwrap().delete_item(&id, &state.app_dir)
+}
+
+#[tauri::command]
+fn update_transcription(state: State<AppState>, id: String, text: String) -> Result<(), String> {
+    state.history.lock().unwrap().update_item(&id, text, &state.app_dir)
+}
+
+#[tauri::command]
+fn propose_correction(old: String, new: String) -> Option<typr_lib::history::Correction> {
+    typr_lib::history::propose_correction(&old, &new)
+}
+
+#[tauri::command]
 fn list_microphones() -> Vec<audio::MicDevice> {
     audio::list_microphones()
 }
@@ -329,6 +344,9 @@ fn main() {
             download_model,
             toggle_recording,
             get_history,
+            delete_transcription,
+            update_transcription,
+            propose_correction,
             get_dictionary,
             add_dictionary_word,
             remove_dictionary_word,
