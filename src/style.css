@@ -861,7 +861,9 @@ kbd {
   color: var(--text-secondary);
 }
 
-.learn-panel-arrow {
+.learn-panel-note {
+  flex-basis: 100%;
+  font-size: 11px;
   color: var(--text-tertiary);
 }
 
