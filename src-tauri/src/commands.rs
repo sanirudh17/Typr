@@ -79,20 +79,12 @@ pub fn apply_commands(text: &str) -> String {
                     out.delete_last_words(n);
                     i += len;
                 }
-                Kind::DeleteLine => {
-                    out.delete_last_line();
-                    i += len;
-                }
                 Kind::WordCase(c) => {
                     out.case_last_word(c);
                     i += len;
                 }
                 Kind::MakeList => {
                     out.make_list();
-                    i += len;
-                }
-                Kind::QuotePhrase => {
-                    out.quote_phrase();
                     i += len;
                 }
             },
@@ -140,10 +132,8 @@ enum Kind {
     Scratch,
     ClearAll,
     DeleteWords(usize),
-    DeleteLine,
     WordCase(WordCase),
     MakeList,
-    QuotePhrase,
 }
 
 /// Lowercase a word and keep only alphanumerics — used for trigger matching and casing parts,
@@ -161,17 +151,6 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
-    }
-}
-
-/// Map a spoken small-number word to its value (for "delete last two words").
-fn number_word(w: &str) -> Option<usize> {
-    match w {
-        "two" => Some(2),
-        "three" => Some(3),
-        "four" => Some(4),
-        "five" => Some(5),
-        _ => None,
     }
 }
 
@@ -251,16 +230,11 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
     let w = |k: usize| words.get(i + k).map(|s| norm(s));
     let (w0, w1, w2, w3) = (w(0), w(1), w(2), w(3));
 
-    // 4-word triggers (checked first so "make it a list" / "delete last two words" win).
+    // 4-word triggers (checked first so "make it a list" wins over shorter matches).
     if let (Some(a), Some(b), Some(c), Some(d)) = (&w0, &w1, &w2, &w3) {
         let (a, b, c, d) = (a.as_str(), b.as_str(), c.as_str(), d.as_str());
         if a == "make" && (b == "it" || b == "that") && c == "a" && d == "list" {
             return Some(Trigger { len: 4, kind: Kind::MakeList });
-        }
-        if a == "delete" && b == "last" && d == "words" {
-            if let Some(n) = number_word(c) {
-                return Some(Trigger { len: 4, kind: Kind::DeleteWords(n) });
-            }
         }
     }
 
@@ -272,9 +246,6 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
             }
             ("delete", "last", "word") => {
                 return Some(Trigger { len: 3, kind: Kind::DeleteWords(1) });
-            }
-            ("delete", "last", "line") => {
-                return Some(Trigger { len: 3, kind: Kind::DeleteLine });
             }
             ("all", "caps", "that") => {
                 return Some(Trigger { len: 3, kind: Kind::WordCase(WordCase::Upper) });
@@ -338,7 +309,6 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
             ("lowercase", "that") => {
                 return Some(Trigger { len: 2, kind: Kind::WordCase(WordCase::Lower) })
             }
-            ("quote", "that") => return Some(Trigger { len: 2, kind: Kind::QuotePhrase }),
             _ => {}
         }
     }
@@ -497,17 +467,6 @@ impl OutBuilder {
         self.reset_need_space();
     }
 
-    /// "delete last line" — erase back to the last newline, else clear all.
-    fn delete_last_line(&mut self) {
-        self.trim_trailing_ws();
-        match self.buf.rfind('\n') {
-            Some(pos) => self.buf.truncate(pos),
-            None => self.buf.clear(),
-        }
-        self.trim_trailing_ws();
-        self.reset_need_space();
-    }
-
     /// "capitalize/uppercase/lowercase that" — transform the last word's case.
     fn case_last_word(&mut self, case: WordCase) {
         self.trim_trailing_ws();
@@ -554,28 +513,6 @@ impl OutBuilder {
             .join("\n");
         self.buf.push_str(&bullets);
         self.need_space = false;
-    }
-
-    /// "quote that" — wrap the preceding phrase in ASCII double quotes.
-    fn quote_phrase(&mut self) {
-        self.trim_trailing_ws();
-        let start = self
-            .buf
-            .rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n')
-            .map(|p| p + 1)
-            .unwrap_or(0);
-        let phrase = self.buf[start..].trim().to_string();
-        if phrase.is_empty() {
-            return;
-        }
-        self.buf.truncate(start);
-        if !self.buf.is_empty() && !self.buf.ends_with(' ') && !self.buf.ends_with('\n') {
-            self.buf.push(' ');
-        }
-        self.buf.push('"');
-        self.buf.push_str(&phrase);
-        self.buf.push('"');
-        self.need_space = true;
     }
 
     fn finish(self) -> String {
@@ -874,15 +811,8 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_last_word_and_n_words() {
+    fn test_delete_last_word() {
         assert_eq!(apply_commands("call him at five delete last word"), "call him at");
-        assert_eq!(apply_commands("one two three four delete last two words"), "one two");
-        assert_eq!(apply_commands("a b c d e delete last three words"), "a b");
-    }
-
-    #[test]
-    fn test_delete_last_line() {
-        assert_eq!(apply_commands("first new line second delete last line"), "first");
     }
 
     #[test]
@@ -904,11 +834,6 @@ mod tests {
             "- milk\n- eggs\n- bread"
         );
         assert_eq!(apply_commands("fish and chips make it a list"), "- fish and chips");
-    }
-
-    #[test]
-    fn test_quote_that_wraps_preceding_phrase() {
-        assert_eq!(apply_commands("he said hello quote that"), "\"he said hello\"");
     }
 
     #[test]

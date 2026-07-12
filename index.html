@@ -65,6 +65,13 @@
             </svg>
             AI
           </a>
+          <a class="nav-item" data-section="commands">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M4.5 6.5L6.5 8l-2 1.5M8.5 9.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Commands
+          </a>
           <a class="nav-item" data-section="recording">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <rect x="6" y="2.5" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.2"/>
@@ -351,6 +358,54 @@
                 <textarea id="ai-custom-instructions" class="custom-instructions" rows="3"
                   placeholder="e.g. Use British spelling. · Never use em-dashes. · Keep my acronyms as-is."></textarea>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-commands" class="content-section">
+          <div class="section-header">
+            <h2 class="section-title">Commands</h2>
+            <p class="section-desc">Voice commands you can speak while dictating</p>
+          </div>
+          <div class="info-card">
+            <div class="info-card-title">How voice commands work</div>
+            <div class="info-card-body">Speak a command <b>as part of the same dictation</b> &mdash; e.g. say &ldquo;camel case get user by id&rdquo; or &ldquo;we meet monday <b>scratch that</b> we meet tuesday&rdquo; in one breath. They're applied deterministically before the text is pasted, work offline, and run whether AI Cleanup is on or off. Editing commands only affect the <b>current</b> dictation &mdash; not text you've already pasted.</div>
+          </div>
+
+          <div class="cmd-group">
+            <h3 class="cmd-group-title">Code casing</h3>
+            <div class="cmd-list">
+              <div class="cmd-row"><span class="cmd-say">&ldquo;camel case get user by id&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">getUserById</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;pascal case user service&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">UserService</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;snake case max retry count&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">max_retry_count</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;constant case max buffer size&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">MAX_BUFFER_SIZE</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;kebab case main nav bar&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">main-nav-bar</code></div>
+            </div>
+          </div>
+
+          <div class="cmd-group">
+            <h3 class="cmd-group-title">Layout &amp; symbols</h3>
+            <div class="cmd-list">
+              <div class="cmd-row"><span class="cmd-say">&ldquo;new line&rdquo; / &ldquo;new paragraph&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">line / blank-line break</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;new bullet buy milk&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">- buy milk</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;space bar&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">(a literal space)</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;semicolon&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">;</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;open/close paren&rdquo; (or &ldquo;parenthesis&rdquo;)</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">( )</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;open/close brace / bracket / angle&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">{ } [ ] &lt; &gt;</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;hyphen&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">-</code></div>
+            </div>
+          </div>
+
+          <div class="cmd-group">
+            <h3 class="cmd-group-title">Editing (within the same dictation)</h3>
+            <div class="cmd-list">
+              <div class="cmd-row"><span class="cmd-say">&ldquo;scratch that&rdquo; / &ldquo;strike that&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">erase the last sentence</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;scratch all&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">erase everything so far</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;delete last word&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">remove the last word</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;capitalize that&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">Capitalize the last word</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;uppercase that&rdquo; / &ldquo;all caps that&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">UPPERCASE the last word</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;lowercase that&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">lowercase the last word</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;milk, eggs and bread make it a list&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">bulleted list</code></div>
             </div>
           </div>
         </section>

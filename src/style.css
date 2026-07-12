@@ -1383,6 +1383,57 @@ kbd {
   filter: grayscale(0.5);
 }
 
+.cmd-group {
+  margin-bottom: 22px;
+}
+
+.cmd-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px;
+}
+
+.cmd-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.cmd-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.cmd-row:last-child {
+  border-bottom: none;
+}
+
+.cmd-say {
+  color: var(--text);
+  flex: 1;
+  min-width: 200px;
+}
+
+.cmd-arrow {
+  color: var(--text-secondary);
+}
+
+.cmd-out {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--surface);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
 .preset-chips {
   display: flex;
   flex-wrap: wrap;
