@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "Typr",
-        "width": 900,
-        "height": 600,
+        "width": 1160,
+        "height": 720,
         "minWidth": 700,
         "minHeight": 500,
         "resizable": true,

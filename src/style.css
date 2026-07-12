@@ -1171,8 +1171,8 @@ kbd {
 
 .replacements-table-header {
   display: grid;
-  grid-template-columns: 2fr 24px 2fr 1fr 72px;
-  column-gap: 20px;
+  grid-template-columns: 1.6fr 20px 2.4fr 0.9fr 60px;
+  column-gap: 24px;
   padding: 10px 16px;
   background: var(--surface-active);
   border-bottom: 1px solid var(--border-strong);
@@ -1192,8 +1192,8 @@ kbd {
 
 .replacement-row {
   display: grid;
-  grid-template-columns: 2fr 24px 2fr 1fr 72px;
-  column-gap: 20px;
+  grid-template-columns: 1.6fr 20px 2.4fr 0.9fr 60px;
+  column-gap: 24px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   align-items: center;
@@ -1226,7 +1226,7 @@ kbd {
   font-size: 13px;
   color: var(--green);
   font-weight: 500;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .col-opts {
