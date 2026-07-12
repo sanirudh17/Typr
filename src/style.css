@@ -747,6 +747,135 @@ kbd {
   transform: translateY(0);
 }
 
+/* ── History editing (Phase 4 Slice A) ──────────────── */
+
+.btn-secondary {
+  padding: 7px 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.btn-secondary:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.feed-item-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.feed-item-edit-btn,
+.feed-item-del-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: all var(--transition);
+}
+
+.feed-item:hover .feed-item-edit-btn,
+.feed-item:hover .feed-item-del-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.feed-item.editing {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.feed-item-editor {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+
+.feed-item-edit-actions {
+  display: flex;
+  gap: 8px;
+  align-self: flex-end;
+}
+
+.undo-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  font-size: 13px;
+  color: var(--text);
+  z-index: 1000;
+}
+
+.undo-toast-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.learn-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 4px 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.learn-panel-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.learn-panel-arrow {
+  color: var(--text-tertiary);
+}
+
+.learn-panel-input {
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  min-width: 90px;
+}
+
 /* ── Selection ──────────────────────────────────────── */
 
 ::selection {

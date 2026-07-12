@@ -481,6 +481,162 @@ listen("history-updated", () => {
 let visibleHistoryCount = 50;
 let cachedHistory: History | null = null;
 
+interface Correction { find: string; replace: string; }
+
+// Transient toast with a 5s Undo window. onExpire fires if the user does not
+// click Undo before the window closes (used to commit a delete to disk).
+function showUndoToast(
+  message: string,
+  onUndo: () => void,
+  onExpire: () => void,
+  ms = 5000,
+) {
+  const toast = document.createElement("div");
+  toast.className = "undo-toast";
+
+  const msg = document.createElement("span");
+  msg.textContent = message;
+
+  const undoBtn = document.createElement("button");
+  undoBtn.className = "undo-toast-btn";
+  undoBtn.textContent = "Undo";
+
+  toast.appendChild(msg);
+  toast.appendChild(undoBtn);
+  document.body.appendChild(toast);
+
+  let done = false;
+  const timer = window.setTimeout(() => {
+    if (done) return;
+    done = true;
+    toast.remove();
+    onExpire();
+  }, ms);
+
+  undoBtn.onclick = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    toast.remove();
+    onUndo();
+  };
+}
+
+// After a save that changed the text, ask the backend for a proposed
+// find->replace correction and, if there is one, show an editable opt-in panel
+// under the card. Only writes to the dictionary when the user clicks Add.
+async function maybeOfferCorrection(id: string, oldText: string, newText: string) {
+  const corr = await invoke<Correction | null>("propose_correction", { old: oldText, new: newText });
+  if (!corr) return;
+
+  const card = document.querySelector<HTMLElement>(`.feed-item[data-id="${id}"]`);
+  if (!card) return;
+
+  const panel = document.createElement("div");
+  panel.className = "learn-panel";
+
+  const label = document.createElement("span");
+  label.className = "learn-panel-label";
+  label.textContent = "Learn correction?";
+
+  const findInput = document.createElement("input");
+  findInput.className = "learn-panel-input";
+  findInput.value = corr.find;
+
+  const arrow = document.createElement("span");
+  arrow.className = "learn-panel-arrow";
+  arrow.textContent = "→";
+
+  const replaceInput = document.createElement("input");
+  replaceInput.className = "learn-panel-input";
+  replaceInput.value = corr.replace;
+
+  const addBtn = document.createElement("button");
+  addBtn.className = "btn-primary";
+  addBtn.textContent = "Add";
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "btn-secondary";
+  dismissBtn.textContent = "Dismiss";
+
+  addBtn.onclick = async () => {
+    try {
+      await invoke("add_replacement", {
+        find: findInput.value,
+        replace: replaceInput.value,
+        caseSensitive: false,
+      });
+      panel.innerHTML = "";
+      const done = document.createElement("span");
+      done.className = "learn-panel-label";
+      done.textContent = "Correction saved ✓";
+      panel.appendChild(done);
+      setTimeout(() => panel.remove(), 2000);
+    } catch (err) {
+      label.textContent = String(err);
+    }
+  };
+
+  dismissBtn.onclick = () => panel.remove();
+
+  panel.appendChild(label);
+  panel.appendChild(findInput);
+  panel.appendChild(arrow);
+  panel.appendChild(replaceInput);
+  panel.appendChild(addBtn);
+  panel.appendChild(dismissBtn);
+
+  card.insertAdjacentElement("afterend", panel);
+}
+
+// Flip a history card into an inline editor. Save persists via
+// update_transcription and re-renders; Cancel restores the read-only view.
+function enterEditMode(card: HTMLElement, item: TranscriptionItem) {
+  card.classList.add("editing");
+  card.innerHTML = "";
+
+  const ta = document.createElement("textarea");
+  ta.className = "feed-item-editor";
+  ta.value = item.text;
+
+  const editActions = document.createElement("div");
+  editActions.className = "feed-item-edit-actions";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "btn-primary";
+  saveBtn.textContent = "Save";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn-secondary";
+  cancelBtn.textContent = "Cancel";
+
+  editActions.appendChild(saveBtn);
+  editActions.appendChild(cancelBtn);
+  card.appendChild(ta);
+  card.appendChild(editActions);
+  ta.focus();
+
+  cancelBtn.onclick = () => loadHistory(false);
+
+  saveBtn.onclick = async () => {
+    const newText = ta.value.trim();
+    const oldText = item.text;
+    if (newText === oldText || newText === "") {
+      loadHistory(false);
+      return;
+    }
+    try {
+      await invoke("update_transcription", { id: item.id, text: newText });
+      item.text = newText;
+      item.word_count = newText.split(/\s+/).filter(Boolean).length;
+      loadHistory(false);
+      maybeOfferCorrection(item.id, oldText, newText);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+}
+
 async function loadHistory(forceFetch = true) {
   if (forceFetch || !cachedHistory) {
     cachedHistory = await invoke<History>("get_history");
@@ -551,7 +707,8 @@ async function loadHistory(forceFetch = true) {
 
       const el = document.createElement("div");
       el.className = "feed-item";
-      
+      el.dataset.id = item.id;
+
       const timeEl = document.createElement("div");
       timeEl.className = "feed-item-time";
       timeEl.textContent = timeStr;
@@ -559,6 +716,9 @@ async function loadHistory(forceFetch = true) {
       const textEl = document.createElement("div");
       textEl.className = "feed-item-text";
       textEl.textContent = item.text;
+
+      const actions = document.createElement("div");
+      actions.className = "feed-item-actions";
 
       const copyBtn = document.createElement("button");
       copyBtn.className = "btn-primary feed-item-copy-btn";
@@ -569,9 +729,39 @@ async function loadHistory(forceFetch = true) {
         setTimeout(() => copyBtn.textContent = "Copy", 2000);
       };
 
+      const editBtn = document.createElement("button");
+      editBtn.className = "btn-secondary feed-item-edit-btn";
+      editBtn.textContent = "Edit";
+      editBtn.onclick = () => enterEditMode(el, item);
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "btn-secondary feed-item-del-btn";
+      delBtn.textContent = "Delete";
+      delBtn.onclick = () => {
+        const items2 = cachedHistory!.items;
+        const idx = items2.findIndex(i => i.id === item.id);
+        if (idx === -1) return;
+        const [removed] = items2.splice(idx, 1);
+        loadHistory(false);
+        showUndoToast(
+          "Transcription deleted",
+          () => {
+            cachedHistory!.items.splice(idx, 0, removed);
+            loadHistory(false);
+          },
+          () => {
+            invoke("delete_transcription", { id: removed.id }).catch(err => console.error(err));
+          },
+        );
+      };
+
+      actions.appendChild(copyBtn);
+      actions.appendChild(editBtn);
+      actions.appendChild(delBtn);
+
       el.appendChild(timeEl);
       el.appendChild(textEl);
-      el.appendChild(copyBtn);
+      el.appendChild(actions);
       transcriptionFeed.appendChild(el);
     });
   }
