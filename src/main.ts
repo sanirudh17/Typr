@@ -89,6 +89,13 @@ const statCount = document.getElementById("stat-count")!;
 const statWords = document.getElementById("stat-words")!;
 const statWpm = document.getElementById("stat-wpm")!;
 const transcriptionFeed = document.getElementById("transcription-feed")!;
+const historySearch = document.getElementById("history-search") as HTMLInputElement;
+let historyQuery = "";
+historySearch.addEventListener("input", () => {
+  historyQuery = historySearch.value;
+  visibleHistoryCount = 50; // reset pagination when the query changes
+  loadHistory(false);
+});
 
 // Section navigation
 const navItems = document.querySelectorAll(".nav-item");
@@ -636,14 +643,27 @@ function enterEditMode(card: HTMLElement, item: TranscriptionItem) {
   };
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Escape the text for safe innerHTML, then wrap case-insensitive matches of
+// `query` in a highlight span. Query regex-special chars are escaped.
+function highlightMatches(text: string, query: string): string {
+  const esc = escapeHtml(text);
+  if (!query) return esc;
+  const q = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return esc.replace(new RegExp(`(${q})`, "gi"), '<mark class="search-hl">$1</mark>');
+}
+
 async function loadHistory(forceFetch = true) {
   if (forceFetch || !cachedHistory) {
     cachedHistory = await invoke<History>("get_history");
     visibleHistoryCount = 50;
   }
-  
+
   const history = cachedHistory;
-  
+
   let totalWords = 0;
   let totalChars = 0;
   let totalDuration = 0;
@@ -662,15 +682,30 @@ async function loadHistory(forceFetch = true) {
     return;
   }
 
-  // Calculate statistics over the entire history
-  history.items.forEach(item => {
+  // Apply the search filter (case-insensitive substring); everything below
+  // operates on the filtered set so stats/count/pagination reflect it.
+  const query = historyQuery.trim().toLowerCase();
+  const filtered = query
+    ? history.items.filter(it => it.text.toLowerCase().includes(query))
+    : history.items;
+
+  if (filtered.length === 0) {
+    transcriptionFeed.innerHTML = `<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No transcriptions match &ldquo;${escapeHtml(historyQuery.trim())}&rdquo;.</div>`;
+    statWords.textContent = "0";
+    statWpm.textContent = "0";
+    statCount.textContent = "0";
+    return;
+  }
+
+  // Calculate statistics over the filtered set
+  filtered.forEach(item => {
     totalWords += item.word_count;
     totalChars += item.text.length;
     totalDuration += item.duration_secs;
   });
 
   // Group and render only the visible subset of items
-  const itemsToRender = history.items.slice(0, visibleHistoryCount);
+  const itemsToRender = filtered.slice(0, visibleHistoryCount);
   const groups = new Map<string, typeof history.items>();
   
   itemsToRender.forEach(item => {
@@ -714,7 +749,11 @@ async function loadHistory(forceFetch = true) {
 
       const textEl = document.createElement("div");
       textEl.className = "feed-item-text";
-      textEl.textContent = item.text;
+      if (query) {
+        textEl.innerHTML = highlightMatches(item.text, query);
+      } else {
+        textEl.textContent = item.text;
+      }
 
       const actions = document.createElement("div");
       actions.className = "feed-item-actions";
@@ -766,7 +805,7 @@ async function loadHistory(forceFetch = true) {
   }
 
   // Render a clean pagination button if there are more items remaining
-  if (history.items.length > visibleHistoryCount) {
+  if (filtered.length > visibleHistoryCount) {
     const loadMoreBtn = document.createElement("button");
     loadMoreBtn.className = "load-more-btn";
     loadMoreBtn.textContent = "Load Older Transcriptions";
@@ -780,7 +819,7 @@ async function loadHistory(forceFetch = true) {
   }
 
   statWords.textContent = totalWords.toLocaleString();
-  statCount.textContent = history.items.length.toLocaleString();
+  statCount.textContent = filtered.length.toLocaleString();
   
   // Standard calculation: (Characters / 5) / (Time in minutes)
   const wpm = totalDuration > 0 ? Math.round((totalChars / 5) / (totalDuration / 60)) : 0;

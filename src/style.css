@@ -878,6 +878,37 @@ kbd {
   min-width: 90px;
 }
 
+/* History search + export toolbar (Phase 4 Slice B) */
+.history-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.history-search-input {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  min-width: 200px;
+}
+
+.history-search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.search-hl {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
 /* ── Selection ──────────────────────────────────────── */
 
 ::selection {
