@@ -13,6 +13,7 @@ pub mod ai_postprocess;
 pub mod context_detector;
 pub mod debug_log;
 pub mod commands;
+pub mod hotkey;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
