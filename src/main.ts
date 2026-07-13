@@ -94,9 +94,9 @@ const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyDisplay = document.getElementById("hotkey-display") as HTMLElement;
 const hotkeyChangeBtn = document.getElementById("hotkey-change-btn") as HTMLButtonElement;
 const hotkeyResetBtn = document.getElementById("hotkey-reset-btn") as HTMLButtonElement;
+// Transient status line only. The persistent instructions live in #hotkey-hint,
+// which is static markup and never touched here, so they are always visible.
 const hotkeyStatus = document.getElementById("hotkey-status") as HTMLElement;
-
-const HOTKEY_IDLE_HINT = hotkeyStatus.innerHTML; // preserve the persistent instruction copy
 
 function renderHotkey(accel: string): void {
   hotkeyDisplay.textContent = accel.replace("CmdOrCtrl", "Cmd");
@@ -107,7 +107,7 @@ function setHotkeyStatus(msg: string): void {
 }
 
 function resetHotkeyStatus(): void {
-  hotkeyStatus.innerHTML = HOTKEY_IDLE_HINT;
+  hotkeyStatus.textContent = "";
 }
 const statCount = document.getElementById("stat-count")!;
 const statWords = document.getElementById("stat-words")!;
@@ -191,6 +191,12 @@ const sections = document.querySelectorAll(".content-section");
 navItems.forEach((item) => {
   item.addEventListener("click", () => {
     const target = item.getAttribute("data-section");
+    // If a hotkey capture is in progress, cancel it so the suspended global
+    // shortcut gets re-armed instead of being left dead when we navigate away.
+    if (capturing) void cancelCapture();
+    // Clear any lingering transient status so the tab reads fresh on entry
+    // (the persistent instructions in #hotkey-hint always remain visible).
+    resetHotkeyStatus();
     navItems.forEach((n) => n.classList.remove("active"));
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
@@ -558,27 +564,70 @@ modePtt.addEventListener("click", () => {
 // --- Hotkey capture ---------------------------------------------------------
 let capturing = false;
 
-function eventToAccelerator(e: KeyboardEvent): string | null {
+const MODIFIER_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "OS"]);
+
+/// Modifiers currently held, in Tauri accelerator order. `e.metaKey` maps to
+/// Super (the Windows key), NOT CmdOrCtrl.
+///
+/// On Windows, Ctrl+Alt is delivered as AltGr: for keys that have an AltGr
+/// character on the active layout (e.g. H→ḥ, Q→æ) the letter keydown reports
+/// `ctrlKey=false, altKey=false` but `AltGraph=true`. Treat AltGr as its
+/// physical components — Ctrl+Alt — so those combos capture like any other.
+function modifiersFromEvent(e: KeyboardEvent): string[] {
+  const altGraph = e.getModifierState("AltGraph");
   const mods: string[] = [];
-  if (e.ctrlKey || e.metaKey) mods.push("CmdOrCtrl");
-  if (e.altKey) mods.push("Alt");
+  if (e.ctrlKey || altGraph) mods.push("CmdOrCtrl");
+  if (e.altKey || altGraph) mods.push("Alt");
   if (e.shiftKey) mods.push("Shift");
+  if (e.metaKey) mods.push("Super");
+  return mods;
+}
 
-  // Ignore lone modifier keydowns — wait for a real key.
-  const modifierKeys = ["Control", "Shift", "Alt", "Meta", "OS"];
-  if (modifierKeys.includes(e.key)) return null;
+/// Map a physical `KeyboardEvent.code` to a Tauri accelerator key token,
+/// layout- and Shift-independent. Returns `null` for keys we don't support as
+/// hotkey targets (so we can reject them with clear guidance instead of
+/// emitting an accelerator the backend can't register).
+function codeToKeyToken(code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3); // KeyD -> D
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5); // Digit1 -> 1
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code; // F1..F24
+  switch (code) {
+    case "Space":
+      return "Space";
+    case "ArrowUp":
+      return "Up";
+    case "ArrowDown":
+      return "Down";
+    case "ArrowLeft":
+      return "Left";
+    case "ArrowRight":
+      return "Right";
+    case "Home":
+      return "Home";
+    case "End":
+      return "End";
+    case "PageUp":
+      return "PageUp";
+    case "PageDown":
+      return "PageDown";
+    case "Insert":
+      return "Insert";
+    case "Delete":
+      return "Delete";
+    default:
+      return null;
+  }
+}
 
-  // Normalize the main key to a Tauri token.
-  let key = e.key;
-  if (key === " " || e.code === "Space") key = "Space";
-  else if (/^[a-z]$/.test(key)) key = key.toUpperCase();
-  else if (/^[A-Z0-9]$/.test(key)) key = key.toUpperCase();
-  else if (e.code.startsWith("Key")) key = e.code.slice(3); // KeyD -> D
-  else if (e.code.startsWith("Digit")) key = e.code.slice(5); // Digit1 -> 1
-  else if (/^F\d{1,2}$/.test(key)) key = key; // F1..F12
+function toDisplay(accel: string): string {
+  return accel.replace("CmdOrCtrl", "Cmd").replace("Super", "Win").split("+").join(" + ");
+}
 
-  if (mods.length === 0) return ""; // signal "need a modifier"
-  return [...mods, key].join("+");
+/// Live preview of the combo as it is built, so pressing modifiers one at a
+/// time gives immediate feedback.
+function renderPreview(mods: string[], key: string | null): void {
+  const parts = key ? [...mods, key] : [...mods, "…"];
+  hotkeyDisplay.textContent = toDisplay(parts.join("+"));
 }
 
 async function onCaptureKeydown(e: KeyboardEvent): Promise<void> {
@@ -587,54 +636,98 @@ async function onCaptureKeydown(e: KeyboardEvent): Promise<void> {
   e.stopPropagation();
 
   if (e.key === "Escape") {
-    stopCapture();
-    resetHotkeyStatus();
-    renderHotkey(currentSettings.hotkey);
+    await cancelCapture();
     return;
   }
 
-  const accel = eventToAccelerator(e);
-  if (accel === null) return; // lone modifier, keep waiting
-  if (accel === "") {
-    setHotkeyStatus("Add a modifier — Ctrl, Alt, Shift, or Win — then a key.");
+  const mods = modifiersFromEvent(e);
+
+  // A lone modifier keydown just extends the live preview and keeps listening.
+  if (MODIFIER_KEYS.has(e.key)) {
+    renderPreview(mods, null);
+    setHotkeyStatus("Listening… now press a key (Esc to cancel).");
     return;
   }
 
-  stopCapture();
+  const key = codeToKeyToken(e.code);
+  if (key === null) {
+    setHotkeyStatus("That key can't be used — try a letter, number, F-key, arrow, or Space.");
+    return; // stay listening
+  }
+
+  if (mods.length === 0) {
+    renderPreview([], key);
+    setHotkeyStatus("Add a modifier — Ctrl, Alt, or Shift — then this key.");
+    return; // stay listening
+  }
+
+  // Complete combo: commit it.
+  const accel = [...mods, key].join("+");
+  renderPreview(mods, key);
+  await commitCapture(accel);
+}
+
+async function commitCapture(accel: string): Promise<void> {
+  endCaptureListening();
   try {
     const accepted = await invoke<string>("set_hotkey", { accelerator: accel });
     currentSettings.hotkey = accepted;
     renderHotkey(accepted);
-    setHotkeyStatus(`Hotkey set to ${accepted.replace("CmdOrCtrl", "Cmd")}.`);
+    setHotkeyStatus(`Hotkey set to ${toDisplay(accepted)}.`);
   } catch (err) {
+    // set_hotkey already restored the previous primary on failure. A failure
+    // here means the OS refused the combo — almost always because it's already
+    // claimed by Windows or another app. Say so plainly.
+    console.error("[Typr] set_hotkey failed:", err);
     renderHotkey(currentSettings.hotkey);
-    setHotkeyStatus(String(err));
+    setHotkeyStatus(
+      `${toDisplay(accel)} is already in use by Windows or another app — try another. Your hotkey is unchanged.`,
+    );
   }
 }
 
-function startCapture(): void {
-  capturing = true;
-  hotkeyChangeBtn.textContent = "Listening…";
-  setHotkeyStatus("Listening… press your combo (Esc to cancel).");
-  window.addEventListener("keydown", onCaptureKeydown, true);
+async function cancelCapture(): Promise<void> {
+  endCaptureListening();
+  try {
+    await invoke("resume_hotkeys"); // re-arm the hotkey we suspended for capture
+  } catch (err) {
+    console.error("[Typr] resume_hotkeys failed:", err);
+  }
+  renderHotkey(currentSettings.hotkey);
+  resetHotkeyStatus();
 }
 
-function stopCapture(): void {
+/// Detach the key listener and reset the button, without touching OS hotkey
+/// registration (the caller decides whether to resume or leave the new one).
+function endCaptureListening(): void {
   capturing = false;
   hotkeyChangeBtn.textContent = "Change";
   window.removeEventListener("keydown", onCaptureKeydown, true);
 }
 
+async function startCapture(): Promise<void> {
+  hotkeyChangeBtn.textContent = "Listening…";
+  setHotkeyStatus("Listening… hold your modifiers and press a key (Esc to cancel).");
+  renderPreview([], null);
+  try {
+    await invoke("suspend_hotkeys"); // stop the active hotkey from eating keys
+  } catch (err) {
+    console.error("[Typr] suspend_hotkeys failed:", err);
+  }
+  capturing = true;
+  window.addEventListener("keydown", onCaptureKeydown, true);
+}
+
 hotkeyChangeBtn.addEventListener("click", () => {
   if (capturing) {
-    stopCapture();
-    resetHotkeyStatus();
+    void cancelCapture();
   } else {
-    startCapture();
+    void startCapture();
   }
 });
 
 hotkeyResetBtn.addEventListener("click", async () => {
+  if (capturing) await cancelCapture();
   try {
     const accepted = await invoke<string>("set_hotkey", {
       accelerator: "CmdOrCtrl+Shift+Space",

@@ -430,6 +430,26 @@ body {
   min-width: 0;
 }
 
+/* Hotkey row: keep the live status on the same line as the combo + buttons so
+   it reads side by side while capturing. The status is pinned left; the combo
+   and buttons stay right. */
+.hotkey-control {
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+}
+
+.hotkey-status {
+  margin-right: auto;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--accent);
+}
+
+.hotkey-status:empty {
+  display: none;
+}
+
 /* Narrow windows: stack the control below the label so multi-button toggle groups
    keep all buttons on one horizontal line instead of wrapping downward or overlapping. */
 @media (max-width: 1280px) {

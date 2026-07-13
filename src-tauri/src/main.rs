@@ -226,20 +226,22 @@ async fn set_hotkey(
     typr_lib::hotkey::validate_accelerator(&accelerator)?;
 
     let old = state.settings.lock().unwrap().hotkey.clone();
-    if accelerator == old {
-        return Ok(accelerator); // no-op, already bound
-    }
 
-    // 2. Unregister the current primary, then try the new one.
+    // 2. Clear the old primary (harmless no-op if hotkeys are suspended), then
+    //    try the new one. This always ends with `accelerator` registered on
+    //    success — even when it equals `old` — so it is safe to call while
+    //    global shortcuts are suspended for capture.
     let _ = app.global_shortcut().unregister(old.as_str());
     match register_hotkey(&app, &accelerator, HotkeySource::Primary, &state.hotkey_tx) {
         Ok(_) => {
-            // 3. Persist and update in-memory settings.
-            let mut settings = state.settings.lock().unwrap().clone();
-            settings.hotkey = accelerator.clone();
-            settings.save(&state.app_dir)?;
-            *state.settings.lock().unwrap() = settings;
-            println!("[Typr] Hotkey rebound to {}", accelerator);
+            // 3. Persist only when it actually changed.
+            if accelerator != old {
+                let mut settings = state.settings.lock().unwrap().clone();
+                settings.hotkey = accelerator.clone();
+                settings.save(&state.app_dir)?;
+                *state.settings.lock().unwrap() = settings;
+                println!("[Typr] Hotkey rebound to {}", accelerator);
+            }
             Ok(accelerator)
         }
         Err(e) => {
@@ -252,6 +254,24 @@ async fn set_hotkey(
             ))
         }
     }
+}
+
+/// Unregister all global shortcuts while the UI captures a new combo, so the
+/// keystrokes reach the webview instead of being swallowed (or firing a
+/// recording) by the currently-registered hotkey.
+#[tauri::command]
+fn suspend_hotkeys(app: tauri::AppHandle) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())
+}
+
+/// Re-register the saved primary hotkey after a capture is cancelled without a
+/// successful rebind. (Slice B will also restore the secondary here.)
+#[tauri::command]
+fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    let hotkey = state.settings.lock().unwrap().hotkey.clone();
+    register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx)
 }
 
 #[tauri::command]
@@ -456,6 +476,8 @@ fn main() {
             download_model,
             toggle_recording,
             set_hotkey,
+            suspend_hotkeys,
+            resume_hotkeys,
             get_history,
             delete_transcription,
             update_transcription,
