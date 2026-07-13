@@ -10,6 +10,7 @@
     "core:window:allow-close",
     "global-shortcut:default",
     "dialog:allow-save",
+    "notification:default",
     {
       "identifier": "shell:allow-execute",
       "allow": [

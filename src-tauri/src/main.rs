@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(not(windows))]
 use tauri::image::Image;
@@ -8,6 +9,7 @@ use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 
 use typr_lib::audio;
 use typr_lib::downloader;
@@ -319,6 +321,10 @@ async fn do_toggle_recording(
     }
 }
 
+/// Set once the window has hidden to tray this run, so the "still running" hint shows
+/// only the first time per process, not on every close.
+static FIRST_HIDE_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     let _single_instance = match acquire_single_instance() {
         Ok(guard) => guard,
@@ -340,6 +346,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             recorder: Recorder::new(),
             settings: Mutex::new(settings),
@@ -390,14 +397,36 @@ fn main() {
                     eprintln!("[Typr] Failed to show main window: {}", e);
                 }
 
-                let _window_clone = window.clone();
+                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        println!("[Typr] Main window close requested, exiting app");
-                        tauri::async_runtime::block_on(async {
-                            typr_lib::whisper_server::stop_server().await;
-                        });
-                        std::process::exit(0);
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let background = app_handle
+                            .state::<AppState>()
+                            .settings
+                            .lock()
+                            .unwrap()
+                            .background_mode;
+                        if background {
+                            // Hide to tray, keep running so the hotkey still works.
+                            api.prevent_close();
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
+                                let _ = app_handle
+                                    .notification()
+                                    .builder()
+                                    .title("Typr is still running")
+                                    .body("Right-click the tray icon to quit.")
+                                    .show();
+                            }
+                        } else {
+                            println!("[Typr] Main window close requested, exiting app");
+                            tauri::async_runtime::block_on(async {
+                                typr_lib::whisper_server::stop_server().await;
+                            });
+                            std::process::exit(0);
+                        }
                     }
                 });
             }
