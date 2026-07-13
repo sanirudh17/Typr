@@ -29,6 +29,10 @@ pub struct Settings {
     pub ai_format: String,
     #[serde(rename = "aiCustomInstructions", default)]
     pub ai_custom_instructions: String,
+    #[serde(rename = "backgroundMode", default)]
+    pub background_mode: bool,
+    #[serde(rename = "autostart", default)]
+    pub autostart: bool,
 }
 
 fn default_cloud_model() -> String {
@@ -68,6 +72,8 @@ impl Default for Settings {
             ai_tone: "default".to_string(),
             ai_format: "default".to_string(),
             ai_custom_instructions: String::new(),
+            background_mode: false,
+            autostart: false,
         }
     }
 }
@@ -91,12 +97,78 @@ impl Settings {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         fs::write(&path, json).map_err(|e| e.to_string())
     }
+
+    /// Auto-start on login implies background mode — a login launch that quits on
+    /// window close would be pointless. Enabling autostart forces background on;
+    /// disabling autostart leaves background as the user set it.
+    pub fn normalize_startup(&mut self) {
+        if self.autostart {
+            self.background_mode = true;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env::temp_dir;
+
+    #[test]
+    fn defaults_have_background_and_autostart_off() {
+        let s = Settings::default();
+        assert!(!s.background_mode);
+        assert!(!s.autostart);
+    }
+
+    #[test]
+    fn old_config_missing_new_keys_loads_as_false() {
+        // A config.json written before Phase 5 has neither key.
+        let json = r#"{
+            "microphone": "default",
+            "engine": "local",
+            "whisperModel": "medium.en-q5_0",
+            "groqApiKey": "",
+            "recordingMode": "toggle",
+            "hotkey": "CmdOrCtrl+Shift+Space"
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.background_mode);
+        assert!(!s.autostart);
+    }
+
+    #[test]
+    fn background_and_autostart_round_trip() {
+        let json = serde_json::to_string(&Settings {
+            background_mode: true,
+            autostart: true,
+            ..Settings::default()
+        })
+        .unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.background_mode);
+        assert!(loaded.autostart);
+        // Confirm the wire names are camelCase.
+        assert!(json.contains("\"backgroundMode\":true"));
+        assert!(json.contains("\"autostart\":true"));
+    }
+
+    #[test]
+    fn normalize_startup_forces_background_when_autostart_on() {
+        let mut s = Settings { autostart: true, background_mode: false, ..Settings::default() };
+        s.normalize_startup();
+        assert!(s.background_mode);
+    }
+
+    #[test]
+    fn normalize_startup_leaves_background_when_autostart_off() {
+        let mut s = Settings { autostart: false, background_mode: false, ..Settings::default() };
+        s.normalize_startup();
+        assert!(!s.background_mode);
+
+        let mut s2 = Settings { autostart: false, background_mode: true, ..Settings::default() };
+        s2.normalize_startup();
+        assert!(s2.background_mode); // untouched
+    }
 
     #[test]
     fn test_default_settings() {
