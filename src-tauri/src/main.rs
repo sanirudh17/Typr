@@ -21,6 +21,12 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EX
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::CreateMutexW;
 
+/// True when launched with `--hidden` (Windows login auto-start). The main window
+/// stays hidden in the tray; the hotkey still works.
+fn launched_hidden() -> bool {
+    std::env::args().any(|a| a == "--hidden")
+}
+
 struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
@@ -374,6 +380,12 @@ fn main() {
                         }
                     }
                     Err(e) => eprintln!("[Typr] Failed to load main window icon: {}", e),
+                }
+
+                if launched_hidden() {
+                    println!("[Typr] Launched hidden (auto-start); main window stays in tray");
+                } else if let Err(e) = window.show() {
+                    eprintln!("[Typr] Failed to show main window: {}", e);
                 }
 
                 let _window_clone = window.clone();
