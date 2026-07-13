@@ -293,6 +293,83 @@ fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), S
 }
 
 #[tauri::command]
+async fn set_secondary_hotkey(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    accelerator: String,
+) -> Result<String, String> {
+    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+
+    let (primary, old_secondary) = {
+        let s = state.settings.lock().unwrap();
+        (s.hotkey.clone(), s.hotkey_secondary.clone())
+    };
+    if accelerator == primary {
+        // Restore whatever was suspended for capture before returning.
+        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+        register_secondary_if_set(&app, &state);
+        return Err("That's already your main hotkey — pick a different combo.".to_string());
+    }
+
+    if !old_secondary.is_empty() {
+        let _ = app.global_shortcut().unregister(old_secondary.as_str());
+    }
+    match register_hotkey(&app, &accelerator, HotkeySource::Secondary, &state.hotkey_tx) {
+        Ok(_) => {
+            let mut settings = state.settings.lock().unwrap().clone();
+            settings.hotkey_secondary = accelerator.clone();
+            settings.save(&state.app_dir)?;
+            *state.settings.lock().unwrap() = settings;
+            // Capture suspended everything — re-arm the primary.
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            println!("[Typr] Secondary hotkey set to {}", accelerator);
+            Ok(accelerator)
+        }
+        Err(e) => {
+            // Restore prior state: old secondary (if any) + primary.
+            if !old_secondary.is_empty() {
+                let _ = register_hotkey(&app, &old_secondary, HotkeySource::Secondary, &state.hotkey_tx);
+            }
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            eprintln!("[Typr] Secondary rebind to {} failed: {}", accelerator, e);
+            Err(format!(
+                "`{}` is unavailable — it may be in use by Windows or another app.",
+                accelerator
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+fn clear_secondary_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    let old = state.settings.lock().unwrap().hotkey_secondary.clone();
+    if !old.is_empty() {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.hotkey_secondary = String::new();
+    settings.save(&state.app_dir)?;
+    *state.settings.lock().unwrap() = settings;
+    // Clear any override that may reference the now-removed secondary session.
+    *state.pending_profile_override.lock().unwrap() = None;
+    println!("[Typr] Secondary hotkey cleared");
+    Ok(())
+}
+
+#[tauri::command]
+fn set_secondary_profile(state: State<AppState>, profile: String) -> Result<(), String> {
+    if !matches!(profile.as_str(), "cleanup" | "prompt" | "auto") {
+        return Err(format!("Unknown profile: {}", profile));
+    }
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.secondary_profile = profile.clone();
+    settings.save(&state.app_dir)?;
+    *state.settings.lock().unwrap() = settings;
+    println!("[Typr] Secondary profile set to {}", profile);
+    Ok(())
+}
+
+#[tauri::command]
 fn get_dictionary(state: State<AppState>) -> Dictionary {
     state.dictionary.lock().unwrap().clone()
 }
@@ -521,6 +598,9 @@ fn main() {
             set_hotkey,
             suspend_hotkeys,
             resume_hotkeys,
+            set_secondary_hotkey,
+            clear_secondary_hotkey,
+            set_secondary_profile,
             get_history,
             delete_transcription,
             update_transcription,
