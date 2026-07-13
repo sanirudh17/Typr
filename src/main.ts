@@ -20,6 +20,8 @@ interface Settings {
   aiCustomInstructions: string;
   backgroundMode: boolean;
   autostart: boolean;
+  hotkeySecondary: string;
+  secondaryProfile: string;
 }
 
 interface TranscriptionItem {
@@ -97,6 +99,13 @@ const hotkeyResetBtn = document.getElementById("hotkey-reset-btn") as HTMLButton
 // Transient status line only. The persistent instructions live in #hotkey-hint,
 // which is static markup and never touched here, so they are always visible.
 const hotkeyStatus = document.getElementById("hotkey-status") as HTMLElement;
+const hotkey2Display = document.getElementById("hotkey2-display") as HTMLElement;
+const hotkey2ChangeBtn = document.getElementById("hotkey2-change-btn") as HTMLButtonElement;
+const hotkey2ClearBtn = document.getElementById("hotkey2-clear-btn") as HTMLButtonElement;
+const hotkey2Status = document.getElementById("hotkey2-status") as HTMLElement;
+const secondaryProfileCleanup = document.getElementById("secondary-profile-cleanup") as HTMLButtonElement;
+const secondaryProfilePrompt = document.getElementById("secondary-profile-prompt") as HTMLButtonElement;
+const secondaryProfileAuto = document.getElementById("secondary-profile-auto") as HTMLButtonElement;
 const statCount = document.getElementById("stat-count")!;
 const statWords = document.getElementById("stat-words")!;
 const statWpm = document.getElementById("stat-wpm")!;
@@ -182,9 +191,11 @@ navItems.forEach((item) => {
     // If a hotkey capture is in progress, cancel it so the suspended global
     // shortcuts get re-armed instead of being left dead when we navigate away.
     if (primaryCapture.isCapturing()) primaryCapture.cancel();
+    if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
     // Clear any lingering transient status so the tab reads fresh on entry
     // (the persistent instructions in #hotkey-hint always remain visible).
     primaryCapture.clearStatus();
+    secondaryCapture.clearStatus();
     navItems.forEach((n) => n.classList.remove("active"));
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
@@ -282,6 +293,8 @@ async function loadSettings() {
 
   // Hotkey
   hotkeyDisplay.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
+  renderSecondaryHotkey();
+  renderSecondaryProfile();
 
   // Startup & background
   setBackgroundMode(currentSettings.backgroundMode);
@@ -756,6 +769,66 @@ hotkeyResetBtn.addEventListener("click", async () => {
     hotkeyStatus.textContent = String(err);
   }
 });
+
+// --- Secondary (AI) hotkey --------------------------------------------------
+function renderSecondaryHotkey(): void {
+  const v = currentSettings.hotkeySecondary;
+  hotkey2Display.textContent = v ? v.replace("CmdOrCtrl", "Cmd") : "Not set";
+  hotkey2ClearBtn.disabled = !v;
+}
+
+function renderSecondaryProfile(): void {
+  const p = currentSettings.secondaryProfile || "prompt";
+  secondaryProfileCleanup.classList.toggle("active", p === "cleanup");
+  secondaryProfilePrompt.classList.toggle("active", p === "prompt");
+  secondaryProfileAuto.classList.toggle("active", p === "auto");
+}
+
+const secondaryCapture = createHotkeyCapture({
+  display: hotkey2Display,
+  status: hotkey2Status,
+  changeBtn: hotkey2ChangeBtn,
+  setCommand: "set_secondary_hotkey",
+  getCurrent: () => currentSettings.hotkeySecondary || "",
+  onSet: (accepted) => {
+    currentSettings.hotkeySecondary = accepted;
+    renderSecondaryHotkey();
+  },
+  // Unset renders "Not set" rather than an empty box (used on cancel/idle).
+  onCurrentRender: renderSecondaryHotkey,
+});
+
+hotkey2ChangeBtn.addEventListener("click", () => {
+  if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
+  else secondaryCapture.start();
+});
+
+hotkey2ClearBtn.addEventListener("click", async () => {
+  if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
+  try {
+    await invoke("clear_secondary_hotkey");
+    currentSettings.hotkeySecondary = "";
+    renderSecondaryHotkey();
+    hotkey2Status.textContent = "AI hotkey cleared.";
+  } catch (err) {
+    hotkey2Status.textContent = String(err);
+  }
+});
+
+function wireSecondaryProfile(btn: HTMLButtonElement, profile: string): void {
+  btn.addEventListener("click", async () => {
+    try {
+      await invoke("set_secondary_profile", { profile });
+      currentSettings.secondaryProfile = profile;
+      renderSecondaryProfile();
+    } catch (err) {
+      hotkey2Status.textContent = String(err);
+    }
+  });
+}
+wireSecondaryProfile(secondaryProfileCleanup, "cleanup");
+wireSecondaryProfile(secondaryProfilePrompt, "prompt");
+wireSecondaryProfile(secondaryProfileAuto, "auto");
 
 // Label reflecting the true recording state, so the transient mic notice can
 // restore to it instead of blindly resetting to "Ready" mid-recording.

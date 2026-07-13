@@ -478,6 +478,31 @@
                 app, Typr keeps your current hotkey and tells you.
               </span>
             </div>
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">AI hotkey (optional)</span>
+                <span class="label-hint">A second shortcut that runs your dictation through an AI profile (default Prompt Mode), even if AI is off.</span>
+              </div>
+              <div class="setting-control hotkey-control">
+                <span id="hotkey2-status" class="hotkey-status"></span>
+                <kbd id="hotkey2-display">Not set</kbd>
+                <button id="hotkey2-change-btn" class="toggle-btn">Change</button>
+                <button id="hotkey2-clear-btn" class="toggle-btn">Clear</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">AI hotkey profile</span>
+                <span class="label-hint">Which AI profile the second hotkey applies.</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="secondary-profile-cleanup" class="toggle-btn">Cleanup</button>
+                  <button id="secondary-profile-prompt" class="toggle-btn">Prompt</button>
+                  <button id="secondary-profile-auto" class="toggle-btn">Auto</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
