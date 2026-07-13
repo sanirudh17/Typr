@@ -33,17 +33,17 @@ fn launched_hidden() -> bool {
     std::env::args().any(|a| a == "--hidden")
 }
 
-/// Which configured hotkey fired. Slice B adds `Secondary`.
+/// Which configured hotkey fired. `Secondary` routes the dictation through the
+/// configured AI profile for that one session.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HotkeySource {
     Primary,
+    Secondary,
 }
 
 /// A global-shortcut press/release tagged with the hotkey it came from.
 #[derive(Clone, Copy, Debug)]
 struct HotkeyEvent {
-    // Read by Slice B's consumer to route the AI profile; Primary-only in Slice A.
-    #[allow(dead_code)]
     source: HotkeySource,
     state: ShortcutState,
 }
@@ -65,6 +65,17 @@ fn register_hotkey(
         .map_err(|e| e.to_string())
 }
 
+/// Best-effort registration of the secondary hotkey when one is configured.
+fn register_secondary_if_set(app: &tauri::AppHandle, state: &AppState) {
+    let secondary = state.settings.lock().unwrap().hotkey_secondary.clone();
+    if !secondary.is_empty() {
+        match register_hotkey(app, &secondary, HotkeySource::Secondary, &state.hotkey_tx) {
+            Ok(_) => println!("[Typr] Secondary hotkey registered: {}", secondary),
+            Err(e) => eprintln!("[Typr] Secondary hotkey unavailable ({}): {}", secondary, e),
+        }
+    }
+}
+
 struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
@@ -72,6 +83,7 @@ struct AppState {
     dictionary: Mutex<Dictionary>,
     app_dir: PathBuf,
     hotkey_tx: Sender<HotkeyEvent>,
+    pending_profile_override: Mutex<Option<String>>,
 }
 
 #[cfg(windows)]
@@ -242,11 +254,14 @@ async fn set_hotkey(
                 *state.settings.lock().unwrap() = settings;
                 println!("[Typr] Hotkey rebound to {}", accelerator);
             }
+            // Capture suspended everything — re-arm the secondary too.
+            register_secondary_if_set(&app, &state);
             Ok(accelerator)
         }
         Err(e) => {
             // 4. Best-effort restore so we never end with no hotkey.
             let _ = register_hotkey(&app, &old, HotkeySource::Primary, &state.hotkey_tx);
+            register_secondary_if_set(&app, &state);
             eprintln!("[Typr] Rebind to {} failed ({}); kept {}", accelerator, e, old);
             Err(format!(
                 "`{}` is unavailable — it may be in use by Windows or another app.",
@@ -266,12 +281,15 @@ fn suspend_hotkeys(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Re-register the saved primary hotkey after a capture is cancelled without a
-/// successful rebind. (Slice B will also restore the secondary here.)
+/// Re-register the saved hotkeys after a capture is cancelled without a
+/// successful rebind — both the primary and (if set) the secondary, since
+/// capture suspends all global shortcuts.
 #[tauri::command]
 fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
     let hotkey = state.settings.lock().unwrap().hotkey.clone();
-    register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx)
+    let res = register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx);
+    register_secondary_if_set(&app, &state);
+    res
 }
 
 #[tauri::command]
@@ -391,28 +409,52 @@ async fn download_model(
     Ok(())
 }
 
+/// Record which AI profile (if any) this recording session should use, based on
+/// which hotkey started it. Secondary → force the configured profile; Primary → none.
+fn set_session_override(state: &AppState, source: HotkeySource) {
+    let ov = match source {
+        HotkeySource::Secondary => Some(state.settings.lock().unwrap().secondary_profile.clone()),
+        HotkeySource::Primary => None,
+    };
+    *state.pending_profile_override.lock().unwrap() = ov;
+}
+
+/// Live settings for the dictation about to be transcribed, with the per-session
+/// override applied (and cleared) if the session was started by the secondary hotkey.
+fn session_settings(state: &AppState) -> Settings {
+    let mut settings = state.settings.lock().unwrap().clone();
+    if let Some(profile) = state.pending_profile_override.lock().unwrap().take() {
+        settings.ai_enabled = true;
+        settings.ai_profile = profile;
+    }
+    settings
+}
+
 #[tauri::command]
 async fn toggle_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    do_toggle_recording(&app, &state).await
+    // UI button always acts as the primary (no AI override).
+    do_toggle_recording(&app, &state, HotkeySource::Primary).await
 }
 
 /// Shared logic for toggle recording, used by both the Tauri command and hotkey handler.
 async fn do_toggle_recording(
     app: &tauri::AppHandle,
     state: &AppState,
+    source: HotkeySource,
 ) -> Result<String, String> {
     let current_state = state.recorder.get_state();
     match current_state {
         RecordingState::Ready => {
+            set_session_override(state, source);
             let mic = state.settings.lock().unwrap().microphone.clone();
             state.recorder.start_recording(app, &mic)?;
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
-            let settings = state.settings.lock().unwrap().clone();
+            let settings = session_settings(state);
             let result = state
                 .recorder
                 .stop_and_transcribe(app, &settings, &state.history, &state.dictionary, &state.app_dir)
@@ -464,6 +506,7 @@ fn main() {
             dictionary: Mutex::new(dictionary),
             app_dir,
             hotkey_tx: hotkey_tx.clone(),
+            pending_profile_override: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -673,7 +716,7 @@ fn main() {
                             match mode.as_str() {
                                 "toggle" => {
                                     println!("[Typr] Toggle mode: calling do_toggle_recording");
-                                    match do_toggle_recording(&rx_handle, state.inner()).await {
+                                    match do_toggle_recording(&rx_handle, state.inner(), hotkey_event.source).await {
                                         Ok(result) => println!("[Typr] Toggle result: {}", result),
                                         Err(e) => eprintln!("[Typr] Toggle error: {}", e),
                                     }
@@ -682,6 +725,7 @@ fn main() {
                                     let current = state.recorder.get_state();
                                     println!("[Typr] PTT mode, current state: {:?}", current);
                                     if current == RecordingState::Ready {
+                                        set_session_override(state.inner(), hotkey_event.source);
                                         let mic = state.settings.lock().unwrap().microphone.clone();
                                         match state.recorder.start_recording(&rx_handle, &mic) {
                                             Ok(_) => println!("[Typr] Recording started"),
@@ -696,7 +740,7 @@ fn main() {
                             if mode == "push-to-talk" {
                                 let current = state.recorder.get_state();
                                 if current == RecordingState::Recording {
-                                    let settings = state.settings.lock().unwrap().clone();
+                                    let settings = session_settings(state.inner());
                                     match state.recorder.stop_and_transcribe(
                                         &rx_handle,
                                         &settings,
@@ -747,6 +791,8 @@ fn main() {
                     app.handle().exit(1);
                 }
             }
+
+            register_secondary_if_set(&handle, app.state::<AppState>().inner());
 
             Ok(())
         })
