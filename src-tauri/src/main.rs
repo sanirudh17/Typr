@@ -11,6 +11,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tokio::sync::mpsc::Sender;
 
 use typr_lib::audio;
 use typr_lib::downloader;
@@ -32,12 +33,45 @@ fn launched_hidden() -> bool {
     std::env::args().any(|a| a == "--hidden")
 }
 
+/// Which configured hotkey fired. Slice B adds `Secondary`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HotkeySource {
+    Primary,
+}
+
+/// A global-shortcut press/release tagged with the hotkey it came from.
+#[derive(Clone, Copy, Debug)]
+struct HotkeyEvent {
+    // Read by Slice B's consumer to route the AI profile; Primary-only in Slice A.
+    #[allow(dead_code)]
+    source: HotkeySource,
+    state: ShortcutState,
+}
+
+/// Register one accelerator, forwarding its press/release events (tagged with
+/// `source`) over `tx`. Returns `Err` if the OS/another app already owns it.
+fn register_hotkey(
+    app: &tauri::AppHandle,
+    accelerator: &str,
+    source: HotkeySource,
+    tx: &Sender<HotkeyEvent>,
+) -> Result<(), String> {
+    let tx = tx.clone();
+    app.global_shortcut()
+        .on_shortcut(accelerator, move |_app, shortcut, event| {
+            println!("[Typr] Hotkey event: {:?} state={:?}", shortcut, event.state);
+            let _ = tx.try_send(HotkeyEvent { source, state: event.state });
+        })
+        .map_err(|e| e.to_string())
+}
+
 struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
     history: Mutex<History>,
     dictionary: Mutex<Dictionary>,
     app_dir: PathBuf,
+    hotkey_tx: Sender<HotkeyEvent>,
 }
 
 #[cfg(windows)]
@@ -354,6 +388,8 @@ fn main() {
     let dictionary = Dictionary::load(&app_dir);
     let initial_hotkey = settings.hotkey.clone();
 
+    let (hotkey_tx, hotkey_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(32);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
@@ -369,6 +405,7 @@ fn main() {
             history: Mutex::new(history),
             dictionary: Mutex::new(dictionary),
             app_dir,
+            hotkey_tx: hotkey_tx.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -564,13 +601,13 @@ fn main() {
                 }
             });
 
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<ShortcutState>(32);
             let rx_handle = handle.clone();
+            let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {
-                while let Some(event_state) = rx.recv().await {
+                while let Some(hotkey_event) = hotkey_rx.recv().await {
                     let state = rx_handle.state::<AppState>();
                     let mode = state.settings.lock().unwrap().recording_mode.clone();
-                    match event_state {
+                    match hotkey_event.state {
                         ShortcutState::Pressed => {
                             match mode.as_str() {
                                 "toggle" => {
@@ -619,14 +656,7 @@ fn main() {
             let mut registered_hotkey = None;
             for candidate in hotkey_candidates(&initial_hotkey) {
                 println!("[Typr] Registering global shortcut: {}", candidate);
-                let tx_for_hotkey = tx.clone();
-                match app.global_shortcut().on_shortcut(
-                    candidate.as_str(),
-                    move |_app, shortcut, event| {
-                        println!("[Typr] Hotkey event: {:?} state={:?}", shortcut, event.state);
-                        let _ = tx_for_hotkey.try_send(event.state);
-                    },
-                ) {
+                match register_hotkey(&handle, &candidate, HotkeySource::Primary, &hotkey_tx) {
                     Ok(_) => {
                         registered_hotkey = Some(candidate);
                         break;
