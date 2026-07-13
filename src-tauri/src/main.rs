@@ -217,6 +217,44 @@ async fn save_settings(
 }
 
 #[tauri::command]
+async fn set_hotkey(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    accelerator: String,
+) -> Result<String, String> {
+    // 1. Validate the shape before touching the OS registration.
+    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+
+    let old = state.settings.lock().unwrap().hotkey.clone();
+    if accelerator == old {
+        return Ok(accelerator); // no-op, already bound
+    }
+
+    // 2. Unregister the current primary, then try the new one.
+    let _ = app.global_shortcut().unregister(old.as_str());
+    match register_hotkey(&app, &accelerator, HotkeySource::Primary, &state.hotkey_tx) {
+        Ok(_) => {
+            // 3. Persist and update in-memory settings.
+            let mut settings = state.settings.lock().unwrap().clone();
+            settings.hotkey = accelerator.clone();
+            settings.save(&state.app_dir)?;
+            *state.settings.lock().unwrap() = settings;
+            println!("[Typr] Hotkey rebound to {}", accelerator);
+            Ok(accelerator)
+        }
+        Err(e) => {
+            // 4. Best-effort restore so we never end with no hotkey.
+            let _ = register_hotkey(&app, &old, HotkeySource::Primary, &state.hotkey_tx);
+            eprintln!("[Typr] Rebind to {} failed ({}); kept {}", accelerator, e, old);
+            Err(format!(
+                "`{}` is unavailable — it may be in use by Windows or another app.",
+                accelerator
+            ))
+        }
+    }
+}
+
+#[tauri::command]
 fn get_dictionary(state: State<AppState>) -> Dictionary {
     state.dictionary.lock().unwrap().clone()
 }
@@ -417,6 +455,7 @@ fn main() {
             check_model_downloaded,
             download_model,
             toggle_recording,
+            set_hotkey,
             get_history,
             delete_transcription,
             update_transcription,
