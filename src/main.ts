@@ -91,7 +91,24 @@ const aiFormatNatural = document.getElementById("ai-format-natural")!;
 const aiFormatStructured = document.getElementById("ai-format-structured")!;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
-const hotkeyText = document.getElementById("hotkey-text")!;
+const hotkeyDisplay = document.getElementById("hotkey-display") as HTMLElement;
+const hotkeyChangeBtn = document.getElementById("hotkey-change-btn") as HTMLButtonElement;
+const hotkeyResetBtn = document.getElementById("hotkey-reset-btn") as HTMLButtonElement;
+const hotkeyStatus = document.getElementById("hotkey-status") as HTMLElement;
+
+const HOTKEY_IDLE_HINT = hotkeyStatus.innerHTML; // preserve the persistent instruction copy
+
+function renderHotkey(accel: string): void {
+  hotkeyDisplay.textContent = accel.replace("CmdOrCtrl", "Cmd");
+}
+
+function setHotkeyStatus(msg: string): void {
+  hotkeyStatus.textContent = msg;
+}
+
+function resetHotkeyStatus(): void {
+  hotkeyStatus.innerHTML = HOTKEY_IDLE_HINT;
+}
 const statCount = document.getElementById("stat-count")!;
 const statWords = document.getElementById("stat-words")!;
 const statWpm = document.getElementById("stat-wpm")!;
@@ -270,7 +287,7 @@ async function loadSettings() {
   setRecordingMode(currentSettings.recordingMode);
 
   // Hotkey
-  hotkeyText.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
+  renderHotkey(currentSettings.hotkey);
 
   // Startup & background
   setBackgroundMode(currentSettings.backgroundMode);
@@ -536,6 +553,98 @@ modeToggle.addEventListener("click", () => {
 modePtt.addEventListener("click", () => {
   setRecordingMode("push-to-talk");
   saveSettings();
+});
+
+// --- Hotkey capture ---------------------------------------------------------
+let capturing = false;
+
+function eventToAccelerator(e: KeyboardEvent): string | null {
+  const mods: string[] = [];
+  if (e.ctrlKey || e.metaKey) mods.push("CmdOrCtrl");
+  if (e.altKey) mods.push("Alt");
+  if (e.shiftKey) mods.push("Shift");
+
+  // Ignore lone modifier keydowns — wait for a real key.
+  const modifierKeys = ["Control", "Shift", "Alt", "Meta", "OS"];
+  if (modifierKeys.includes(e.key)) return null;
+
+  // Normalize the main key to a Tauri token.
+  let key = e.key;
+  if (key === " " || e.code === "Space") key = "Space";
+  else if (/^[a-z]$/.test(key)) key = key.toUpperCase();
+  else if (/^[A-Z0-9]$/.test(key)) key = key.toUpperCase();
+  else if (e.code.startsWith("Key")) key = e.code.slice(3); // KeyD -> D
+  else if (e.code.startsWith("Digit")) key = e.code.slice(5); // Digit1 -> 1
+  else if (/^F\d{1,2}$/.test(key)) key = key; // F1..F12
+
+  if (mods.length === 0) return ""; // signal "need a modifier"
+  return [...mods, key].join("+");
+}
+
+async function onCaptureKeydown(e: KeyboardEvent): Promise<void> {
+  if (!capturing) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.key === "Escape") {
+    stopCapture();
+    resetHotkeyStatus();
+    renderHotkey(currentSettings.hotkey);
+    return;
+  }
+
+  const accel = eventToAccelerator(e);
+  if (accel === null) return; // lone modifier, keep waiting
+  if (accel === "") {
+    setHotkeyStatus("Add a modifier — Ctrl, Alt, Shift, or Win — then a key.");
+    return;
+  }
+
+  stopCapture();
+  try {
+    const accepted = await invoke<string>("set_hotkey", { accelerator: accel });
+    currentSettings.hotkey = accepted;
+    renderHotkey(accepted);
+    setHotkeyStatus(`Hotkey set to ${accepted.replace("CmdOrCtrl", "Cmd")}.`);
+  } catch (err) {
+    renderHotkey(currentSettings.hotkey);
+    setHotkeyStatus(String(err));
+  }
+}
+
+function startCapture(): void {
+  capturing = true;
+  hotkeyChangeBtn.textContent = "Listening…";
+  setHotkeyStatus("Listening… press your combo (Esc to cancel).");
+  window.addEventListener("keydown", onCaptureKeydown, true);
+}
+
+function stopCapture(): void {
+  capturing = false;
+  hotkeyChangeBtn.textContent = "Change";
+  window.removeEventListener("keydown", onCaptureKeydown, true);
+}
+
+hotkeyChangeBtn.addEventListener("click", () => {
+  if (capturing) {
+    stopCapture();
+    resetHotkeyStatus();
+  } else {
+    startCapture();
+  }
+});
+
+hotkeyResetBtn.addEventListener("click", async () => {
+  try {
+    const accepted = await invoke<string>("set_hotkey", {
+      accelerator: "CmdOrCtrl+Shift+Space",
+    });
+    currentSettings.hotkey = accepted;
+    renderHotkey(accepted);
+    setHotkeyStatus("Hotkey reset to Cmd+Shift+Space.");
+  } catch (err) {
+    setHotkeyStatus(String(err));
+  }
 });
 
 // Label reflecting the true recording state, so the transient mic notice can
