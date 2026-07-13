@@ -33,6 +33,10 @@ pub struct Settings {
     pub background_mode: bool,
     #[serde(rename = "autostart", default)]
     pub autostart: bool,
+    #[serde(rename = "hotkeySecondary", default)]
+    pub hotkey_secondary: String,
+    #[serde(rename = "secondaryProfile", default = "default_secondary_profile")]
+    pub secondary_profile: String,
 }
 
 fn default_cloud_model() -> String {
@@ -55,6 +59,10 @@ fn default_ai_style() -> String {
     "default".to_string()
 }
 
+fn default_secondary_profile() -> String {
+    "prompt".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -74,6 +82,8 @@ impl Default for Settings {
             ai_custom_instructions: String::new(),
             background_mode: false,
             autostart: false,
+            hotkey_secondary: String::new(),
+            secondary_profile: "prompt".to_string(),
         }
     }
 }
@@ -336,5 +346,35 @@ mod tests {
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir).cloud_model, "fast");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_secondary_hotkey_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.hotkey_secondary, "");
+        assert_eq!(s.secondary_profile, "prompt");
+    }
+
+    #[test]
+    fn test_secondary_fields_roundtrip() {
+        let dir = temp_dir().join("typr_test_secondary_fields");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.hotkey_secondary = "CmdOrCtrl+Alt+P".to_string();
+        s.secondary_profile = "auto".to_string();
+        s.save(&dir).unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.hotkey_secondary, "CmdOrCtrl+Alt+P");
+        assert_eq!(loaded.secondary_profile, "auto");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_pre_slice_b_config_defaults_secondary() {
+        // A config.json written before Slice B has neither key.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.hotkey_secondary, "");
+        assert_eq!(s.secondary_profile, "prompt");
     }
 }
