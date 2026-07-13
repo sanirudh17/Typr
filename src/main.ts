@@ -18,6 +18,8 @@ interface Settings {
   aiTone: string;
   aiFormat: string;
   aiCustomInstructions: string;
+  backgroundMode: boolean;
+  autostart: boolean;
 }
 
 interface TranscriptionItem {
@@ -62,6 +64,10 @@ const modelFast = document.getElementById("model-fast")!;
 const modelAccurate = document.getElementById("model-accurate")!;
 const aiOff = document.getElementById("ai-off")!;
 const aiOn = document.getElementById("ai-on")!;
+const bgOff = document.getElementById("bg-off")!;
+const bgOn = document.getElementById("bg-on")!;
+const autostartOff = document.getElementById("autostart-off")!;
+const autostartOn = document.getElementById("autostart-on")!;
 const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
 const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
@@ -266,6 +272,10 @@ async function loadSettings() {
   // Hotkey
   hotkeyText.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
 
+  // Startup & background
+  setBackgroundMode(currentSettings.backgroundMode);
+  setAutostart(currentSettings.autostart);
+
   // AI post-processing
   setAiEnabled(currentSettings.aiEnabled);
   setAiModel(currentSettings.aiModel || "openai/gpt-oss-20b");
@@ -309,6 +319,20 @@ function setAiEnabled(enabled: boolean) {
   currentSettings.aiEnabled = enabled;
   aiOff.classList.toggle("active", !enabled);
   aiOn.classList.toggle("active", enabled);
+}
+
+function setBackgroundMode(enabled: boolean) {
+  currentSettings.backgroundMode = enabled;
+  bgOff.classList.toggle("active", !enabled);
+  bgOn.classList.toggle("active", enabled);
+}
+
+function setAutostart(enabled: boolean) {
+  currentSettings.autostart = enabled;
+  autostartOff.classList.toggle("active", !enabled);
+  autostartOn.classList.toggle("active", enabled);
+  // Auto-start implies background — reflect the forced state in the UI.
+  if (enabled) setBackgroundMode(true);
 }
 
 function setAiModel(model: string) {
@@ -428,6 +452,23 @@ aiOff.addEventListener("click", () => {
 
 aiOn.addEventListener("click", () => {
   setAiEnabled(true);
+  saveSettings();
+});
+
+bgOff.addEventListener("click", () => {
+  setBackgroundMode(false);
+  saveSettings();
+});
+bgOn.addEventListener("click", () => {
+  setBackgroundMode(true);
+  saveSettings();
+});
+autostartOff.addEventListener("click", () => {
+  setAutostart(false);
+  saveSettings();
+});
+autostartOn.addEventListener("click", () => {
+  setAutostart(true);
   saveSettings();
 });
 
