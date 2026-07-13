@@ -10,6 +10,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
 use typr_lib::audio;
 use typr_lib::downloader;
@@ -119,8 +120,19 @@ fn get_history(state: State<AppState>) -> History {
 async fn save_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> Result<(), String> {
+    settings.normalize_startup();
+
+    // Reconcile the OS auto-start registry entry with the toggle.
+    let autolaunch = app.autolaunch();
+    let currently_enabled = autolaunch.is_enabled().unwrap_or(false);
+    if settings.autostart && !currently_enabled {
+        let _ = autolaunch.enable();
+    } else if !settings.autostart && currently_enabled {
+        let _ = autolaunch.disable();
+    }
+
     let old_settings = state.settings.lock().unwrap().clone();
     let mic_changed = old_settings.microphone != settings.microphone;
     let engine_changed = old_settings.engine != settings.engine;
@@ -347,6 +359,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .manage(AppState {
             recorder: Recorder::new(),
             settings: Mutex::new(settings),
