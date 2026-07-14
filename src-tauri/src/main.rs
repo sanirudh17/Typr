@@ -786,6 +786,35 @@ fn main() {
                 }
             });
 
+            // Idle reaper: spin the warm local server down after IDLE_TIMEOUT of no
+            // dictation so the dGPU can power-gate (battery). Never fires mid-recording
+            // (guarded on recorder == Ready); the next record-start re-warms it.
+            let handle_for_reaper = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let state = handle_for_reaper.state::<AppState>();
+                    let recorder_ready =
+                        state.recorder.get_state() == RecordingState::Ready;
+                    let server_running = typr_lib::whisper_server::is_server_running();
+                    let idle = typr_lib::whisper_server::time_since_activity()
+                        .unwrap_or(std::time::Duration::ZERO);
+                    if typr_lib::whisper_server::should_spin_down(
+                        recorder_ready,
+                        server_running,
+                        idle,
+                        typr_lib::whisper_server::IDLE_TIMEOUT,
+                    ) {
+                        println!(
+                            "[Typr] Idle {}s > {}s — spinning down warm Whisper server to save battery",
+                            idle.as_secs(),
+                            typr_lib::whisper_server::IDLE_TIMEOUT.as_secs()
+                        );
+                        typr_lib::whisper_server::stop_server().await;
+                    }
+                }
+            });
+
             let rx_handle = handle.clone();
             let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {

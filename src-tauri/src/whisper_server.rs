@@ -33,6 +33,12 @@ static LAST_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
 /// `const_new` is the const constructor for a static async mutex.
 static ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// How long the warm server may sit idle (no dictation) before the reaper spins it down
+/// so the dGPU can power-gate and stop draining battery. The later re-warm is hidden by
+/// prewarm-on-record. 3 minutes: quick enough to save battery when you step away, long
+/// enough to survive natural pauses between dictations.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Whether a just-terminated server (`terminated_pid`) may clear the shared
 /// "current server" state. Only the process that is *still* current may: a stale
 /// monitor whose server was already replaced by a model switch must not, or it
