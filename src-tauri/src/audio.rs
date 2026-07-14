@@ -94,6 +94,21 @@ pub struct AudioRecorder {
     fft_callback_divider: Arc<Mutex<u8>>,
 }
 
+/// Asymmetric temporal EMA: fast attack (rising toward a higher target), slow release
+/// (falling toward a lower target). Result clamped to [0.0, 1.0].
+pub fn smooth_band(prev: f32, target: f32, attack: f32, release: f32) -> f32 {
+    let coeff = if target > prev { attack } else { release };
+    (prev + (target - prev) * coeff).clamp(0.0, 1.0)
+}
+
+/// Running peak for AGC: rises instantly to a new higher block peak, otherwise decays
+/// gently toward the (lower) current block max. Never falls below a small floor so we
+/// never divide by ~zero.
+pub fn agc_update(prev_max: f32, block_max: f32, decay: f32) -> f32 {
+    const FLOOR: f32 = 0.0001;
+    (prev_max * decay).max(block_max).max(FLOOR)
+}
+
 impl AudioRecorder {
     pub fn new() -> Self {
         let fft_size = 4096;
@@ -453,6 +468,31 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_smooth_band() {
+        // Rising toward a higher target uses the fast attack coefficient.
+        assert!((smooth_band(0.0, 1.0, 0.35, 0.08) - 0.35).abs() < 1e-6);
+        // Falling toward a lower target uses the slow release coefficient.
+        assert!((smooth_band(1.0, 0.0, 0.35, 0.08) - 0.92).abs() < 1e-6);
+        // One attack step (rise) moves more than one release step (fall) of equal distance.
+        let rose = smooth_band(0.0, 1.0, 0.35, 0.08) - 0.0;
+        let fell = 1.0 - smooth_band(1.0, 0.0, 0.35, 0.08);
+        assert!(rose > fell);
+        // Clamped to [0, 1] even with overshooting inputs.
+        assert_eq!(smooth_band(1.0, 5.0, 1.0, 0.08), 1.0);
+        assert_eq!(smooth_band(0.0, -5.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn test_agc_update() {
+        // A new higher block peak wins instantly.
+        assert!((agc_update(0.5, 2.0, 0.995) - 2.0).abs() < 1e-6);
+        // A quieter block decays the running peak gently (1.0 * 0.995).
+        assert!((agc_update(1.0, 0.1, 0.995) - 0.995).abs() < 1e-6);
+        // Never falls below the floor.
+        assert!((agc_update(0.0, 0.0, 0.995) - 0.0001).abs() < 1e-9);
+    }
 
     #[test]
     fn test_resolve_default_uses_default_device() {
