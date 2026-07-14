@@ -115,34 +115,50 @@
       let currentPitchFactor = 0.3;  // Smooth pitch parameter
       let pitchFactorTarget = 0.3;   // Target pitch parameter based on voice frequencies
 
+      let ripplePhase = 0;           // Continuous traveling-wave phase, advanced per frame
+      let lastFrameTime = 0;         // requestAnimationFrame timestamp of the previous frame
+
       function lerp(a, b, t) {
         return a + (b - a) * t;
       }
 
       // Single render loop running at screen's frame rate
-      function renderLoop() {
+      function renderLoop(now) {
         if (!isRunning) return;
+
+        // Real elapsed time since the last frame (seconds), clamped so a stalled tab
+        // can't jump the ripple. requestAnimationFrame passes a DOMHighResTimeStamp.
+        if (!lastFrameTime) lastFrameTime = now;
+        const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+        lastFrameTime = now;
 
         const maxH = 16;
         const minH = 2;
-        
+
         // Smooth the pitch factor transitions
         currentPitchFactor = lerp(currentPitchFactor, pitchFactorTarget, 0.08);
 
-        // Dynamic rise/decay rates reacting to pitch factor
-        // High pitch = fast response and rapid shivering/snappy decay
-        // Low pitch = smooth response and lingering, heavy swells
-        const riseRate = 0.20 + currentPitchFactor * 0.15;   // Ranges 0.20 to 0.35
+        // Eased rise/decay — the signal now arrives pre-smoothed from Rust, so the JS
+        // interpolation stays light for responsiveness without re-introducing twitch.
+        const riseRate = 0.14 + currentPitchFactor * 0.12;   // Ranges 0.14 to 0.26
         const decayRate = 0.08 + currentPitchFactor * 0.12;  // Ranges 0.08 to 0.20
+
+        // Continuous traveling ripple, advanced by real elapsed time each frame (not
+        // sampled at the 40fps poll). x5 keeps the prior visual speed (old phase advanced
+        // as rippleSpeed * Date.now()/200 == rippleSpeed * 5 per second).
+        const rippleSpeed = 0.3 + currentPitchFactor * 2.2;
+        const rippleFrequency = 0.35 + currentPitchFactor * 0.75;
+        ripplePhase += rippleSpeed * dt * 5.0;
 
         for (let i = 0; i < NUM_BARS; i++) {
           const t = targetLevels[i];
           const c = currentLevels[i];
-          
+
           const lerpFactor = t > c ? riseRate : decayRate;
           currentLevels[i] = lerp(c, t, lerpFactor);
-          
-          const h = minH + (maxH - minH) * currentLevels[i];
+
+          const norm = (Math.sin(i * rippleFrequency - ripplePhase) + 1) / 2;
+          const h = minH + (maxH - minH) * currentLevels[i] * (0.6 + 0.4 * norm);
           bars[i].style.height = `${h}px`;
         }
 
@@ -178,45 +194,29 @@
             pitchFactorTarget = 0.3;
           }
           
-          // Determine animation variables reacting directly to pitch with wider differentiation
-          const time = Date.now() / 200;
-          const rippleSpeed = 0.3 + currentPitchFactor * 2.2;      // High pitch = faster, energetic traveling waves
-          const rippleFrequency = 0.35 + currentPitchFactor * 0.75;  // High pitch = shivering, low pitch = heavy swells
-          const heightMultiplier = 0.65 + currentPitchFactor * 1.1; // High pitch = tall waves, low pitch = heavy waves
+          // Pure audio-driven envelope (no ripple here — the render loop applies the
+          // traveling wave continuously at screen rate). Symmetric bell + pitch mapping
+          // preserved.
+          const heightMultiplier = 0.65 + currentPitchFactor * 1.1; // High pitch = tall, low = heavy
 
           let levels = new Array(NUM_BARS).fill(0);
           for (let i = 0; i < NUM_BARS; i++) {
             // Symmetrical bell curve (1.0 at center, 0.0 at outer edges)
             let bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
-            
-            // Balanced bell shape giving the ends exactly enough space to move (moves between 2px and ~5px)
-            // while maintaining a premium, tapered curve towards the proud middle peak
             let shape = 0.18 + 0.82 * Math.pow(bell, 2.2);
-            
-            // Distance from center: 0.0 at absolute center, 1.0 at the outer boundaries
+
+            // Distance from center: 0.0 at center, 1.0 at the outer boundaries
             let distanceFromCenter = Math.abs(i - (NUM_BARS - 1) / 2) / ((NUM_BARS - 1) / 2);
-            
-            // Symmetrical frequency mapping:
-            // Center (distance = 0) -> maps to index 2 (100Hz - rich human voice fundamental bass)
-            // Ends (distance = 1) -> maps to index 13 (397Hz - higher sibilants, naturally much quieter in voice)
+            // Center -> index 2 (~100Hz bass), ends -> index 13 (~397Hz sibilants)
             let freqIndex = 2 + Math.round(distanceFromCenter * 11);
-            
+
             let rawPitch = bands[freqIndex] || 0;
-            // Scale rich voice bands to highlight voice peaks
             let localPitch = rawPitch * 1.6;
-            
-            // Blend global amplitude (power) with local pitch distinction (dynamics)
-            // Sightly higher global blend ensures ends dance in sync with speech rhythm even if quiet
             let activeVal = (amplitude * 0.45) + (localPitch * 0.55);
-            
-            // Traveling ripple sine wave
-            let ripple = Math.sin(i * rippleFrequency - time * rippleSpeed);
-            let normalizedRipple = (ripple + 1) / 2;
-            
-            // Calculate individual bar level with tapering
-            levels[i] = Math.min(1.0, activeVal * shape * (0.6 + 0.4 * normalizedRipple) * heightMultiplier);
+
+            levels[i] = Math.min(1.0, activeVal * shape * heightMultiplier);
           }
-          
+
           targetLevels = levels;
         } catch (e) {
           console.error("freq error:", e);
@@ -245,9 +245,11 @@
           targetLevels = new Array(NUM_BARS).fill(0);
           currentPitchFactor = 0.3;
           pitchFactorTarget = 0.3;
-          
+          ripplePhase = 0;
+          lastFrameTime = 0;
+
           isRunning = true;
-          renderLoop();
+          animationId = requestAnimationFrame(renderLoop);
           pollFrequency();
           pollInterval = setInterval(pollFrequency, 25); // Poll at 40fps (~25ms)
         } else if (state === "processing") {
