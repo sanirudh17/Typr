@@ -136,21 +136,21 @@
 
         currentPitchFactor = lerp(currentPitchFactor, pitchFactorTarget, 0.08);
 
-        const riseRate = 0.14 + currentPitchFactor * 0.12;
-        const decayRate = 0.08 + currentPitchFactor * 0.12;
-
-        const rippleSpeed = 0.3 + currentPitchFactor * 2.2;
-        const rippleFrequency = 0.35 + currentPitchFactor * 0.75;
+        // Steady continuous left-to-right drift: a single traveling crest (low ripple
+        // frequency = one crest across the bars, not multiple) at a calm fixed speed.
+        const rippleSpeed = 0.7;
+        const rippleFrequency = 0.22;
         ripplePhase += rippleSpeed * dt * 5.0;
 
         for (let i = 0; i < NUM_BARS; i++) {
-          const t = targetLevels[i];
-          const c = currentLevels[i];
-          const lerpFactor = t > c ? riseRate : decayRate;
-          currentLevels[i] = lerp(c, t, lerpFactor);
+          // Direct follow (no frontend easing) — the signal is already smoothed on the Rust
+          // side, so this is smooth without the extra "creamy" lag.
+          currentLevels[i] = targetLevels[i];
 
+          // A single traveling crest sweeps the highlight left -> right, so the one
+          // mountain drifts across continuously instead of splitting into two.
           const norm = (Math.sin(i * rippleFrequency - ripplePhase) + 1) / 2;
-          const h = minH + (maxH - minH) * currentLevels[i] * (0.6 + 0.4 * norm);
+          const h = minH + (maxH - minH) * currentLevels[i] * (0.68 + 0.32 * norm);
           bars[i].style.height = `${h}px`;
         }
 
@@ -161,12 +161,17 @@
         try {
           const bands = await invoke("get_frequency_bands");
 
-          // Overall loudness (peak band), lightly amplified.
-          let amplitude = 0;
+          // Perceptual (decibel) loudness. Human hearing is logarithmic, so a linear
+          // amplitude makes normal speech look tiny (you'd have to shout). Map a dB window
+          // onto [0,1] so quiet/normal speech clearly brings the waveform up — the same idea
+          // as an audio analyser's min/maxDecibels.
+          let raw = 0;
           for (let i = 0; i < 16; i++) {
-            if (bands[i] > amplitude) amplitude = bands[i];
+            if (bands[i] > raw) raw = bands[i];
           }
-          amplitude = Math.min(1.0, amplitude * 1.4);
+          const db = 20 * Math.log10(raw + 1e-4);   // ~ -80 (silence) .. 0 (peak)
+          const MIN_DB = -40, MAX_DB = -3;           // sensitivity window (raise MIN_DB = more sensitive)
+          const amplitude = Math.max(0, Math.min(1, (db - MIN_DB) / (MAX_DB - MIN_DB)));
 
           // Spectral centroid -> pitch factor over the realistic voice range (bands ~2..7),
           // so higher pitch clearly lifts the waveform.

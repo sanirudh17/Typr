@@ -297,8 +297,8 @@ impl AudioRecorder {
                         // peak adapts slowly so the bar shape stays stable across blocks
                         // instead of re-normalizing to each block's own max (shimmer), and
                         // silence fades out through the release instead of a hard-zero blink.
-                        const ATTACK: f32 = 0.35;
-                        const RELEASE: f32 = 0.08;
+                        const ATTACK: f32 = 0.5;
+                        const RELEASE: f32 = 0.22;
                         const DECAY: f32 = 0.995;
 
                         let agc = {
