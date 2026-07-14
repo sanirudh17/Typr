@@ -111,9 +111,9 @@
       let isRunning = false;
       let animationId = null;
       let pollInterval = null;
-      
-      let currentPitchFactor = 0.3;  // Smooth pitch parameter
-      let pitchFactorTarget = 0.3;   // Target pitch parameter based on voice frequencies
+
+      let currentPitchFactor = 0.3;  // Smoothed pitch (0 = deep, 1 = high)
+      let pitchFactorTarget = 0.3;   // Latest pitch from the poll
 
       let ripplePhase = 0;           // Continuous traveling-wave phase, advanced per frame
       let lastFrameTime = 0;         // requestAnimationFrame timestamp of the previous frame
@@ -122,12 +122,11 @@
         return a + (b - a) * t;
       }
 
-      // Single render loop running at screen's frame rate
+      // Render loop: each bar eases toward its center-weighted target, and a continuous
+      // traveling ripple modulates the heights (the double-mountain motion).
       function renderLoop(now) {
         if (!isRunning) return;
 
-        // Real elapsed time since the last frame (seconds), clamped so a stalled tab
-        // can't jump the ripple. requestAnimationFrame passes a DOMHighResTimeStamp.
         if (!lastFrameTime) lastFrameTime = now;
         const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
         lastFrameTime = now;
@@ -135,17 +134,11 @@
         const maxH = 16;
         const minH = 2;
 
-        // Smooth the pitch factor transitions
         currentPitchFactor = lerp(currentPitchFactor, pitchFactorTarget, 0.08);
 
-        // Eased rise/decay — the signal now arrives pre-smoothed from Rust, so the JS
-        // interpolation stays light for responsiveness without re-introducing twitch.
-        const riseRate = 0.14 + currentPitchFactor * 0.12;   // Ranges 0.14 to 0.26
-        const decayRate = 0.08 + currentPitchFactor * 0.12;  // Ranges 0.08 to 0.20
+        const riseRate = 0.14 + currentPitchFactor * 0.12;
+        const decayRate = 0.08 + currentPitchFactor * 0.12;
 
-        // Continuous traveling ripple, advanced by real elapsed time each frame (not
-        // sampled at the 40fps poll). x5 keeps the prior visual speed (old phase advanced
-        // as rippleSpeed * Date.now()/200 == rippleSpeed * 5 per second).
         const rippleSpeed = 0.3 + currentPitchFactor * 2.2;
         const rippleFrequency = 0.35 + currentPitchFactor * 0.75;
         ripplePhase += rippleSpeed * dt * 5.0;
@@ -153,7 +146,6 @@
         for (let i = 0; i < NUM_BARS; i++) {
           const t = targetLevels[i];
           const c = currentLevels[i];
-
           const lerpFactor = t > c ? riseRate : decayRate;
           currentLevels[i] = lerp(c, t, lerpFactor);
 
@@ -168,55 +160,45 @@
       async function pollFrequency() {
         try {
           const bands = await invoke("get_frequency_bands");
-          
-          // Calculate overall volume amplitude over all 16 bands
+
+          // Overall loudness (peak band), lightly amplified.
           let amplitude = 0;
           for (let i = 0; i < 16; i++) {
             if (bands[i] > amplitude) amplitude = bands[i];
           }
-          
-          // Amplify human voice standard ranges to keep it highly active
-          amplitude = Math.min(1.0, amplitude * 2.0);
-          
-          // Calculate spectral centroid as an indicator of pitch across all 16 bands
-          let sumAmplitudes = 0;
-          let weightedSum = 0;
+          amplitude = Math.min(1.0, amplitude * 1.4);
+
+          // Spectral centroid -> pitch factor over the realistic voice range (bands ~2..7),
+          // so higher pitch clearly lifts the waveform.
+          let sum = 0, weighted = 0;
           for (let j = 0; j < 16; j++) {
-            let amp = bands[j] || 0;
-            sumAmplitudes += amp;
-            weightedSum += amp * j;
+            const a = bands[j] || 0;
+            sum += a;
+            weighted += a * j;
           }
-          
-          // Smoothly map centroid value to pitch factor from 0.05 (deep) to 1.0 (squeaky)
-          if (sumAmplitudes > 0.03) {
-            pitchFactorTarget = 0.05 + 0.95 * (weightedSum / sumAmplitudes / 15.0);
+          if (sum > 0.03) {
+            const centroid = weighted / sum;
+            const norm = Math.max(0, Math.min(1, (centroid - 2.0) / 5.0));
+            pitchFactorTarget = 0.05 + 0.95 * norm;
           } else {
-            pitchFactorTarget = 0.3;
+            pitchFactorTarget = 0.25;
           }
-          
-          // Pure audio-driven envelope (no ripple here — the render loop applies the
-          // traveling wave continuously at screen rate). Symmetric bell + pitch mapping
-          // preserved.
-          const heightMultiplier = 0.65 + currentPitchFactor * 1.1; // High pitch = tall, low = heavy
 
-          let levels = new Array(NUM_BARS).fill(0);
+          // Center-weighted bell per bar, reacting to global loudness plus a touch of the
+          // local band. Higher pitch lifts the whole waveform.
+          const heightMultiplier = 0.65 + currentPitchFactor * 1.25;
+          const levels = new Array(NUM_BARS).fill(0);
           for (let i = 0; i < NUM_BARS; i++) {
-            // Symmetrical bell curve (1.0 at center, 0.0 at outer edges)
-            let bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
-            let shape = 0.18 + 0.82 * Math.pow(bell, 2.2);
+            const bell = Math.sin((i / (NUM_BARS - 1)) * Math.PI);
+            const shape = 0.18 + 0.82 * Math.pow(bell, 2.2);
 
-            // Distance from center: 0.0 at center, 1.0 at the outer boundaries
-            let distanceFromCenter = Math.abs(i - (NUM_BARS - 1) / 2) / ((NUM_BARS - 1) / 2);
-            // Center -> index 2 (~100Hz bass), ends -> index 13 (~397Hz sibilants)
-            let freqIndex = 2 + Math.round(distanceFromCenter * 11);
+            const distanceFromCenter = Math.abs(i - (NUM_BARS - 1) / 2) / ((NUM_BARS - 1) / 2);
+            const freqIndex = 2 + Math.round(distanceFromCenter * 11);
+            const localPitch = (bands[freqIndex] || 0) * 1.6;
 
-            let rawPitch = bands[freqIndex] || 0;
-            let localPitch = rawPitch * 1.6;
-            let activeVal = (amplitude * 0.45) + (localPitch * 0.55);
-
+            const activeVal = (amplitude * 0.8) + (localPitch * 0.2);
             levels[i] = Math.min(1.0, activeVal * shape * heightMultiplier);
           }
-
           targetLevels = levels;
         } catch (e) {
           console.error("freq error:", e);

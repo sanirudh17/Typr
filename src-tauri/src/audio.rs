@@ -314,7 +314,7 @@ impl AudioRecorder {
                             let target = if is_speaking {
                                 let normalized = smoothed_amplitudes[band] / agc;
                                 let shape = normalized.powi(2); // rounded peak, not harsh spikes
-                                let volume_factor = ((block_rms - noise_gate) * 50.0).min(1.0);
+                                let volume_factor = ((block_rms - noise_gate) * 18.0).min(1.0);
                                 let pitch_height_boost = 1.0 + (band as f32 * 0.05);
                                 (shape * volume_factor * pitch_height_boost).min(1.0)
                             } else {
