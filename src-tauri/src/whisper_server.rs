@@ -80,6 +80,13 @@ pub fn should_warm_after_download(engine: &str, selected_model: &str, downloaded
     engine == "local" && selected_model == downloaded_model
 }
 
+/// Whether a record-start should kick a background pre-warm of the local server: only on
+/// the local engine, and only when the warm server isn't already serving the selected
+/// model (otherwise the prewarm would be a redundant spawn).
+pub fn should_prewarm(engine: &str, warm_matches: bool) -> bool {
+    engine == "local" && !warm_matches
+}
+
 /// Whether the idle reaper should spin the warm server down now. Pure so it can be
 /// unit-tested without a live server: the reaper reads live state, this decides.
 pub fn should_spin_down(
@@ -316,6 +323,17 @@ mod tests {
         assert!(!terminate_should_clear(Some(200), 100));
         // Nothing is current -> nothing to clear.
         assert!(!terminate_should_clear(None, 100));
+    }
+
+    #[test]
+    fn test_should_prewarm() {
+        // Local engine + server not already warm for this model -> prewarm.
+        assert!(should_prewarm("local", false));
+        // Local engine but the warm server already serves this model -> skip (no dup spawn).
+        assert!(!should_prewarm("local", true));
+        // Cloud engine -> never prewarm the local server.
+        assert!(!should_prewarm("cloud", false));
+        assert!(!should_prewarm("cloud", true));
     }
 
     #[test]

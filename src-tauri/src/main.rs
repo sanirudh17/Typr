@@ -517,6 +517,43 @@ async fn toggle_recording(
 }
 
 /// Shared logic for toggle recording, used by both the Tauri command and hotkey handler.
+/// Fire-and-forget pre-warm of the local Whisper server at record-start. If the local
+/// engine is selected, mark activity (resets the idle reaper), and if the warm server
+/// isn't already serving the chosen model, spawn a background `ensure_running` so the
+/// server is hot by the time the user stops speaking. Never awaited — record-start is
+/// never delayed.
+fn prewarm_local(app: &tauri::AppHandle) {
+    let (engine, model) = {
+        let state = app.state::<AppState>();
+        let settings = state.settings.lock().unwrap();
+        (settings.engine.clone(), settings.whisper_model.clone())
+    };
+    if engine != "local" {
+        return;
+    }
+    // Record-start counts as activity even when the server is already warm.
+    typr_lib::whisper_server::note_activity();
+
+    let model_path = app
+        .state::<AppState>()
+        .app_dir
+        .join(transcribe_local::model_filename(&model));
+    let warm_matches = typr_lib::whisper_server::warm_server_matches(
+        typr_lib::whisper_server::current_model_key().as_deref(),
+        &model_path.to_string_lossy(),
+    );
+    if !typr_lib::whisper_server::should_prewarm(&engine, warm_matches) {
+        return;
+    }
+
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = typr_lib::whisper_server::ensure_running(&app_clone, &model_path).await {
+            eprintln!("[Typr] Prewarm ensure_running failed: {}", e);
+        }
+    });
+}
+
 async fn do_toggle_recording(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -526,6 +563,7 @@ async fn do_toggle_recording(
     match current_state {
         RecordingState::Ready => {
             set_session_override(state, source);
+            prewarm_local(app);
             let mic = state.settings.lock().unwrap().microphone.clone();
             state.recorder.start_recording(app, &mic)?;
             Ok("recording".to_string())
@@ -836,6 +874,7 @@ fn main() {
                                     println!("[Typr] PTT mode, current state: {:?}", current);
                                     if current == RecordingState::Ready {
                                         set_session_override(state.inner(), hotkey_event.source);
+                                        prewarm_local(&rx_handle);
                                         let mic = state.settings.lock().unwrap().microphone.clone();
                                         match state.recorder.start_recording(&rx_handle, &mic) {
                                             Ok(_) => println!("[Typr] Recording started"),
