@@ -49,6 +49,17 @@ pub fn should_warm_after_download(engine: &str, selected_model: &str, downloaded
     engine == "local" && selected_model == downloaded_model
 }
 
+/// Whether the idle reaper should spin the warm server down now. Pure so it can be
+/// unit-tested without a live server: the reaper reads live state, this decides.
+pub fn should_spin_down(
+    recorder_ready: bool,
+    server_running: bool,
+    idle: Duration,
+    timeout: Duration,
+) -> bool {
+    recorder_ready && server_running && idle > timeout
+}
+
 /// Ensures the local Whisper HTTP server is running with the specified model.
 /// If the server is already running with a different model, it stops the old server and starts a new one.
 pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(), String> {
@@ -270,6 +281,23 @@ mod tests {
         assert!(!terminate_should_clear(Some(200), 100));
         // Nothing is current -> nothing to clear.
         assert!(!terminate_should_clear(None, 100));
+    }
+
+    #[test]
+    fn test_should_spin_down() {
+        let t = Duration::from_secs(180);
+        // All conditions met -> spin down.
+        assert!(should_spin_down(true, true, Duration::from_secs(200), t));
+        // Recorder busy (recording/transcribing) -> never spin down.
+        assert!(!should_spin_down(false, true, Duration::from_secs(200), t));
+        // No server running -> nothing to do.
+        assert!(!should_spin_down(true, false, Duration::from_secs(200), t));
+        // Under the timeout -> stay warm.
+        assert!(!should_spin_down(true, true, Duration::from_secs(100), t));
+        // Exactly at the timeout is NOT past it -> stay warm.
+        assert!(!should_spin_down(true, true, Duration::from_secs(180), t));
+        // Just past the timeout -> spin down.
+        assert!(should_spin_down(true, true, Duration::from_secs(181), t));
     }
 
     #[test]
