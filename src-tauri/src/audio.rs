@@ -92,6 +92,9 @@ pub struct AudioRecorder {
     fft_buffer: Arc<Mutex<Vec<Complex<f32>>>>,
     frequency_bands: Arc<Mutex<Vec<f32>>>,
     fft_callback_divider: Arc<Mutex<u8>>,
+    /// Slowly-adapting AGC peak: a stable normalization reference across FFT blocks so
+    /// the bar shape doesn't re-scale to each block's own max (the shimmer source).
+    agc_max: Arc<Mutex<f32>>,
 }
 
 /// Asymmetric temporal EMA: fast attack (rising toward a higher target), slow release
@@ -131,6 +134,7 @@ impl AudioRecorder {
             fft_buffer: Arc::new(Mutex::new(fft_buffer)),
             frequency_bands: Arc::new(Mutex::new(vec![0.0; 16])),
             fft_callback_divider: Arc::new(Mutex::new(0)),
+            agc_max: Arc::new(Mutex::new(0.0001)),
         }
     }
 
@@ -205,6 +209,7 @@ impl AudioRecorder {
         let fft_buffer = self.fft_buffer.clone();
         let frequency_bands = self.frequency_bands.clone();
         let fft_callback_divider = self.fft_callback_divider.clone();
+        let agc_max = self.agc_max.clone();
         let stream_errored = self.stream_errored.clone();
 
         let stream = device
@@ -271,36 +276,51 @@ impl AudioRecorder {
                             amplitudes[band] = energy.sqrt();
                         }
                         
-                        // Spatial smoothing to make the bars move together seamlessly
+                        // Spatial smoothing to make the bars move together seamlessly.
                         let mut smoothed_amplitudes = vec![0.0; num_bands];
-                        let mut max_amplitude = 0.0001f32;
-                        
+                        let mut block_max = 0.0001f32;
+
                         for i in 0..num_bands {
                             let mut val = amplitudes[i] * 0.4;
                             if i > 0 { val += amplitudes[i - 1] * 0.2; }
                             if i > 1 { val += amplitudes[i - 2] * 0.1; }
                             if i + 1 < num_bands { val += amplitudes[i + 1] * 0.2; }
                             if i + 2 < num_bands { val += amplitudes[i + 2] * 0.1; }
-                            
+
                             smoothed_amplitudes[i] = val;
-                            if val > max_amplitude {
-                                max_amplitude = val;
+                            if val > block_max {
+                                block_max = val;
                             }
                         }
-                        
-                        let noise_gate = 0.003; 
+
+                        // Creamy temporal smoothing: fast attack, slow release. The AGC
+                        // peak adapts slowly so the bar shape stays stable across blocks
+                        // instead of re-normalizing to each block's own max (shimmer), and
+                        // silence fades out through the release instead of a hard-zero blink.
+                        const ATTACK: f32 = 0.35;
+                        const RELEASE: f32 = 0.08;
+                        const DECAY: f32 = 0.995;
+
+                        let agc = {
+                            let mut m = agc_max.lock().unwrap();
+                            *m = agc_update(*m, block_max, DECAY);
+                            *m
+                        };
+
+                        let noise_gate = 0.003;
                         let is_speaking = block_rms > noise_gate;
-                        
+
                         for band in 0..num_bands {
-                            if !is_speaking {
-                                bands[band] = 0.0;
-                            } else {
-                                let normalized = smoothed_amplitudes[band] / max_amplitude;
-                                let shape = normalized.powi(2); // smooth rounded peak instead of isolated harsh spikes
+                            let target = if is_speaking {
+                                let normalized = smoothed_amplitudes[band] / agc;
+                                let shape = normalized.powi(2); // rounded peak, not harsh spikes
                                 let volume_factor = ((block_rms - noise_gate) * 50.0).min(1.0);
-                                let pitch_height_boost = 1.0 + (band as f32 * 0.05); // taller bars for higher pitch
-                                bands[band] = (shape * volume_factor * pitch_height_boost).min(1.0);
-                            }
+                                let pitch_height_boost = 1.0 + (band as f32 * 0.05);
+                                (shape * volume_factor * pitch_height_boost).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            bands[band] = smooth_band(bands[band], target, ATTACK, RELEASE);
                         }
                     }
                 },
