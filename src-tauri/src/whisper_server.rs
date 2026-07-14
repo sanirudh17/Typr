@@ -27,6 +27,12 @@ static CURRENT_PID: Mutex<Option<u32>> = Mutex::new(None);
 /// or startup pre-start). The idle reaper measures the idle window from here.
 static LAST_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Serialises server (re)starts. Prewarm (at record START) and the lazy ensure in
+/// `transcribe_local` (at STOP, if the server isn't warm yet) can now both call
+/// `ensure_running`; without this they could double-spawn and fight over port 8080.
+/// `const_new` is the const constructor for a static async mutex.
+static ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Whether a just-terminated server (`terminated_pid`) may clear the shared
 /// "current server" state. Only the process that is *still* current may: a stale
 /// monitor whose server was already replaced by a model switch must not, or it
@@ -82,6 +88,10 @@ pub fn should_spin_down(
 /// Ensures the local Whisper HTTP server is running with the specified model.
 /// If the server is already running with a different model, it stops the old server and starts a new one.
 pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(), String> {
+    // Serialise concurrent (re)starts (prewarm-at-start vs lazy-ensure-at-stop). The
+    // second caller waits here and then hits the `already_running` fast path below.
+    let _ensure_guard = ENSURE_LOCK.lock().await;
+
     if !model_path.exists() {
         return Err("Whisper model not found. Please download a model first.".to_string());
     }
