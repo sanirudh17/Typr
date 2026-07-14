@@ -23,6 +23,10 @@ static CURRENT_MODEL: Mutex<Option<String>> = Mutex::new(None);
 /// shared state on exit — see `terminate_should_clear`.
 static CURRENT_PID: Mutex<Option<u32>> = Mutex::new(None);
 
+/// Timestamp of the last local-engine activity (record-start, warm-server transcription,
+/// or startup pre-start). The idle reaper measures the idle window from here.
+static LAST_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// Whether a just-terminated server (`terminated_pid`) may clear the shared
 /// "current server" state. Only the process that is *still* current may: a stale
 /// monitor whose server was already replaced by a model switch must not, or it
@@ -35,6 +39,21 @@ fn terminate_should_clear(current_pid: Option<u32>, terminated_pid: u32) -> bool
 /// The model key (path string) the persistent server is currently serving, if any.
 pub fn current_model_key() -> Option<String> {
     CURRENT_MODEL.lock().unwrap().clone()
+}
+
+/// Mark the local engine as just-used, resetting the idle window.
+pub fn note_activity() {
+    *LAST_ACTIVITY.lock().unwrap() = Some(Instant::now());
+}
+
+/// Time since the last recorded local-engine activity, or None if never active.
+pub fn time_since_activity() -> Option<Duration> {
+    LAST_ACTIVITY.lock().unwrap().map(|t| t.elapsed())
+}
+
+/// Whether the persistent local Whisper server process handle is currently held.
+pub fn is_server_running() -> bool {
+    SERVER_CHILD.lock().unwrap().is_some()
 }
 
 /// Whether the warm server (serving `current`) already has the `intended` model loaded.
@@ -281,6 +300,13 @@ mod tests {
         assert!(!terminate_should_clear(Some(200), 100));
         // Nothing is current -> nothing to clear.
         assert!(!terminate_should_clear(None, 100));
+    }
+
+    #[test]
+    fn test_note_activity_tracks_time() {
+        note_activity();
+        let since = time_since_activity().expect("activity recorded after note_activity");
+        assert!(since < Duration::from_secs(1), "just-noted activity should read near-zero idle");
     }
 
     #[test]

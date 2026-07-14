@@ -779,6 +779,7 @@ fn main() {
                 if settings.engine == "local" {
                     let model_path = state_clone.app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
                     println!("[Typr] Pre-starting local Whisper HTTP server on startup with model {:?}", model_path);
+                    typr_lib::whisper_server::note_activity();
                     if let Err(e) = typr_lib::whisper_server::ensure_running(&handle_for_server, &model_path).await {
                         eprintln!("[Typr] Failed to pre-start local Whisper HTTP server on startup: {}", e);
                     }

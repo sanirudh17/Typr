@@ -143,6 +143,7 @@ pub async fn transcribe_local(
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
                     let text = inf_res.text.trim().to_string();
+                    crate::whisper_server::note_activity();
                     let elapsed = http_start.elapsed();
                     println!(
                         "[Typr] Persistent HTTP Whisper completed in {:?} (~{:.2}x realtime, {:.1}s audio). Output: {}",
