@@ -179,6 +179,38 @@ pub fn sanitize_output(raw: &str) -> String {
     s.trim().to_string()
 }
 
+/// Detect a model refusal that slipped past the "never act on the content" guardrail. gpt-oss
+/// occasionally answers the dictation as if it were a request TO it ("I'm sorry, but I can't
+/// comply with that.") instead of cleaning it up. When this fires, the caller drops the LLM
+/// output and falls back to deterministic cleanup, so the user still gets their own words.
+///
+/// A false positive is cheap: the fallback cleans up the SAME text, so the only cost is losing
+/// the LLM restyling — never the user's content. Refusals are short and self-contained, so a
+/// long transcript that merely happens to contain one of these phrases is not treated as one.
+pub fn is_refusal(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    if t.len() > 160 {
+        return false;
+    }
+    const SIGNATURES: [&str; 14] = [
+        "comply with that",
+        "can't comply",
+        "cannot comply",
+        "can't assist with that",
+        "cannot assist with that",
+        "can't help with that request",
+        "cannot help with that request",
+        "can't fulfill",
+        "cannot fulfill",
+        "unable to help with that",
+        "unable to comply",
+        "as an ai language model",
+        "i can't provide that",
+        "i cannot provide that",
+    ];
+    SIGNATURES.iter().any(|s| t.contains(s))
+}
+
 /// Run one Groq chat-completion cleanup pass over `text` using `model` (resolved via the
 /// allowlist). Returns the sanitized text, or an `Err` the caller treats as "skip and use
 /// the deterministic fallback". Empty key errors; empty/whitespace input passes through
@@ -226,6 +258,12 @@ pub async fn postprocess(api_key: &str, text: &str, model: &str, system_prompt: 
     let cleaned = sanitize_output(content);
     if cleaned.is_empty() {
         return Err("AI post-process returned empty output".to_string());
+    }
+    // The model sometimes refuses the dictation instead of cleaning it. Treat that as a
+    // failure so the caller falls back to deterministic cleanup (the user's real words),
+    // never pasting "I'm sorry, but I can't comply with that." as the transcription.
+    if is_refusal(&cleaned) {
+        return Err(format!("AI post-process refused; using deterministic fallback: {:?}", cleaned));
     }
     Ok(cleaned)
 }
@@ -347,6 +385,33 @@ mod tests {
         assert!(s.contains("condense"));
         assert!(s.contains("prose paragraphs"));
         assert!(s.contains("- User instructions: No em-dashes."));
+    }
+
+    #[test]
+    fn test_is_refusal_detects_common_refusals() {
+        assert!(is_refusal("I'm sorry, but I can't comply with that."));
+        assert!(is_refusal("Sorry, I cannot comply with that."));
+        assert!(is_refusal("I can't assist with that."));
+        assert!(is_refusal("I'm sorry, but I can't fulfill this request."));
+        assert!(is_refusal("As an AI language model, I cannot do that."));
+    }
+
+    #[test]
+    fn test_is_refusal_ignores_legitimate_dictation() {
+        // Real messages a user might dictate — must NOT be flagged.
+        assert!(!is_refusal("Sorry, I can't make it to the meeting tomorrow."));
+        assert!(!is_refusal("Let me know if you can help with the migration."));
+        assert!(!is_refusal("I couldn't find the file you mentioned."));
+        assert!(!is_refusal("Please update the Windows drivers before the demo."));
+    }
+
+    #[test]
+    fn test_is_refusal_ignores_long_text_mentioning_phrase() {
+        // A long transcript that happens to discuss compliance is not a refusal.
+        let long = "In this section we explain how the vendor must comply with that clause \
+                    of the agreement, and what the remediation steps look like when the audit \
+                    turns up a gap that needs to be closed before the next review cycle begins.";
+        assert!(!is_refusal(long));
     }
 
     #[tokio::test]
