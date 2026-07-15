@@ -104,12 +104,19 @@ pub fn smooth_band(prev: f32, target: f32, attack: f32, release: f32) -> f32 {
     (prev + (target - prev) * coeff).clamp(0.0, 1.0)
 }
 
-/// Running peak for AGC: rises instantly to a new higher block peak, otherwise decays
-/// gently toward the (lower) current block max. Never falls below a small floor so we
-/// never divide by ~zero.
-pub fn agc_update(prev_max: f32, block_max: f32, decay: f32) -> f32 {
+/// Running peak for AGC. Rising toward a louder block is now *eased* by `rise` (instead
+/// of snapping), so a single transient — a cough, a door slam, one over-loud word — can
+/// only nudge the reference a little; a genuinely sustained louder passage still climbs
+/// over a few blocks. Quieter blocks decay gently toward the current block max. Never
+/// falls below a small floor so we never divide by ~zero.
+pub fn agc_update(prev_max: f32, block_max: f32, decay: f32, rise: f32) -> f32 {
     const FLOOR: f32 = 0.0001;
-    (prev_max * decay).max(block_max).max(FLOOR)
+    let next = if block_max > prev_max {
+        prev_max + (block_max - prev_max) * rise
+    } else {
+        (prev_max * decay).max(block_max)
+    };
+    next.max(FLOOR)
 }
 
 impl AudioRecorder {
@@ -300,10 +307,13 @@ impl AudioRecorder {
                         const ATTACK: f32 = 0.5;
                         const RELEASE: f32 = 0.22;
                         const DECAY: f32 = 0.995;
+                        // Eased AGC rise: a transient spike only nudges the reference, so it
+                        // can't pin normalization high and flatten everything spoken after it.
+                        const RISE: f32 = 0.3;
 
                         let agc = {
                             let mut m = agc_max.lock().unwrap();
-                            *m = agc_update(*m, block_max, DECAY);
+                            *m = agc_update(*m, block_max, DECAY, RISE);
                             *m
                         };
 
@@ -506,12 +516,18 @@ mod tests {
 
     #[test]
     fn test_agc_update() {
-        // A new higher block peak wins instantly.
-        assert!((agc_update(0.5, 2.0, 0.995) - 2.0).abs() < 1e-6);
+        // A louder block is now approached gradually, not snapped to: 0.5 + (2.0-0.5)*0.3.
+        assert!((agc_update(0.5, 2.0, 0.995, 0.3) - 0.95).abs() < 1e-6);
+        // A single transient can't capture the reference — one step stays well short of it.
+        assert!(agc_update(0.5, 2.0, 0.995, 0.3) < 2.0);
+        // A sustained louder level keeps climbing toward the block max over repeated blocks.
+        let mut m = 0.5;
+        for _ in 0..20 { m = agc_update(m, 2.0, 0.995, 0.3); }
+        assert!(m > 1.9);
         // A quieter block decays the running peak gently (1.0 * 0.995).
-        assert!((agc_update(1.0, 0.1, 0.995) - 0.995).abs() < 1e-6);
+        assert!((agc_update(1.0, 0.1, 0.995, 0.3) - 0.995).abs() < 1e-6);
         // Never falls below the floor.
-        assert!((agc_update(0.0, 0.0, 0.995) - 0.0001).abs() < 1e-9);
+        assert!((agc_update(0.0, 0.0, 0.995, 0.3) - 0.0001).abs() < 1e-9);
     }
 
     #[test]
