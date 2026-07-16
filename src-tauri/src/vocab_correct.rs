@@ -1,3 +1,23 @@
+use std::collections::HashSet;
+use std::sync::OnceLock;
+
+fn common_words() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        include_str!("../assets/common_words.txt")
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+}
+
+/// True when `lower` (already lowercased) is an ordinary English word we must never
+/// overwrite with a correction.
+fn is_common_word(lower: &str) -> bool {
+    common_words().contains(lower)
+}
+
 /// American Soundex phonetic key: the first letter (uppercased) followed by three
 /// digits encoding the following consonants, zero-padded. Vowels separate repeated
 /// consonant codes; H and W do not. Returns "" when there are no ASCII letters.
@@ -65,5 +85,14 @@ mod tests {
         // Empty / non-alpha input.
         assert_eq!(soundex(""), "");
         assert_eq!(soundex("123"), "");
+    }
+
+    #[test]
+    fn test_is_common_word() {
+        assert!(is_common_word("the"));
+        assert!(is_common_word("story"));
+        assert!(is_common_word("boring"));
+        assert!(!is_common_word("kubernetes"));
+        assert!(!is_common_word("tauri"));
     }
 }
