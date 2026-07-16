@@ -221,12 +221,22 @@ impl Recorder {
         } else if settings.ai_enabled {
             let base_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
-                let category = crate::context_detector::resolve_category(&fg, &[], "", "");
-                // Metadata only: log the process name and resolved category, never the
-                // window title (it can contain the user's content, email address, etc.).
+                let focused_class = crate::context_detector::focused_child_class();
+                let category = crate::context_detector::resolve_category(
+                    &fg,
+                    &settings.app_rules,
+                    &focused_class,
+                    &settings.auto_context_override,
+                );
+                // Metadata only: log the process name, focused window class, and resolved
+                // category — never the window title (it can contain the user's content,
+                // email address, etc.). Class names are generic and safe to log.
                 crate::debug_log::log(
                     app_dir,
-                    &format!("AUTO proc=\"{}\" -> {}", fg.process_name, category),
+                    &format!(
+                        "AUTO proc=\"{}\" class=\"{}\" -> {}",
+                        fg.process_name, focused_class, category
+                    ),
                 );
                 ai_postprocess::context_system_prompt(&category)
             } else {

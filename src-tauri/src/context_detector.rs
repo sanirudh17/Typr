@@ -103,6 +103,56 @@ fn detect_foreground_windows() -> ForegroundApp {
     }
 }
 
+/// Read the window class of the control that currently has keyboard focus within the
+/// foreground window's thread. Lets us spot a focused native terminal even when the host
+/// process/window looks generic (e.g. a console inside a non-dev app). Returns "" on any
+/// failure so the caller simply skips the native-terminal detection tier.
+#[cfg(windows)]
+pub fn focused_child_class() -> String {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
+        GUITHREADINFO,
+    };
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return String::new();
+        }
+
+        // GetGUIThreadInfo needs the thread id owning the foreground window.
+        let tid = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        if tid == 0 {
+            return String::new();
+        }
+
+        let mut info: GUITHREADINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if GetGUIThreadInfo(tid, &mut info) == 0 {
+            return String::new();
+        }
+
+        let focus = info.hwndFocus;
+        if focus.is_null() {
+            return String::new();
+        }
+
+        let mut buf = [0u16; 256];
+        let len = GetClassNameW(focus, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return String::new();
+        }
+        OsString::from_wide(&buf[..len as usize])
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+#[cfg(not(windows))]
+pub fn focused_child_class() -> String {
+    String::new()
+}
+
 /// Parse a category name (case-insensitive) into a `ContextCategory`, erroring on an
 /// unknown value. Used by the `add_app_rule` command to validate UI input.
 pub fn parse_category(value: &str) -> Result<ContextCategory, String> {
