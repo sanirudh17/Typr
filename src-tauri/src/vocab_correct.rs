@@ -70,6 +70,32 @@ pub fn soundex(word: &str) -> String {
     result
 }
 
+/// Max Levenshtein distance allowed between a token and a hint, by hint length.
+/// Short hints get a tighter bound to avoid loose matches.
+fn distance_threshold(hint_len: usize) -> usize {
+    if hint_len <= 4 { 1 } else { 2 }
+}
+
+/// Decide whether `token_lower` (lowercased, punctuation already stripped) should be
+/// corrected to `hint`. Requires BOTH a Soundex match AND a tight edit distance, and
+/// refuses to touch ordinary English words.
+fn hint_matches(token_lower: &str, hint: &str) -> bool {
+    let hint_lower = hint.to_lowercase();
+    if token_lower.is_empty() || hint_lower.is_empty() {
+        return false;
+    }
+    if token_lower == hint_lower {
+        return false; // already correct (case handled by the caller)
+    }
+    if is_common_word(token_lower) {
+        return false; // never overwrite an ordinary word
+    }
+    if soundex(token_lower) != soundex(&hint_lower) {
+        return false; // phonetic gate
+    }
+    strsim::levenshtein(token_lower, &hint_lower) <= distance_threshold(hint_lower.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +120,20 @@ mod tests {
         assert!(is_common_word("boring"));
         assert!(!is_common_word("kubernetes"));
         assert!(!is_common_word("tauri"));
+    }
+
+    #[test]
+    fn test_hint_matches() {
+        // Genuine mis-hearings (non-common tokens) → correct.
+        assert!(hint_matches("kubernetis", "Kubernetes"));
+        assert!(hint_matches("sonet", "Sonnet"));
+        assert!(hint_matches("tori", "Tauri"));
+        // Common words are never overwritten, even if phonetically near a hint.
+        assert!(!hint_matches("story", "Tauri"));
+        assert!(!hint_matches("boring", "whoring"));
+        // Too far by edit distance, even if Soundex-equal → no correction.
+        assert!(!hint_matches("clod", "Claude"));
+        // Same word (case-insensitively) is already correct → no match, no self-loop.
+        assert!(!hint_matches("tauri", "Tauri"));
     }
 }
