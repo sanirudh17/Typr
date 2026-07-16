@@ -138,10 +138,17 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
         // Email
         "outlook.exe" | "thunderbird.exe" => return ContextCategory::Email,
 
-        // Developer
+        // Developer — editors/IDEs (Electron + native) and terminal emulators. Whole app
+        // maps to Developer: terse/code-aware styling is what a developer wants in both the
+        // editor and the terminal, so we deliberately do not try to distinguish panes here.
         "code.exe" | "cursor.exe" | "windowsterminal.exe" | "cmd.exe"
-        | "powershell.exe" | "idea64.exe" | "devenv.exe" | "sublime_text.exe"
-        | "alacritty.exe" | "wezterm-gui.exe" | "wt.exe" => return ContextCategory::Developer,
+        | "powershell.exe" | "pwsh.exe" | "idea64.exe" | "devenv.exe" | "sublime_text.exe"
+        | "alacritty.exe" | "wezterm-gui.exe" | "wt.exe"
+        | "orca.exe"
+        | "pycharm64.exe" | "webstorm64.exe" | "rider64.exe" | "clion64.exe"
+        | "goland64.exe" | "zed.exe" | "windsurf.exe"
+        | "conemu64.exe" | "hyper.exe" | "tabby.exe" | "mintty.exe"
+        | "putty.exe" | "kitty.exe" | "ghostty.exe" => return ContextCategory::Developer,
 
         // Professional
         "winword.exe" | "excel.exe" | "powerpnt.exe" | "notion.exe"
@@ -207,6 +214,23 @@ mod tests {
     fn test_developer_apps() {
         let app = ForegroundApp { process_name: "Code.exe".into(), window_title: String::new() };
         assert_eq!(resolve_category(&app, &[]), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_broadened_dev_apps() {
+        for proc in [
+            "orca.exe", "pycharm64.exe", "webstorm64.exe", "rider64.exe",
+            "clion64.exe", "goland64.exe", "zed.exe", "windsurf.exe",
+            "conemu64.exe", "hyper.exe", "tabby.exe", "mintty.exe",
+            "putty.exe", "kitty.exe", "ghostty.exe",
+        ] {
+            let app = ForegroundApp { process_name: proc.into(), window_title: String::new() };
+            assert_eq!(
+                resolve_category(&app, &[]),
+                ContextCategory::Developer,
+                "expected {proc} to map to Developer",
+            );
+        }
     }
 
     #[test]
