@@ -239,7 +239,7 @@ pub fn is_native_terminal_class(class: &str) -> bool {
     lower.starts_with("conemu") || lower.starts_with("virtualconsoleclass")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppRule {
     pub process_name: String,
     pub title_contains: Option<String>,

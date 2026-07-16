@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::context_detector::AppRule;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     pub microphone: String,
@@ -37,6 +39,10 @@ pub struct Settings {
     pub hotkey_secondary: String,
     #[serde(rename = "secondaryProfile", default = "default_secondary_profile")]
     pub secondary_profile: String,
+    #[serde(rename = "appRules", default)]
+    pub app_rules: Vec<AppRule>,
+    #[serde(rename = "autoContextOverride", default = "default_auto_context_override")]
+    pub auto_context_override: String,
 }
 
 fn default_cloud_model() -> String {
@@ -63,6 +69,10 @@ fn default_secondary_profile() -> String {
     "prompt".to_string()
 }
 
+fn default_auto_context_override() -> String {
+    "auto".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -84,6 +94,8 @@ impl Default for Settings {
             autostart: false,
             hotkey_secondary: String::new(),
             secondary_profile: "prompt".to_string(),
+            app_rules: Vec::new(),
+            auto_context_override: "auto".to_string(),
         }
     }
 }
@@ -366,6 +378,43 @@ mod tests {
         let loaded = Settings::load(&dir);
         assert_eq!(loaded.hotkey_secondary, "CmdOrCtrl+Alt+P");
         assert_eq!(loaded.secondary_profile, "auto");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_context_fields() {
+        let s = Settings::default();
+        assert!(s.app_rules.is_empty());
+        assert_eq!(s.auto_context_override, "auto");
+    }
+
+    #[test]
+    fn test_legacy_config_without_context_fields_defaults() {
+        // A config.json written before this slice has neither key and must still load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.app_rules.is_empty());
+        assert_eq!(s.auto_context_override, "auto");
+    }
+
+    #[test]
+    fn test_context_fields_roundtrip() {
+        use crate::context_detector::{AppRule, ContextCategory};
+        let dir = temp_dir().join("typr_test_context_fields");
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        s.auto_context_override = "developer".to_string();
+        s.app_rules = vec![AppRule {
+            process_name: "obsidian.exe".to_string(),
+            title_contains: None,
+            category: ContextCategory::Professional,
+        }];
+        s.save(&dir).unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.auto_context_override, "developer");
+        assert_eq!(loaded.app_rules.len(), 1);
+        assert_eq!(loaded.app_rules[0].process_name, "obsidian.exe");
+        assert_eq!(loaded.app_rules[0].category, ContextCategory::Professional);
         let _ = fs::remove_dir_all(&dir);
     }
 

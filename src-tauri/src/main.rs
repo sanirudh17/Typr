@@ -17,6 +17,7 @@ use typr_lib::audio;
 use typr_lib::downloader;
 use typr_lib::recorder::{Recorder, RecordingState};
 use typr_lib::settings::Settings;
+use typr_lib::context_detector::{parse_category, AppRule};
 use typr_lib::transcribe_local;
 use typr_lib::dictionary::Dictionary;
 
@@ -410,6 +411,40 @@ fn remove_replacement(state: State<AppState>, index: usize) -> Result<(), String
 }
 
 #[tauri::command]
+fn get_app_rules(state: State<AppState>) -> Vec<AppRule> {
+    state.settings.lock().unwrap().app_rules.clone()
+}
+
+#[tauri::command]
+fn add_app_rule(
+    state: State<AppState>,
+    process_name: String,
+    title_contains: Option<String>,
+    category: String,
+) -> Result<(), String> {
+    let category = parse_category(&category)?;
+    let process_name = process_name.trim().to_string();
+    if process_name.is_empty() {
+        return Err("process name is required".to_string());
+    }
+    let title_contains = title_contains
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut settings = state.settings.lock().unwrap();
+    settings.app_rules.push(AppRule { process_name, title_contains, category });
+    settings.save(&state.app_dir)
+}
+
+#[tauri::command]
+fn remove_app_rule(state: State<AppState>, index: usize) -> Result<(), String> {
+    let mut settings = state.settings.lock().unwrap();
+    if index < settings.app_rules.len() {
+        settings.app_rules.remove(index);
+    }
+    settings.save(&state.app_dir)
+}
+
+#[tauri::command]
 fn delete_transcription(state: State<AppState>, id: String) -> Result<(), String> {
     state.history.lock().unwrap().delete_item(&id, &state.app_dir)
 }
@@ -651,6 +686,9 @@ fn main() {
             remove_vocabulary_hint,
             add_replacement,
             remove_replacement,
+            get_app_rules,
+            add_app_rule,
+            remove_app_rule,
         ])
         .setup(move |app| {
             // Handle window close to properly exit the app
