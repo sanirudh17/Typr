@@ -221,7 +221,7 @@ impl Recorder {
         } else if settings.ai_enabled {
             let base_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
-                let category = crate::context_detector::resolve_category(&fg, &[]);
+                let category = crate::context_detector::resolve_category(&fg, &[], "", "");
                 // Metadata only: log the process name and resolved category, never the
                 // window title (it can contain the user's content, email address, etc.).
                 crate::debug_log::log(

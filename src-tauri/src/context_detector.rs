@@ -103,13 +103,51 @@ fn detect_foreground_windows() -> ForegroundApp {
     }
 }
 
-/// Maps a detected foreground app to a context category.
-/// First checks custom rules, then default mappings, then browser title heuristics.
-pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> ContextCategory {
+/// Parse a category name (case-insensitive) into a `ContextCategory`, erroring on an
+/// unknown value. Used by the `add_app_rule` command to validate UI input.
+pub fn parse_category(value: &str) -> Result<ContextCategory, String> {
+    match value.trim().to_lowercase().as_str() {
+        "messaging" => Ok(ContextCategory::Messaging),
+        "email" => Ok(ContextCategory::Email),
+        "professional" => Ok(ContextCategory::Professional),
+        "developer" => Ok(ContextCategory::Developer),
+        "general" => Ok(ContextCategory::General),
+        other => Err(format!("unknown context category: {other}")),
+    }
+}
+
+/// Parse a persisted "auto context override" value into a pinned category. `"auto"`,
+/// empty, or any unrecognized value means "no override" → fall through to detection.
+fn parse_override(value: &str) -> Option<ContextCategory> {
+    parse_category(value).ok()
+}
+
+/// Maps a detected foreground app to a context category. Pure and fully unit-testable: the
+/// focused child-window class and the manual override arrive as parameters (the Win32 lookup
+/// lives in `focused_child_class`). Precedence: (1) manual override → (2) focused native
+/// terminal → Developer → (3) custom rules → (4) default process map → (5) browser-title
+/// heuristics → (6) General.
+pub fn resolve_category(
+    app: &ForegroundApp,
+    custom_rules: &[AppRule],
+    focused_class: &str,
+    override_: &str,
+) -> ContextCategory {
+    // (1) Manual override wins over all detection.
+    if let Some(category) = parse_override(override_) {
+        return category;
+    }
+
+    // (2) A focused native terminal/console control is Developer anywhere it appears,
+    // including inside a non-developer host app.
+    if is_native_terminal_class(focused_class) {
+        return ContextCategory::Developer;
+    }
+
     let proc_lower = app.process_name.to_lowercase();
     let title_lower = app.window_title.to_lowercase();
 
-    // Check custom rules first
+    // (3) User-defined custom rules.
     for rule in custom_rules {
         if proc_lower == rule.process_name.to_lowercase() {
             if let Some(ref title_match) = rule.title_contains {
@@ -129,7 +167,7 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
         return ContextCategory::Messaging;
     }
 
-    // Default process-name mappings
+    // (4) Default process-name mappings.
     match proc_lower.as_str() {
         // Messaging
         "whatsapp.exe" | "telegram.exe" | "discord.exe" | "slack.exe"
@@ -157,7 +195,7 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
         _ => {}
     }
 
-    // Browser title heuristics
+    // (5) Browser title heuristics.
     if is_browser(&proc_lower) {
         if title_lower.contains("gmail") || title_lower.contains("outlook") || title_lower.contains("mail") || title_lower.contains("protonmail") {
             return ContextCategory::Email;
@@ -173,6 +211,7 @@ pub fn resolve_category(app: &ForegroundApp, custom_rules: &[AppRule]) -> Contex
         }
     }
 
+    // (6) General fallback.
     ContextCategory::General
 }
 
@@ -214,26 +253,26 @@ mod tests {
     #[test]
     fn test_messaging_apps() {
         let app = ForegroundApp { process_name: "WhatsApp.exe".into(), window_title: String::new() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Messaging);
     }
 
     #[test]
     fn test_whatsapp_native_wrapper_process() {
         // The native WhatsApp desktop app reports "WhatsApp.Root.exe" as its process name.
         let app = ForegroundApp { process_name: "WhatsApp.Root.exe".into(), window_title: "WhatsApp".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Messaging);
     }
 
     #[test]
     fn test_email_apps() {
         let app = ForegroundApp { process_name: "OUTLOOK.exe".into(), window_title: String::new() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Email);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Email);
     }
 
     #[test]
     fn test_developer_apps() {
         let app = ForegroundApp { process_name: "Code.exe".into(), window_title: String::new() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Developer);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Developer);
     }
 
     #[test]
@@ -246,7 +285,7 @@ mod tests {
         ] {
             let app = ForegroundApp { process_name: proc.into(), window_title: String::new() };
             assert_eq!(
-                resolve_category(&app, &[]),
+                resolve_category(&app, &[], "", ""),
                 ContextCategory::Developer,
                 "expected {proc} to map to Developer",
             );
@@ -256,31 +295,31 @@ mod tests {
     #[test]
     fn test_browser_gmail() {
         let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Gmail - Inbox - Google Chrome".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Email);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Email);
     }
 
     #[test]
     fn test_browser_slack() {
         let app = ForegroundApp { process_name: "msedge.exe".into(), window_title: "Slack | general | Company".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Messaging);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Messaging);
     }
 
     #[test]
     fn test_browser_github() {
         let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "GitHub - Pull Requests".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Developer);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Developer);
     }
 
     #[test]
     fn test_general_fallback() {
         let app = ForegroundApp { process_name: "randomapp.exe".into(), window_title: "Untitled".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::General);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::General);
     }
 
     #[test]
     fn test_notepad_professional() {
         let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "Untitled".into() };
-        assert_eq!(resolve_category(&app, &[]), ContextCategory::Professional);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Professional);
     }
 
     #[test]
@@ -291,7 +330,7 @@ mod tests {
             category: ContextCategory::Developer,
         }];
         let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "test.rs".into() };
-        assert_eq!(resolve_category(&app, &rules), ContextCategory::Developer);
+        assert_eq!(resolve_category(&app, &rules, "", ""), ContextCategory::Developer);
     }
 
     #[test]
@@ -321,6 +360,46 @@ mod tests {
             category: ContextCategory::Professional,
         }];
         let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Jira - Sprint Board".into() };
-        assert_eq!(resolve_category(&app, &rules), ContextCategory::Professional);
+        assert_eq!(resolve_category(&app, &rules, "", ""), ContextCategory::Professional);
+    }
+
+    #[test]
+    fn test_manual_override_wins() {
+        // A Developer app, but the user pinned Email → Email regardless of everything else.
+        let app = ForegroundApp { process_name: "code.exe".into(), window_title: String::new() };
+        assert_eq!(resolve_category(&app, &[], "ConsoleWindowClass", "email"), ContextCategory::Email);
+        // "auto" / "" / unknown means no override → normal detection.
+        assert_eq!(resolve_category(&app, &[], "", "auto"), ContextCategory::Developer);
+        assert_eq!(resolve_category(&app, &[], "", ""), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_native_terminal_focus_is_developer() {
+        // A non-developer host (generic app) but a focused native console → Developer.
+        let app = ForegroundApp { process_name: "randomapp.exe".into(), window_title: "x".into() };
+        assert_eq!(resolve_category(&app, &[], "ConsoleWindowClass", ""), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_precedence_override_beats_terminal_beats_rule_beats_default() {
+        let rules = vec![AppRule {
+            process_name: "randomapp.exe".into(),
+            title_contains: None,
+            category: ContextCategory::Professional,
+        }];
+        let app = ForegroundApp { process_name: "randomapp.exe".into(), window_title: "x".into() };
+        // Override beats native terminal.
+        assert_eq!(resolve_category(&app, &rules, "ConsoleWindowClass", "messaging"), ContextCategory::Messaging);
+        // Native terminal beats the custom rule.
+        assert_eq!(resolve_category(&app, &rules, "ConsoleWindowClass", ""), ContextCategory::Developer);
+        // Custom rule beats the (General) default when no terminal/override.
+        assert_eq!(resolve_category(&app, &rules, "Edit", ""), ContextCategory::Professional);
+    }
+
+    #[test]
+    fn test_parse_category_roundtrip() {
+        assert_eq!(parse_category("Developer").unwrap(), ContextCategory::Developer);
+        assert_eq!(parse_category("email").unwrap(), ContextCategory::Email);
+        assert!(parse_category("nonsense").is_err());
     }
 }
