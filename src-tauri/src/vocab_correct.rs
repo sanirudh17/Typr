@@ -90,10 +90,22 @@ fn hint_matches(token_lower: &str, hint: &str) -> bool {
     if is_common_word(token_lower) {
         return false; // never overwrite an ordinary word
     }
-    if soundex(token_lower) != soundex(&hint_lower) {
-        return false; // phonetic gate
+    // Phonetic gate, first-letter-insensitive: mis-hearings often drop or swap the
+    // first sound ("Ori"/"Hori" for "Tauri"), so a full-key match OR a match on the
+    // consonant-digit skeleton (key minus its leading letter) passes.
+    let token_key = soundex(token_lower);
+    let hint_key = soundex(&hint_lower);
+    if token_key.is_empty() || hint_key.is_empty() {
+        return false;
     }
-    strsim::levenshtein(token_lower, &hint_lower) <= distance_threshold(hint_lower.len())
+    if token_key != hint_key && token_key[1..] != hint_key[1..] {
+        return false;
+    }
+    // A dropped/swapped first sound costs one edit, so a skeleton-only phonetic
+    // match (full keys differ) earns one extra edit of budget. Full-key matches
+    // keep the original tight threshold.
+    let budget = distance_threshold(hint_lower.len()) + usize::from(token_key != hint_key);
+    strsim::levenshtein(token_lower, &hint_lower) <= budget
 }
 
 /// Split a token into (leading non-alphanumerics, core, trailing non-alphanumerics),
@@ -193,6 +205,13 @@ mod tests {
         assert!(!hint_matches("clod", "Claude"));
         // Same word (case-insensitively) is already correct → no match, no self-loop.
         assert!(!hint_matches("tauri", "Tauri"));
+        // First sound dropped/swapped by the engine — skeleton match rescues these.
+        assert!(hint_matches("ori", "Tauri"));
+        assert!(hint_matches("hori", "Tauri"));
+        // Still safely blocked:
+        assert!(!hint_matches("rory", "Tauri"));   // edit distance 4 — too far
+        assert!(!hint_matches("ruse", "Rust"));    // skeletons differ (R200 vs R230)
+        assert!(!hint_matches("wording", "whoring")); // common English word, never overwritten
     }
 
     #[test]
