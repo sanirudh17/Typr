@@ -191,10 +191,12 @@ impl Recorder {
             }
         };
 
-        // Apply dictionary replacements (exact snippet/email expansions — kept before the LLM)
+        // Dictionary vocabulary correction (snap close mis-hearings to exact hint
+        // spellings), then snippet/email replacements — both before the LLM.
         let replaced = {
             let dict = dictionary.lock().unwrap();
-            dict.apply_replacements(&raw_text)
+            let corrected = crate::vocab_correct::correct_vocabulary(&raw_text, &dict.vocabulary_hints);
+            dict.apply_replacements(&corrected)
         };
 
         // Deterministic cleanup is the always-available fallback.
