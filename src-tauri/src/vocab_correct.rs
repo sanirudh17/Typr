@@ -96,6 +96,64 @@ fn hint_matches(token_lower: &str, hint: &str) -> bool {
     strsim::levenshtein(token_lower, &hint_lower) <= distance_threshold(hint_lower.len())
 }
 
+/// Split a token into (leading non-alphanumerics, core, trailing non-alphanumerics),
+/// so we match on the core word but re-attach surrounding punctuation.
+fn split_affixes(token: &str) -> (&str, &str, &str) {
+    let start = token.find(|c: char| c.is_alphanumeric()).unwrap_or(token.len());
+    let end = token
+        .rfind(|c: char| c.is_alphanumeric())
+        .map(|i| i + token[i..].chars().next().unwrap().len_utf8())
+        .unwrap_or(start);
+    (&token[..start], &token[start..end], &token[end..])
+}
+
+/// Re-apply the casing of `original` to `replacement`: if the original core started with
+/// an uppercase letter, capitalize the replacement's first letter; otherwise use the hint
+/// spelling as-is (hints carry their own intended casing, e.g. "Kubernetes").
+fn apply_casing(original_core: &str, replacement: &str) -> String {
+    let original_capitalized = original_core
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false);
+    if original_capitalized {
+        let mut chars = replacement.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    } else {
+        replacement.to_string()
+    }
+}
+
+/// Correct transcript words to their exact dictionary spellings. Whitespace-preserving:
+/// each whitespace-separated token is examined; its core is matched against the hints and,
+/// on a confident match, replaced while keeping surrounding punctuation and leading case.
+/// A no-op when `hints` is empty.
+pub fn correct_vocabulary(text: &str, hints: &[String]) -> String {
+    if hints.is_empty() {
+        return text.to_string();
+    }
+
+    text.split(' ')
+        .map(|token| {
+            let (lead, core, trail) = split_affixes(token);
+            if core.is_empty() {
+                return token.to_string();
+            }
+            let core_lower = core.to_lowercase();
+            for hint in hints {
+                if hint_matches(&core_lower, hint) {
+                    return format!("{}{}{}", lead, apply_casing(core, hint), trail);
+                }
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +193,33 @@ mod tests {
         assert!(!hint_matches("clod", "Claude"));
         // Same word (case-insensitively) is already correct → no match, no self-loop.
         assert!(!hint_matches("tauri", "Tauri"));
+    }
+
+    #[test]
+    fn test_correct_vocabulary() {
+        let hints = vec!["Kubernetes".to_string(), "Tauri".to_string()];
+
+        // Corrects a mis-hearing, preserving trailing punctuation.
+        assert_eq!(
+            correct_vocabulary("we deployed kubernetis.", &hints),
+            "we deployed Kubernetes."
+        );
+        // Preserves a leading capital at sentence start.
+        assert_eq!(
+            correct_vocabulary("Tori is a framework.", &hints),
+            "Tauri is a framework."
+        );
+        // Leaves ordinary words alone (guard).
+        assert_eq!(
+            correct_vocabulary("what a boring story.", &hints),
+            "what a boring story."
+        );
+        // Empty hints = passthrough.
+        assert_eq!(correct_vocabulary("anything at all", &[]), "anything at all");
+        // Already-correct word untouched.
+        assert_eq!(
+            correct_vocabulary("Kubernetes rocks", &hints),
+            "Kubernetes rocks"
+        );
     }
 }
