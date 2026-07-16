@@ -180,6 +180,26 @@ fn is_browser(proc: &str) -> bool {
     matches!(proc, "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe" | "arc.exe")
 }
 
+/// True when a focused child-control window class belongs to a native terminal/console
+/// host (a real command-line surface), so dictation into it should use Developer styling.
+/// Matches exact console classes and known terminal-emulator class families, and rejects
+/// ordinary editor/text/browser control classes (`Chrome_WidgetWin_1`, `Edit`, …). Pure.
+pub fn is_native_terminal_class(class: &str) -> bool {
+    // Exact, well-known native console / terminal host window classes.
+    const EXACT: &[&str] = &[
+        "ConsoleWindowClass",            // classic conhost (cmd.exe / powershell.exe)
+        "CASCADIA_HOSTING_WINDOW_CLASS", // Windows Terminal (Cascadia)
+        "PuTTY",                         // PuTTY
+        "mintty",                        // mintty (Git Bash / Cygwin / MSYS2)
+    ];
+    if EXACT.iter().any(|c| c.eq_ignore_ascii_case(class)) {
+        return true;
+    }
+    // Prefix families: ConEmu classes its consoles "VirtualConsoleClass" / "ConEmu*".
+    let lower = class.to_ascii_lowercase();
+    lower.starts_with("conemu") || lower.starts_with("virtualconsoleclass")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRule {
     pub process_name: String,
@@ -272,6 +292,25 @@ mod tests {
         }];
         let app = ForegroundApp { process_name: "notepad.exe".into(), window_title: "test.rs".into() };
         assert_eq!(resolve_category(&app, &rules), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_is_native_terminal_class() {
+        // Native console / terminal-host window classes → true.
+        assert!(is_native_terminal_class("ConsoleWindowClass"));       // conhost (cmd/powershell)
+        assert!(is_native_terminal_class("CASCADIA_HOSTING_WINDOW_CLASS")); // Windows Terminal
+        assert!(is_native_terminal_class("mintty"));                   // Git Bash / Cygwin
+        assert!(is_native_terminal_class("PuTTY"));                    // PuTTY
+        assert!(is_native_terminal_class("VirtualConsoleClass"));      // ConEmu child
+        assert!(is_native_terminal_class("ConEmuMultiConsole"));       // ConEmu family
+        // Case-insensitive on the exact set.
+        assert!(is_native_terminal_class("consolewindowclass"));
+        // Ordinary editor / text / browser control classes → false.
+        assert!(!is_native_terminal_class("Chrome_WidgetWin_1"));      // Electron/Chromium editor
+        assert!(!is_native_terminal_class("Edit"));
+        assert!(!is_native_terminal_class("RichEditD2DPT"));
+        assert!(!is_native_terminal_class("Notepad"));
+        assert!(!is_native_terminal_class(""));
     }
 
     #[test]
