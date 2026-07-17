@@ -40,6 +40,10 @@ fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) {
 pub struct Recorder {
     state: Arc<Mutex<RecordingState>>,
     audio_recorder: Arc<Mutex<AudioRecorder>>,
+    // Per-session AI profile override (Secondary hotkey). Set when a recording starts and
+    // taken when it stops, so it lives and dies with one session and can never leak forward
+    // to the next dictation the way a shared slot could.
+    session_override: Arc<Mutex<Option<String>>>,
 }
 
 impl Recorder {
@@ -47,6 +51,7 @@ impl Recorder {
         Self {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
+            session_override: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -81,7 +86,12 @@ impl Recorder {
         self.audio_recorder.lock().unwrap().get_frequency_bands()
     }
 
-    pub fn start_recording(&self, app: &AppHandle, mic_name: &str) -> Result<(), String> {
+    pub fn start_recording(
+        &self,
+        app: &AppHandle,
+        mic_name: &str,
+        session_override: Option<String>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if *state != RecordingState::Ready {
             return Err("Already recording or transcribing".to_string());
@@ -89,6 +99,9 @@ impl Recorder {
 
         // Eagerly update the UI to eliminate perceived delay
         *state = RecordingState::Recording;
+        // Bind the override to this session while we hold the state lock, so it is set
+        // exactly once per recording and paired with the matching stop.
+        *self.session_override.lock().unwrap() = session_override;
         let _ = app.emit("recording-state", RecordingState::Recording);
         update_overlay(app, &RecordingState::Recording, true);
 
@@ -104,8 +117,10 @@ impl Recorder {
                 }
             }
             Err(e) => {
-                // Revert state if starting failed
+                // Revert state if starting failed, and drop the override so a session that
+                // never actually recorded can't apply its profile to a later dictation.
                 *state = RecordingState::Ready;
+                *self.session_override.lock().unwrap() = None;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
@@ -125,8 +140,9 @@ impl Recorder {
     ) -> Result<String, String> {
         let transcription_started_at = Instant::now();
 
-        // Stop recording
-        {
+        // Stop recording, taking this session's profile override in the same locked step
+        // that transitions out of Recording — so exactly one stop consumes it.
+        let session_override = {
             let mut state = self.state.lock().unwrap();
             if *state != RecordingState::Recording {
                 return Err("Not currently recording".to_string());
@@ -134,7 +150,14 @@ impl Recorder {
             *state = RecordingState::Transcribing;
             let _ = app.emit("recording-state", RecordingState::Transcribing);
             update_overlay(app, &RecordingState::Transcribing, true);
-        }
+            self.session_override.lock().unwrap().take()
+        };
+
+        // Apply the override (if any) to a local copy of the live settings. The caller passes
+        // the base settings; the override forces AI on with the chosen profile for this
+        // dictation only.
+        let effective_settings = apply_session_override(settings, session_override);
+        let settings = &effective_settings;
 
         let temp_path = app_dir.join("temp_recording.wav");
 
@@ -348,6 +371,19 @@ fn choose_final(llm: Option<String>, fallback: String) -> String {
     }
 }
 
+/// Produce the effective settings for a dictation given the session's profile override.
+/// `Some(profile)` (a Secondary-hotkey session) forces AI on with that profile; `None`
+/// (Primary hotkey) leaves the live settings untouched. Pure so the override semantics are
+/// unit-testable without an audio device or Tauri handle.
+pub fn apply_session_override(base: &Settings, session_override: Option<String>) -> Settings {
+    let mut settings = base.clone();
+    if let Some(profile) = session_override {
+        settings.ai_enabled = true;
+        settings.ai_profile = profile;
+    }
+    settings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +392,41 @@ mod tests {
     fn test_initial_state_is_ready() {
         let recorder = Recorder::new();
         assert_eq!(recorder.get_state(), RecordingState::Ready);
+    }
+
+    #[test]
+    fn test_apply_session_override_none_is_passthrough() {
+        // Primary hotkey (no override): settings unchanged, including the user's AI toggle.
+        let mut base = Settings::default();
+        base.ai_enabled = false;
+        base.ai_profile = "cleanup".into();
+        let effective = apply_session_override(&base, None);
+        assert_eq!(effective.ai_enabled, false);
+        assert_eq!(effective.ai_profile, "cleanup");
+    }
+
+    #[test]
+    fn test_apply_session_override_forces_profile_and_enables_ai() {
+        // Secondary hotkey: forces AI on with the chosen profile even if AI was off.
+        let mut base = Settings::default();
+        base.ai_enabled = false;
+        base.ai_profile = "cleanup".into();
+        let effective = apply_session_override(&base, Some("prompt".into()));
+        assert_eq!(effective.ai_enabled, true);
+        assert_eq!(effective.ai_profile, "prompt");
+    }
+
+    #[test]
+    fn test_apply_session_override_does_not_mutate_base() {
+        // The override applies to a copy; a subsequent no-override call sees the original,
+        // so one session's override can never bleed into the next.
+        let mut base = Settings::default();
+        base.ai_enabled = false;
+        base.ai_profile = "cleanup".into();
+        let _forced = apply_session_override(&base, Some("prompt".into()));
+        let next = apply_session_override(&base, None);
+        assert_eq!(next.ai_enabled, false);
+        assert_eq!(next.ai_profile, "cleanup");
     }
 
     #[test]

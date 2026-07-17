@@ -84,7 +84,6 @@ struct AppState {
     dictionary: Mutex<Dictionary>,
     app_dir: PathBuf,
     hotkey_tx: Sender<HotkeyEvent>,
-    pending_profile_override: Mutex<Option<String>>,
 }
 
 #[cfg(windows)]
@@ -351,8 +350,6 @@ fn clear_secondary_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Resu
     settings.hotkey_secondary = String::new();
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings;
-    // Clear any override that may reference the now-removed secondary session.
-    *state.pending_profile_override.lock().unwrap() = None;
     println!("[Typr] Secondary hotkey cleared");
     Ok(())
 }
@@ -526,25 +523,15 @@ async fn download_model(
     Ok(())
 }
 
-/// Record which AI profile (if any) this recording session should use, based on
-/// which hotkey started it. Secondary → force the configured profile; Primary → none.
-fn set_session_override(state: &AppState, source: HotkeySource) {
-    let ov = match source {
+/// The AI profile override this recording should carry, based on which hotkey started it.
+/// Secondary → force the configured profile; Primary → none. The value travels into
+/// `start_recording` and is consumed by the matching `stop_and_transcribe`, so it is scoped
+/// to a single session and cannot leak to the next dictation.
+fn profile_override_for(state: &AppState, source: HotkeySource) -> Option<String> {
+    match source {
         HotkeySource::Secondary => Some(state.settings.lock().unwrap().secondary_profile.clone()),
         HotkeySource::Primary => None,
-    };
-    *state.pending_profile_override.lock().unwrap() = ov;
-}
-
-/// Live settings for the dictation about to be transcribed, with the per-session
-/// override applied (and cleared) if the session was started by the secondary hotkey.
-fn session_settings(state: &AppState) -> Settings {
-    let mut settings = state.settings.lock().unwrap().clone();
-    if let Some(profile) = state.pending_profile_override.lock().unwrap().take() {
-        settings.ai_enabled = true;
-        settings.ai_profile = profile;
     }
-    settings
 }
 
 #[tauri::command]
@@ -602,14 +589,14 @@ async fn do_toggle_recording(
     let current_state = state.recorder.get_state();
     match current_state {
         RecordingState::Ready => {
-            set_session_override(state, source);
+            let session_override = profile_override_for(state, source);
             prewarm_local(app);
             let mic = state.settings.lock().unwrap().microphone.clone();
-            state.recorder.start_recording(app, &mic)?;
+            state.recorder.start_recording(app, &mic, session_override)?;
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
-            let settings = session_settings(state);
+            let settings = state.settings.lock().unwrap().clone();
             let result = state
                 .recorder
                 .stop_and_transcribe(app, &settings, &state.history, &state.dictionary, &state.app_dir)
@@ -661,7 +648,6 @@ fn main() {
             dictionary: Mutex::new(dictionary),
             app_dir,
             hotkey_tx: hotkey_tx.clone(),
-            pending_profile_override: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -917,10 +903,10 @@ fn main() {
                                     let current = state.recorder.get_state();
                                     println!("[Typr] PTT mode, current state: {:?}", current);
                                     if current == RecordingState::Ready {
-                                        set_session_override(state.inner(), hotkey_event.source);
+                                        let session_override = profile_override_for(state.inner(), hotkey_event.source);
                                         prewarm_local(&rx_handle);
                                         let mic = state.settings.lock().unwrap().microphone.clone();
-                                        match state.recorder.start_recording(&rx_handle, &mic) {
+                                        match state.recorder.start_recording(&rx_handle, &mic, session_override) {
                                             Ok(_) => println!("[Typr] Recording started"),
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),
                                         }
@@ -933,7 +919,7 @@ fn main() {
                             if mode == "push-to-talk" {
                                 let current = state.recorder.get_state();
                                 if current == RecordingState::Recording {
-                                    let settings = session_settings(state.inner());
+                                    let settings = state.settings.lock().unwrap().clone();
                                     match state.recorder.stop_and_transcribe(
                                         &rx_handle,
                                         &settings,
