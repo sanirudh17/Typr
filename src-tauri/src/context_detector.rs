@@ -45,12 +45,40 @@ impl ForegroundApp {
     }
 }
 
+/// Resolve a PID to its executable basename (e.g. "Code.exe"). Returns "" on any failure
+/// (process gone, access denied, empty path). Windows-only.
 #[cfg(windows)]
-fn detect_foreground_windows() -> ForegroundApp {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
+fn process_name_from_pid(pid: u32) -> String {
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
     use windows_sys::Win32::Foundation::CloseHandle;
+
+    if pid == 0 {
+        return String::new();
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() || handle == -1isize as _ {
+            return String::new();
+        }
+        let mut name_buf = [0u16; 512];
+        let name_len = GetModuleFileNameExW(handle, std::ptr::null_mut(), name_buf.as_mut_ptr(), name_buf.len() as u32);
+        CloseHandle(handle);
+        if name_len > 0 {
+            let full_path = OsString::from_wide(&name_buf[..name_len as usize])
+                .to_string_lossy()
+                .to_string();
+            full_path.rsplit('\\').next().unwrap_or(&full_path).to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detect_foreground_windows() -> ForegroundApp {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
 
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -75,26 +103,7 @@ fn detect_foreground_windows() -> ForegroundApp {
         // Get process name
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        let process_name = if pid != 0 {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if !handle.is_null() && handle != -1isize as _ {
-                let mut name_buf = [0u16; 512];
-                let name_len = GetModuleFileNameExW(handle, std::ptr::null_mut(), name_buf.as_mut_ptr(), name_buf.len() as u32);
-                CloseHandle(handle);
-                if name_len > 0 {
-                    let full_path = OsString::from_wide(&name_buf[..name_len as usize])
-                        .to_string_lossy()
-                        .to_string();
-                    full_path.rsplit('\\').next().unwrap_or(&full_path).to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
+        let process_name = process_name_from_pid(pid);
 
         ForegroundApp {
             process_name,
@@ -296,6 +305,122 @@ pub struct AppRule {
     pub category: ContextCategory,
 }
 
+/// One currently-running app surfaced to the app-rule picker. Carries only the process
+/// name and a friendly display label — never a window title (titles are privacy-sensitive
+/// and must never leave the backend).
+#[derive(Debug, Clone, Serialize)]
+pub struct RunningApp {
+    pub process_name: String, // e.g. "Orca.exe" (as reported by the OS)
+    pub display_name: String, // e.g. "Orca"
+}
+
+/// "orca.exe" -> "Orca", "wezterm-gui.exe" -> "Wezterm-gui", "Code.exe" -> "Code".
+/// Pure: strip a trailing ".exe" (case-insensitive), uppercase the first ASCII letter.
+pub fn friendly_display_name(process_name: &str) -> String {
+    // Strip a trailing ".exe" case-insensitively. Comparing on a lowercased copy keeps the
+    // check byte-safe (avoids slicing `process_name` at a non-char boundary); when it ends
+    // with ".exe" those 4 bytes are ASCII, so `len - 4` is always a valid char boundary.
+    let base = if process_name.to_ascii_lowercase().ends_with(".exe") {
+        &process_name[..process_name.len() - 4]
+    } else {
+        process_name
+    };
+
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out = String::with_capacity(base.len());
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+            out
+        }
+        None => String::new(),
+    }
+}
+
+/// Dedup by lowercase process name (keep first occurrence), drop empty names and the
+/// given `own_process` (case-insensitive, e.g. "typr.exe"), sort by display_name
+/// (case-insensitive), and build the RunningApp list.
+pub fn build_running_apps(process_names: Vec<String>, own_process: &str) -> Vec<RunningApp> {
+    let own_lower = own_process.to_lowercase();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut apps: Vec<RunningApp> = Vec::new();
+
+    for name in process_names {
+        if name.is_empty() {
+            continue;
+        }
+        let lower = name.to_lowercase();
+        if lower == own_lower {
+            continue;
+        }
+        if !seen.insert(lower) {
+            continue; // duplicate (case-insensitive), keep first occurrence
+        }
+        let display_name = friendly_display_name(&name);
+        apps.push(RunningApp { process_name: name, display_name });
+    }
+
+    apps.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    apps
+}
+
+/// Callback for `EnumWindows`: keep visible, titled, non-tool-window top-level windows and
+/// collect their process names into the `Vec<String>` passed via `lparam`. Only the window
+/// title LENGTH is read (via `GetWindowTextLengthW`) to filter empty-titled windows; the
+/// title text is never read, stored, or logged.
+#[cfg(windows)]
+unsafe extern "system" fn enum_running_apps_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> i32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+        GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    };
+
+    let names = &mut *(lparam as *mut Vec<String>);
+
+    if IsWindowVisible(hwnd) == 0 {
+        return 1; // continue
+    }
+    if GetWindowTextLengthW(hwnd) == 0 {
+        return 1; // no title → skip (title text itself is never read)
+    }
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if ex_style & WS_EX_TOOLWINDOW != 0 {
+        return 1; // palette/overlay → skip
+    }
+
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    let name = process_name_from_pid(pid);
+    if !name.is_empty() {
+        names.push(name);
+    }
+    1 // continue enumeration
+}
+
+/// Enumerate apps that currently have a visible, titled, non-tool top-level window and
+/// return them as a deduped, sorted picker list. Excludes Typr itself. Windows-only; the
+/// non-Windows build returns an empty list.
+#[cfg(windows)]
+pub fn list_running_apps() -> Vec<RunningApp> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
+    use windows_sys::Win32::Foundation::LPARAM;
+
+    let mut names: Vec<String> = Vec::new();
+    unsafe {
+        EnumWindows(Some(enum_running_apps_proc), &mut names as *mut Vec<String> as LPARAM);
+    }
+    build_running_apps(names, "typr.exe")
+}
+
+#[cfg(not(windows))]
+pub fn list_running_apps() -> Vec<RunningApp> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +576,38 @@ mod tests {
         assert_eq!(parse_category("Developer").unwrap(), ContextCategory::Developer);
         assert_eq!(parse_category("email").unwrap(), ContextCategory::Email);
         assert!(parse_category("nonsense").is_err());
+    }
+
+    #[test]
+    fn test_friendly_display_name() {
+        assert_eq!(friendly_display_name("orca.exe"), "Orca");
+        assert_eq!(friendly_display_name("Code.exe"), "Code");
+        assert_eq!(friendly_display_name("wezterm-gui.EXE"), "Wezterm-gui");
+        assert_eq!(friendly_display_name("noext"), "Noext");
+        assert_eq!(friendly_display_name(""), "");
+    }
+
+    #[test]
+    fn test_build_running_apps_dedup_drop_sort() {
+        // Case-insensitive dedup keeping first occurrence, drop empties and own process,
+        // sort by display_name case-insensitively, preserve process_name as reported.
+        let names = vec![
+            "Zed.exe".to_string(),
+            "orca.exe".to_string(),
+            "Orca.exe".to_string(),   // dup of orca.exe (case-insensitive) → dropped
+            "".to_string(),           // empty → dropped
+            "Typr.exe".to_string(),   // own process → dropped
+            "code.exe".to_string(),
+        ];
+        let apps = build_running_apps(names, "typr.exe");
+
+        // Expect three: orca, code, zed → sorted by display_name: Code, Orca, Zed.
+        assert_eq!(apps.len(), 3);
+        assert_eq!(apps[0].process_name, "code.exe");
+        assert_eq!(apps[0].display_name, "Code");
+        assert_eq!(apps[1].process_name, "orca.exe"); // first occurrence preserved as reported
+        assert_eq!(apps[1].display_name, "Orca");
+        assert_eq!(apps[2].process_name, "Zed.exe"); // original casing preserved
+        assert_eq!(apps[2].display_name, "Zed");
     }
 }

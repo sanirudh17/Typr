@@ -17,7 +17,7 @@ use typr_lib::audio;
 use typr_lib::downloader;
 use typr_lib::recorder::{Recorder, RecordingState};
 use typr_lib::settings::Settings;
-use typr_lib::context_detector::{parse_category, AppRule};
+use typr_lib::context_detector::{parse_category, AppRule, RunningApp};
 use typr_lib::transcribe_local;
 use typr_lib::dictionary::Dictionary;
 
@@ -416,6 +416,11 @@ fn get_app_rules(state: State<AppState>) -> Vec<AppRule> {
 }
 
 #[tauri::command]
+fn list_running_apps() -> Vec<RunningApp> {
+    typr_lib::context_detector::list_running_apps()
+}
+
+#[tauri::command]
 fn add_app_rule(
     state: State<AppState>,
     process_name: String,
@@ -687,6 +692,7 @@ fn main() {
             add_replacement,
             remove_replacement,
             get_app_rules,
+            list_running_apps,
             add_app_rule,
             remove_app_rule,
         ])

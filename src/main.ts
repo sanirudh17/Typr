@@ -32,6 +32,11 @@ interface AppRule {
   category: string;
 }
 
+interface RunningApp {
+  process_name: string;
+  display_name: string;
+}
+
 interface TranscriptionItem {
   id: string;
   timestamp: number;
@@ -94,6 +99,7 @@ const aiStyleRaw = document.getElementById("ai-style-raw")!;
 const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
 const autoContextOverride = document.getElementById("auto-context-override") as HTMLSelectElement;
 const appRuleProcess = document.getElementById("app-rule-process") as HTMLInputElement;
+const appRuleProcessList = document.getElementById("app-rule-process-list") as HTMLDataListElement;
 const appRuleTitle = document.getElementById("app-rule-title") as HTMLInputElement;
 const appRuleCategory = document.getElementById("app-rule-category") as HTMLSelectElement;
 const appRuleAddBtn = document.getElementById("app-rule-add-btn")!;
@@ -1460,6 +1466,29 @@ appRuleAddBtn.addEventListener("click", async () => {
   appRuleProcess.value = "";
   appRuleTitle.value = "";
   loadAppRules();
+});
+
+// Populate the process-name datalist with apps that currently have a visible window.
+// Fails silently (empty list) so a backend hiccup never toasts or blocks free-text typing.
+async function refreshRunningApps() {
+  let apps: RunningApp[] = [];
+  try {
+    apps = await invoke<RunningApp[]>("list_running_apps");
+  } catch {
+    apps = [];
+  }
+  appRuleProcessList.innerHTML = "";
+  apps.forEach((app) => {
+    const option = document.createElement("option");
+    option.value = app.process_name;
+    option.label = app.display_name;
+    appRuleProcessList.appendChild(option);
+  });
+}
+
+// Refresh on focus so the picker reflects what's running right now each time it opens.
+appRuleProcess.addEventListener("focus", () => {
+  refreshRunningApps();
 });
 
 appRuleProcess.addEventListener("keydown", (e) => {

@@ -307,7 +307,8 @@
                 <span class="label-hint">Force a style for a specific app by process name (e.g. <code>obsidian.exe</code>). Optional title filter matches part of the window title.</span>
               </div>
               <div class="dict-add-row">
-                <input type="text" id="app-rule-process" class="dict-input" placeholder="process, e.g. obsidian.exe" />
+                <input type="text" id="app-rule-process" class="dict-input" list="app-rule-process-list" placeholder="pick a running app or type e.g. obsidian.exe" />
+                <datalist id="app-rule-process-list"></datalist>
                 <input type="text" id="app-rule-title" class="dict-input" placeholder="title contains (optional)" />
                 <select id="app-rule-category">
                   <option value="developer">Developer</option>
