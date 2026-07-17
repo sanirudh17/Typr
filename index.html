@@ -285,6 +285,43 @@
                 </div>
               </div>
             </div>
+            <div class="setting-row" id="auto-context-row">
+              <div class="setting-label">
+                <span class="label-text">Auto context</span>
+                <span class="label-hint">Auto-detect picks a style from the focused app; or pin one style for every dictation in Auto mode</span>
+              </div>
+              <div class="setting-control">
+                <select id="auto-context-override">
+                  <option value="auto">Auto-detect</option>
+                  <option value="developer">Developer</option>
+                  <option value="email">Email</option>
+                  <option value="messaging">Messaging</option>
+                  <option value="professional">Professional</option>
+                  <option value="general">General</option>
+                </select>
+              </div>
+            </div>
+            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+              <div class="setting-label" style="margin-bottom: 0;">
+                <span class="label-text" style="font-size: 13px; font-weight: 600;">App context rules</span>
+                <span class="label-hint">Force a style for a specific app by process name (e.g. <code>obsidian.exe</code>). Optional title filter matches part of the window title.</span>
+              </div>
+              <div class="dict-add-row">
+                <input type="text" id="app-rule-process" class="dict-input" placeholder="process, e.g. obsidian.exe" />
+                <input type="text" id="app-rule-title" class="dict-input" placeholder="title contains (optional)" />
+                <select id="app-rule-category">
+                  <option value="developer">Developer</option>
+                  <option value="email">Email</option>
+                  <option value="messaging">Messaging</option>
+                  <option value="professional">Professional</option>
+                  <option value="general">General</option>
+                </select>
+                <button id="app-rule-add-btn" class="btn-primary">Add Rule</button>
+              </div>
+              <div id="app-rules-list" class="dict-list-container">
+                <!-- Injected via JS -->
+              </div>
+            </div>
             <div class="setting-row hidden" id="ai-format-settings">
               <div class="setting-label">
                 <span class="label-text">Prompt Format</span>

@@ -1064,6 +1064,13 @@ kbd {
   color: var(--text-tertiary);
 }
 
+/* App-rule add row: let the category select size to its content so the
+   text inputs share the remaining width. */
+.dict-add-row select {
+  width: auto;
+  flex: 0 0 auto;
+}
+
 .dict-list-container {
   background: var(--surface);
   border: 1px solid var(--border);

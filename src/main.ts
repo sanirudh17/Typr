@@ -22,6 +22,14 @@ interface Settings {
   autostart: boolean;
   hotkeySecondary: string;
   secondaryProfile: string;
+  autoContextOverride: string;
+  appRules: AppRule[];
+}
+
+interface AppRule {
+  process_name: string;
+  title_contains: string | null;
+  category: string;
 }
 
 interface TranscriptionItem {
@@ -84,6 +92,12 @@ const aiStyleBullets = document.getElementById("ai-style-bullets")!;
 const aiStyleParagraphs = document.getElementById("ai-style-paragraphs")!;
 const aiStyleRaw = document.getElementById("ai-style-raw")!;
 const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
+const autoContextOverride = document.getElementById("auto-context-override") as HTMLSelectElement;
+const appRuleProcess = document.getElementById("app-rule-process") as HTMLInputElement;
+const appRuleTitle = document.getElementById("app-rule-title") as HTMLInputElement;
+const appRuleCategory = document.getElementById("app-rule-category") as HTMLSelectElement;
+const appRuleAddBtn = document.getElementById("app-rule-add-btn")!;
+const appRulesList = document.getElementById("app-rules-list")!;
 const presetEmail = document.getElementById("preset-email")!;
 const presetChat = document.getElementById("preset-chat")!;
 const presetNotes = document.getElementById("preset-notes")!;
@@ -308,6 +322,10 @@ async function loadSettings() {
   setAiTone(currentSettings.aiTone || "default");
   setAiFormat(currentSettings.aiFormat || "default");
   aiCustomInstructions.value = currentSettings.aiCustomInstructions || "";
+
+  // Auto context override + app rules
+  autoContextOverride.value = currentSettings.autoContextOverride || "auto";
+  await loadAppRules();
 }
 
 async function populateMics() {
@@ -520,6 +538,11 @@ aiStyleBullets.addEventListener("click", () => { setAiFormat("bullets"); saveSet
 aiStyleParagraphs.addEventListener("click", () => { setAiFormat("paragraphs"); saveSettings(); });
 aiStyleRaw.addEventListener("click", () => { setAiFormat("raw"); saveSettings(); });
 aiCustomInstructions.addEventListener("change", () => saveSettings());
+
+autoContextOverride.addEventListener("change", () => {
+  currentSettings.autoContextOverride = autoContextOverride.value;
+  saveSettings();
+});
 
 presetEmail.addEventListener("click", () => applyPreset("formal", "paragraphs"));
 presetChat.addEventListener("click", () => applyPreset("casual", "default"));
@@ -1364,6 +1387,83 @@ replaceFindInput.addEventListener("keydown", (e) => {
 
 replaceWithInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") replaceAddBtn.click();
+});
+
+// ── App context rules (Auto-context per-app overrides) ───────
+
+const CATEGORY_LABELS: Record<string, string> = {
+  developer: "Developer",
+  email: "Email",
+  messaging: "Messaging",
+  professional: "Professional",
+  general: "General",
+};
+
+async function loadAppRules() {
+  const rules = await invoke<AppRule[]>("get_app_rules");
+  // Keep the local copy in sync: saveSettings() sends the whole Settings
+  // object, so a stale appRules array would clobber backend-added rules.
+  currentSettings.appRules = rules;
+  appRulesList.innerHTML = "";
+
+  if (rules.length === 0) {
+    appRulesList.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No app rules yet.</div>';
+    return;
+  }
+
+  rules.forEach((rule, index) => {
+    const row = document.createElement("div");
+    row.className = "dict-entry";
+
+    const wordSpan = document.createElement("span");
+    wordSpan.className = "dict-entry-word";
+    const title = rule.title_contains ? ` · title contains "${rule.title_contains}"` : "";
+    const label = CATEGORY_LABELS[rule.category] || rule.category;
+    wordSpan.textContent = `${rule.process_name}${title} → ${label}`;
+
+    const actions = document.createElement("div");
+    actions.className = "dict-entry-actions";
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "dict-btn dict-btn-delete";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.onclick = async () => {
+      await invoke("remove_app_rule", { index });
+      loadAppRules();
+    };
+
+    actions.appendChild(deleteBtn);
+    row.appendChild(wordSpan);
+    row.appendChild(actions);
+    appRulesList.appendChild(row);
+  });
+}
+
+// Add App Rule Handler
+appRuleAddBtn.addEventListener("click", async () => {
+  const processName = appRuleProcess.value.trim();
+  if (!processName) {
+    showToast("Enter a process name first.");
+    return;
+  }
+  const titleRaw = appRuleTitle.value.trim();
+  try {
+    await invoke("add_app_rule", {
+      processName,
+      titleContains: titleRaw === "" ? null : titleRaw,
+      category: appRuleCategory.value,
+    });
+  } catch (e) {
+    showToast(String(e));
+    return;
+  }
+  appRuleProcess.value = "";
+  appRuleTitle.value = "";
+  loadAppRules();
+});
+
+appRuleProcess.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") appRuleAddBtn.click();
 });
 
 // Initialize
