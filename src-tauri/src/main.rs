@@ -429,12 +429,12 @@ fn add_app_rule(
 ) -> Result<(), String> {
     let category = parse_category(&category)?;
     let process_name = process_name.trim().to_string();
-    if process_name.is_empty() {
-        return Err("process name is required".to_string());
-    }
     let title_contains = title_contains
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    if process_name.is_empty() && title_contains.is_none() {
+        return Err("enter an app, a title filter, or both".to_string());
+    }
     let mut settings = state.settings.lock().unwrap();
     settings.app_rules.push(AppRule { process_name, title_contains, category });
     settings.save(&state.app_dir)

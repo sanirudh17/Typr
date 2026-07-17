@@ -1423,9 +1423,17 @@ async function loadAppRules() {
 
     const wordSpan = document.createElement("span");
     wordSpan.className = "dict-entry-word";
-    const title = rule.title_contains ? ` · title contains "${rule.title_contains}"` : "";
     const label = CATEGORY_LABELS[rule.category] || rule.category;
-    wordSpan.textContent = `${rule.process_name}${title} → ${label}`;
+    // A rule may be app-only, app+title, or title-only (blank process → any app).
+    let desc: string;
+    if (rule.process_name && rule.title_contains) {
+      desc = `${rule.process_name} · title contains "${rule.title_contains}"`;
+    } else if (rule.process_name) {
+      desc = rule.process_name;
+    } else {
+      desc = `Any app · title contains "${rule.title_contains}"`;
+    }
+    wordSpan.textContent = `${desc} → ${label}`;
 
     const actions = document.createElement("div");
     actions.className = "dict-entry-actions";
@@ -1448,11 +1456,11 @@ async function loadAppRules() {
 // Add App Rule Handler
 appRuleAddBtn.addEventListener("click", async () => {
   const processName = appRuleProcess.value.trim();
-  if (!processName) {
-    showToast("Enter a process name first.");
+  const titleRaw = appRuleTitle.value.trim();
+  if (!processName && !titleRaw) {
+    showToast("Pick an app or enter a title filter first.");
     return;
   }
-  const titleRaw = appRuleTitle.value.trim();
   try {
     await invoke("add_app_rule", {
       processName,

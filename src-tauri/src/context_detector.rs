@@ -206,15 +206,27 @@ pub fn resolve_category(
     let proc_lower = app.process_name.to_lowercase();
     let title_lower = app.window_title.to_lowercase();
 
-    // (3) User-defined custom rules.
+    // (3) User-defined custom rules. A rule's process filter must match the foreground
+    // process, OR be blank — a blank process is a title-only rule that applies to any app,
+    // so a browser site (e.g. "youtube") matches regardless of which browser shows it.
+    // When a title filter is present it must be a substring of the window title too.
     for rule in custom_rules {
-        if proc_lower == rule.process_name.to_lowercase() {
-            if let Some(ref title_match) = rule.title_contains {
+        let rule_proc = rule.process_name.trim().to_lowercase();
+        if !rule_proc.is_empty() && proc_lower != rule_proc {
+            continue;
+        }
+        match rule.title_contains.as_deref().map(str::trim) {
+            Some(title_match) if !title_match.is_empty() => {
                 if title_lower.contains(&title_match.to_lowercase()) {
                     return rule.category.clone();
                 }
-            } else {
-                return rule.category.clone();
+            }
+            // No title filter: a process-only rule. A rule with neither process nor
+            // title is rejected at creation, so rule_proc is non-empty here.
+            _ => {
+                if !rule_proc.is_empty() {
+                    return rule.category.clone();
+                }
             }
         }
     }
@@ -551,6 +563,48 @@ mod tests {
             category: ContextCategory::Professional,
         }];
         let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Jira - Sprint Board".into() };
+        assert_eq!(resolve_category(&app, &rules, "", ""), ContextCategory::Professional);
+    }
+
+    #[test]
+    fn test_title_only_rule_is_browser_agnostic() {
+        // Blank process + title filter: matches the site in ANY browser (or any app).
+        let rules = vec![AppRule {
+            process_name: String::new(),
+            title_contains: Some("youtube".into()),
+            category: ContextCategory::Messaging,
+        }];
+        let chrome = ForegroundApp { process_name: "chrome.exe".into(), window_title: "Home - YouTube".into() };
+        let edge = ForegroundApp { process_name: "msedge.exe".into(), window_title: "YouTube".into() };
+        let firefox = ForegroundApp { process_name: "firefox.exe".into(), window_title: "cats — YouTube".into() };
+        assert_eq!(resolve_category(&chrome, &rules, "", ""), ContextCategory::Messaging);
+        assert_eq!(resolve_category(&edge, &rules, "", ""), ContextCategory::Messaging);
+        assert_eq!(resolve_category(&firefox, &rules, "", ""), ContextCategory::Messaging);
+    }
+
+    #[test]
+    fn test_title_only_rule_does_not_match_other_titles() {
+        // A title-only rule must not fire when the phrase is absent → falls through to default.
+        let rules = vec![AppRule {
+            process_name: String::new(),
+            title_contains: Some("youtube".into()),
+            category: ContextCategory::Messaging,
+        }];
+        let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "GitHub - my repo".into() };
+        // chrome + "github" title → browser heuristic Developer, not the YouTube rule.
+        assert_eq!(resolve_category(&app, &rules, "", ""), ContextCategory::Developer);
+    }
+
+    #[test]
+    fn test_title_only_rule_beats_browser_heuristic() {
+        // A user's title rule lives in tier 3, above the built-in browser heuristics (tier 5),
+        // so it overrides the default github→Developer mapping.
+        let rules = vec![AppRule {
+            process_name: String::new(),
+            title_contains: Some("github".into()),
+            category: ContextCategory::Professional,
+        }];
+        let app = ForegroundApp { process_name: "chrome.exe".into(), window_title: "GitHub · dashboard".into() };
         assert_eq!(resolve_category(&app, &rules, "", ""), ContextCategory::Professional);
     }
 
