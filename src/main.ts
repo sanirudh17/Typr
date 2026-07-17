@@ -99,7 +99,7 @@ const aiStyleRaw = document.getElementById("ai-style-raw")!;
 const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
 const autoContextOverride = document.getElementById("auto-context-override") as HTMLSelectElement;
 const appRuleProcess = document.getElementById("app-rule-process") as HTMLInputElement;
-const appRuleProcessList = document.getElementById("app-rule-process-list") as HTMLDataListElement;
+const appPickerPanel = document.getElementById("app-picker-panel") as HTMLDivElement;
 const appRuleTitle = document.getElementById("app-rule-title") as HTMLInputElement;
 const appRuleCategory = document.getElementById("app-rule-category") as HTMLSelectElement;
 const appRuleAddBtn = document.getElementById("app-rule-add-btn")!;
@@ -1465,34 +1465,136 @@ appRuleAddBtn.addEventListener("click", async () => {
   }
   appRuleProcess.value = "";
   appRuleTitle.value = "";
+  closePicker();
   loadAppRules();
 });
 
-// Populate the process-name datalist with apps that currently have a visible window.
-// Fails silently (empty list) so a backend hiccup never toasts or blocks free-text typing.
-async function refreshRunningApps() {
-  let apps: RunningApp[] = [];
-  try {
-    apps = await invoke<RunningApp[]>("list_running_apps");
-  } catch {
-    apps = [];
-  }
-  appRuleProcessList.innerHTML = "";
-  apps.forEach((app) => {
-    const option = document.createElement("option");
-    option.value = app.process_name;
-    option.label = app.display_name;
-    appRuleProcessList.appendChild(option);
-  });
+// Custom in-app dropdown for the app-rule process picker. Matches the app's dark surfaces
+// instead of the OS-drawn datalist, and shows friendly names with the process name muted.
+let runningAppsCache: RunningApp[] = [];
+let pickerActiveIndex = -1; // index into the currently-rendered (filtered) items, -1 = none
+
+function isPickerOpen(): boolean {
+  return !appPickerPanel.classList.contains("hidden");
 }
 
-// Refresh on focus so the picker reflects what's running right now each time it opens.
-appRuleProcess.addEventListener("focus", () => {
-  refreshRunningApps();
+function closePicker() {
+  appPickerPanel.classList.add("hidden");
+  appPickerPanel.innerHTML = "";
+  pickerActiveIndex = -1;
+}
+
+// Render the panel filtered by the current input value (case-insensitive substring against
+// both display_name and process_name; empty input shows all). Empty result → hide entirely.
+function renderPicker() {
+  const query = appRuleProcess.value.trim().toLowerCase();
+  const filtered = query === ""
+    ? runningAppsCache
+    : runningAppsCache.filter(
+        (a) =>
+          a.display_name.toLowerCase().includes(query) ||
+          a.process_name.toLowerCase().includes(query),
+      );
+
+  appPickerPanel.innerHTML = "";
+  if (filtered.length === 0) {
+    closePicker();
+    return;
+  }
+
+  pickerActiveIndex = -1;
+  filtered.forEach((app) => {
+    const item = document.createElement("div");
+    item.className = "app-picker-item";
+
+    const name = document.createElement("div");
+    name.className = "app-picker-item-name";
+    name.textContent = app.display_name;
+
+    const proc = document.createElement("div");
+    proc.className = "app-picker-item-proc";
+    proc.textContent = app.process_name;
+
+    item.appendChild(name);
+    item.appendChild(proc);
+
+    // mousedown + preventDefault so clicking an item doesn't blur-close the input first.
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      appRuleProcess.value = app.process_name;
+      closePicker();
+    });
+
+    appPickerPanel.appendChild(item);
+  });
+
+  appPickerPanel.classList.remove("hidden");
+}
+
+// Highlight the item at pickerActiveIndex and scroll it into view.
+function setPickerActive(index: number) {
+  const items = Array.from(appPickerPanel.children) as HTMLElement[];
+  if (items.length === 0) return;
+  items.forEach((el) => el.classList.remove("active"));
+  pickerActiveIndex = ((index % items.length) + items.length) % items.length;
+  const el = items[pickerActiveIndex];
+  el.classList.add("active");
+  el.scrollIntoView({ block: "nearest" });
+}
+
+// Fetch on focus so the picker reflects what's running right now each time it opens.
+// Fails silently (empty list) so a backend hiccup never toasts or blocks free-text typing.
+appRuleProcess.addEventListener("focus", async () => {
+  try {
+    runningAppsCache = await invoke<RunningApp[]>("list_running_apps");
+  } catch {
+    runningAppsCache = [];
+  }
+  renderPicker();
+});
+
+appRuleProcess.addEventListener("input", () => {
+  renderPicker();
 });
 
 appRuleProcess.addEventListener("keydown", (e) => {
+  if (isPickerOpen()) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setPickerActive(pickerActiveIndex + 1);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setPickerActive(pickerActiveIndex - 1);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closePicker();
+      return;
+    }
+    if (e.key === "Enter" && pickerActiveIndex >= 0) {
+      // Panel open with a highlight → select it; do NOT also trigger Add.
+      e.preventDefault();
+      const items = Array.from(appPickerPanel.children) as HTMLElement[];
+      const proc = items[pickerActiveIndex].querySelector(".app-picker-item-proc");
+      if (proc && proc.textContent) appRuleProcess.value = proc.textContent;
+      closePicker();
+      return;
+    }
+  }
+  // Existing behavior: Enter (no highlighted item) triggers Add Rule.
   if (e.key === "Enter") appRuleAddBtn.click();
+});
+
+// Close on click-outside. A mousedown inside the panel is handled with preventDefault on
+// items, so the input keeps focus and the selection lands before this fires.
+document.addEventListener("mousedown", (e) => {
+  const target = e.target as Node;
+  if (!appPickerPanel.contains(target) && target !== appRuleProcess) {
+    closePicker();
+  }
 });
 
 // Initialize

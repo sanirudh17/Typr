@@ -1071,6 +1071,62 @@ kbd {
   flex: 0 0 auto;
 }
 
+/* App-rule running-app picker: the wrapper takes over the input's flex role so the
+   add-row layout is unchanged; the panel is an absolutely-positioned custom dropdown
+   built from the app's own surface tokens (no OS-drawn datalist). */
+.app-picker {
+  position: relative;
+  flex: 1;
+}
+
+.app-picker .dict-input {
+  width: 100%;
+}
+
+.app-picker-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-picker-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.app-picker-item:hover,
+.app-picker-item.active {
+  background: var(--surface-hover);
+}
+
+.app-picker-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.app-picker-item-proc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 .dict-list-container {
   background: var(--surface);
   border: 1px solid var(--border);

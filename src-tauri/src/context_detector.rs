@@ -338,9 +338,22 @@ pub fn friendly_display_name(process_name: &str) -> String {
     }
 }
 
-/// Dedup by lowercase process name (keep first occurrence), drop empty names and the
-/// given `own_process` (case-insensitive, e.g. "typr.exe"), sort by display_name
-/// (case-insensitive), and build the RunningApp list.
+/// Windows shell/host processes that surface visible windows but are never sensible
+/// app-rule targets (they're OS chrome, not user apps). Filtered case-insensitively so
+/// noise like `ApplicationFrameHost.exe` stays out of the picker.
+const SHELL_HOST_BLOCKLIST: &[&str] = &[
+    "applicationframehost.exe",
+    "textinputhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "searchhost.exe",
+    "systemsettings.exe",
+    "lockapp.exe",
+];
+
+/// Dedup by lowercase process name (keep first occurrence), drop empty names, the given
+/// `own_process` (case-insensitive, e.g. "typr.exe"), and Windows shell-host noise, sort
+/// by display_name (case-insensitive), and build the RunningApp list.
 pub fn build_running_apps(process_names: Vec<String>, own_process: &str) -> Vec<RunningApp> {
     let own_lower = own_process.to_lowercase();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -353,6 +366,9 @@ pub fn build_running_apps(process_names: Vec<String>, own_process: &str) -> Vec<
         let lower = name.to_lowercase();
         if lower == own_lower {
             continue;
+        }
+        if SHELL_HOST_BLOCKLIST.contains(&lower.as_str()) {
+            continue; // Windows shell host → never a rule target
         }
         if !seen.insert(lower) {
             continue; // duplicate (case-insensitive), keep first occurrence
@@ -585,6 +601,36 @@ mod tests {
         assert_eq!(friendly_display_name("wezterm-gui.EXE"), "Wezterm-gui");
         assert_eq!(friendly_display_name("noext"), "Noext");
         assert_eq!(friendly_display_name(""), "");
+    }
+
+    #[test]
+    fn test_build_running_apps_drops_shell_hosts() {
+        // Windows shell/host processes are never sensible rule targets and pollute the
+        // picker; they must be filtered case-insensitively while real apps survive.
+        let names = vec![
+            "ApplicationFrameHost.exe".to_string(), // mixed case → dropped
+            "TextInputHost.exe".to_string(),
+            "shellexperiencehost.exe".to_string(),
+            "StartMenuExperienceHost.exe".to_string(),
+            "SearchHost.exe".to_string(),
+            "SystemSettings.exe".to_string(),
+            "LockApp.exe".to_string(),
+            "Code.exe".to_string(),   // normal app → kept
+            "obsidian.exe".to_string(),
+        ];
+        let apps = build_running_apps(names, "typr.exe");
+        let procs: Vec<String> = apps.iter().map(|a| a.process_name.to_lowercase()).collect();
+        assert!(!procs.iter().any(|p| p == "applicationframehost.exe"));
+        assert!(!procs.iter().any(|p| p == "textinputhost.exe"));
+        assert!(!procs.iter().any(|p| p == "shellexperiencehost.exe"));
+        assert!(!procs.iter().any(|p| p == "startmenuexperiencehost.exe"));
+        assert!(!procs.iter().any(|p| p == "searchhost.exe"));
+        assert!(!procs.iter().any(|p| p == "systemsettings.exe"));
+        assert!(!procs.iter().any(|p| p == "lockapp.exe"));
+        // Real apps survive.
+        assert_eq!(apps.len(), 2);
+        assert!(procs.iter().any(|p| p == "code.exe"));
+        assert!(procs.iter().any(|p| p == "obsidian.exe"));
     }
 
     #[test]
