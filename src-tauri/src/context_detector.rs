@@ -253,7 +253,6 @@ pub fn resolve_category(
         "code.exe" | "cursor.exe" | "windowsterminal.exe" | "cmd.exe"
         | "powershell.exe" | "pwsh.exe" | "idea64.exe" | "devenv.exe" | "sublime_text.exe"
         | "alacritty.exe" | "wezterm-gui.exe" | "wt.exe"
-        | "orca.exe"
         | "pycharm64.exe" | "webstorm64.exe" | "rider64.exe" | "clion64.exe"
         | "goland64.exe" | "zed.exe" | "windsurf.exe"
         | "conemu64.exe" | "hyper.exe" | "tabby.exe" | "mintty.exe"
@@ -481,7 +480,7 @@ mod tests {
     #[test]
     fn test_broadened_dev_apps() {
         for proc in [
-            "orca.exe", "pycharm64.exe", "webstorm64.exe", "rider64.exe",
+            "pycharm64.exe", "webstorm64.exe", "rider64.exe",
             "clion64.exe", "goland64.exe", "zed.exe", "windsurf.exe",
             "conemu64.exe", "hyper.exe", "tabby.exe", "mintty.exe",
             "putty.exe", "kitty.exe", "ghostty.exe",
