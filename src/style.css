@@ -107,10 +107,43 @@ body {
   padding: 0 0 16px 0;
   user-select: none;
   -webkit-user-select: none;
+  overflow: hidden;
+  transition: width 220ms cubic-bezier(0.4, 0, 0.2, 1),
+              min-width 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#sidebar.collapsed {
+  width: 64px;
+  min-width: 64px;
+}
+
+/* Applied for one frame on startup so restoring a collapsed sidebar doesn't animate. */
+#sidebar.no-anim,
+#sidebar.no-anim * {
+  transition: none !important;
+}
+
+/* Labels fade out slightly ahead of the width so text never wraps mid-collapse. */
+/* Labels keep their box and are simply clipped by the sidebar's own overflow as
+   it narrows — collapsing their width instead would reflow the row and make the
+   icons hop mid-animation. */
+.nav-label,
+.app-name,
+#status-text {
+  white-space: nowrap;
+  transition: opacity 140ms ease;
+}
+
+#sidebar.collapsed .nav-label,
+#sidebar.collapsed .app-name,
+#sidebar.collapsed #status-text {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .sidebar-header {
-  padding: 36px 18px 16px 18px;
+  /* 17px so the 30px app icon's centre lands at x = 32px — see the rail note below. */
+  padding: 36px 17px 16px 17px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 12px;
   display: flex;
@@ -156,8 +189,13 @@ body {
   padding: 6px 12px;
   border-radius: 20px;
   border: 1px solid transparent;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 220ms cubic-bezier(0.4, 0, 0.2, 1);
   width: fit-content;
+  /* max-width (not width) is what animates on collapse: `fit-content` has no
+     numeric start value to interpolate from, so a width transition would snap. */
+  max-width: 220px;
+  height: 28px;
+  overflow: hidden;
 }
 
 #status-dot {
@@ -165,7 +203,8 @@ body {
   height: 6.5px;
   border-radius: 50%;
   flex-shrink: 0;
-  transition: all 0.3s ease;
+  /* Matches the sidebar's timing so the dot resizes in step with the collapse. */
+  transition: all 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 #status-text {
@@ -265,7 +304,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 16px;
   border-radius: var(--radius);
   color: var(--text-secondary);
   text-decoration: none;
@@ -281,22 +320,16 @@ body {
   background: var(--surface-hover);
 }
 
+/* Full-width accent wash on the active item (replaces the old left bar). */
 .nav-item.active {
   color: var(--text);
-  background: var(--surface-active);
   font-weight: 500;
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 1px rgba(94, 106, 210, 0.18);
 }
 
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 2px;
-  height: 16px;
-  background: var(--accent);
-  border-radius: 1px;
+.nav-item.active .nav-icon {
+  color: var(--accent);
 }
 
 .nav-icon {
@@ -313,15 +346,70 @@ body {
 /* ── Sidebar Footer ─────────────────────────────────── */
 
 .sidebar-footer {
-  padding: 12px 16px 0;
+  padding: 12px 8px 0;
   border-top: 1px solid var(--border);
   margin-top: auto;
 }
 
-.version-text {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  font-weight: 400;
+#collapse-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px 7px 16px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+#collapse-btn:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.collapse-icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Collapsed: the chevron flips to point outward, so the button still reads
+   as an affordance when its label is hidden. */
+#sidebar.collapsed .collapse-icon {
+  transform: rotate(180deg);
+}
+
+/* ── Collapsed layout ───────────────────────────────── */
+
+/* Every icon in the rail is aligned so its centre sits at x = 32px, the midpoint
+   of the 64px collapsed rail. Because that holds in the expanded state too,
+   nothing moves horizontally when collapsing — the sidebar edge slides in and
+   the labels fade, and that's the whole animation.
+   Nav:    8px (#sidebar-nav) + 16px (.nav-item) + 8px (half a 16px icon) = 32px
+   Header: 17px (.sidebar-header) + 15px (half a 30px icon)               = 32px */
+/* The faded status text still occupies width, so `justify-content: center` would
+   centre the whole (overflowing) row and push the dot off. The badge is centred
+   by auto margins, and the dot is placed by padding rather than absolute
+   positioning — padding-left interpolates, so the dot glides into place with the
+   collapse instead of teleporting when the positioning model changes.
+   Dot centre = 17 (header) + 1 (badge border) + 10 (padding) + 4 (half dot) = 32px. */
+#sidebar.collapsed #status-indicator {
+  max-width: 30px;
+  height: 30px;
+  padding: 0 0 0 10px;
+  border-radius: 50%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#sidebar.collapsed #status-dot {
+  width: 8px;
+  height: 8px;
 }
 
 /* ── Content Area ───────────────────────────────────── */

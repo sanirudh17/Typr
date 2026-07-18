@@ -238,6 +238,31 @@ sidebar.addEventListener("mousedown", (e) => {
   appWindow.startDragging();
 });
 
+// Sidebar collapse. Pure window chrome, so it lives in localStorage rather than
+// the backend Settings — nothing here needs to survive a reinstall.
+const collapseBtn = document.getElementById("collapse-btn")!;
+const COLLAPSE_KEY = "sidebarCollapsed";
+
+function applyCollapsed(collapsed: boolean) {
+  sidebar.classList.toggle("collapsed", collapsed);
+  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  collapseBtn.setAttribute("title", label);
+  collapseBtn.setAttribute("aria-label", label);
+  collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+}
+
+collapseBtn.addEventListener("click", () => {
+  const collapsed = !sidebar.classList.contains("collapsed");
+  localStorage.setItem(COLLAPSE_KEY, String(collapsed));
+  applyCollapsed(collapsed);
+});
+
+// Restore without animating: otherwise a collapsed sidebar visibly slides shut
+// on every launch.
+sidebar.classList.add("no-anim");
+applyCollapsed(localStorage.getItem(COLLAPSE_KEY) === "true");
+requestAnimationFrame(() => sidebar.classList.remove("no-anim"));
+
 // Custom window controls handlers
 const minimizeBtn = document.getElementById("titlebar-minimize")!;
 const maximizeBtn = document.getElementById("titlebar-maximize")!;

@@ -45,40 +45,40 @@
               <path d="M2.5 7L8 2.5 13.5 7v6.5a1 1 0 01-1 1h-9a1 1 0 01-1-1V7z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
               <path d="M6 14V9.5h4V14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
             </svg>
-            Home
+            <span class="nav-label">Home</span>
           </a>
           <a class="nav-item" data-section="general">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/>
               <path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            General
+            <span class="nav-label">General</span>
           </a>
           <a class="nav-item" data-section="engine">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M2.5 8h3l1.5-3 2 6 1.5-3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            Engine
+            <span class="nav-label">Engine</span>
           </a>
           <a class="nav-item" data-section="ai">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M8 2l1.5 3.5L13 7l-3.5 1.5L8 12l-1.5-3.5L3 7l3.5-1.5L8 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
             </svg>
-            AI
+            <span class="nav-label">AI</span>
           </a>
           <a class="nav-item" data-section="commands">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
               <path d="M4.5 6.5L6.5 8l-2 1.5M8.5 9.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            Commands
+            <span class="nav-label">Commands</span>
           </a>
           <a class="nav-item" data-section="recording">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <rect x="6" y="2.5" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.2"/>
               <path d="M4 8.5a4 4 0 008 0M8 12.5v1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
             </svg>
-            Recording
+            <span class="nav-label">Recording</span>
           </a>
 
           <a class="nav-item" data-section="dictionary">
@@ -87,7 +87,7 @@
               <path d="M3 2.5v11M3 11h8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
               <path d="M6 6h4M6 8.5h2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
             </svg>
-            Dictionary
+            <span class="nav-label">Dictionary</span>
           </a>
           <a class="nav-item" data-section="snippets">
             <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -95,11 +95,16 @@
               <path d="M9.5 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
               <path d="M5.5 7.5h5M5.5 10h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
             </svg>
-            Snippets
+            <span class="nav-label">Snippets</span>
           </a>
         </nav>
         <div class="sidebar-footer">
-          <span class="version-text">v0.1.0</span>
+          <button id="collapse-btn" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M9.5 4L5.5 8l4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="nav-label">Collapse</span>
+          </button>
         </div>
       </aside>
 
