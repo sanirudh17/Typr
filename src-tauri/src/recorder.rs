@@ -268,17 +268,15 @@ impl Recorder {
                     &settings.ai_prompt_format,
                 )
             };
-            // Append the user's cross-profile style modifiers (Tone / Formatting / Custom
-            // Instructions). Empty when all default, so the base prompt is used verbatim; placed
-            // after the base so an explicit setting overrides the profile's built-in style.
-            let system_prompt = format!(
-                "{}{}",
+            // Base prompt + the never-refuse contract + the user's cross-profile style
+            // modifiers (Tone / Formatting / Custom Instructions). The modifiers land last so an
+            // explicit setting overrides the profile's built-in style, but they can never
+            // loosen the contract.
+            let system_prompt = ai_postprocess::build_system_prompt(
                 base_prompt,
-                ai_postprocess::build_style_suffix(
-                    &settings.ai_tone,
-                    &settings.ai_format,
-                    &settings.ai_custom_instructions,
-                )
+                &settings.ai_tone,
+                &settings.ai_format,
+                &settings.ai_custom_instructions,
             );
             let budget = ai_postprocess::budget_ms(&settings.ai_profile);
             let ai_started_at = Instant::now();

@@ -867,4 +867,40 @@ mod tests {
             vec!["fish and chips"]
         );
     }
+
+    #[test]
+    fn test_contains_command_ignores_common_prose() {
+        // Words that merely resemble triggers must NOT bypass the AI pass. Each of these
+        // was verified against the real trigger table, not assumed.
+        for t in [
+            "in that case we proceed",
+            "during that period we grew fast",
+            "he opened the bracket racket",
+            "the parents are coming over",
+            "well known author",
+            "a semi truck and a colon",
+        ] {
+            assert!(!contains_command(t), "false positive on: {t}");
+        }
+    }
+
+    #[test]
+    fn test_contains_command_known_false_positives() {
+        // ACCEPTED limitations, locked in so a future change to the trigger table surfaces
+        // here rather than silently shifting behaviour.
+        //
+        // "new line" and "open parent" are ordinary English as well as command phrases, and
+        // no cheap lookahead separates the two ("a new line of products" vs "new line" meaning
+        // a line break). The cost is bounded and non-destructive: the dictation takes the
+        // deterministic path, so the user still gets their own words correctly cleaned — only
+        // the AI restyling is skipped. That is strictly better than the inverse error, where
+        // the LLM reworders a command phrase before the deterministic pass can apply it.
+        assert!(contains_command("we are launching a new line of products"));
+        assert!(contains_command("open parent teacher night"));
+
+        // Not really a false positive: dictating "scratch that" mid-sentence is the documented
+        // way to invoke the edit command, so firing here is correct.
+        assert!(contains_command("scratch that, let us meet tuesday"));
+    }
+
 }
