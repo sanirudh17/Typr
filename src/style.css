@@ -486,14 +486,19 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* A group label has to outrank the setting labels beneath it. It cannot do that on
+   colour (both need to stay legible) or on size alone (at 12px it was *smaller*
+   than the 13px labels it contained, which inverted the hierarchy and made the two
+   read as siblings). Case and tracking carry it instead: small caps with open
+   letter-spacing reads as a section marker at a glance and cannot be confused with
+   the sentence-case labels below, while staying at full contrast. */
 .group-title {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  /* Full-strength text, not secondary: at --text-secondary on --bg this sat around
-     3.5:1 and read as another dim hint rather than as a heading for what follows. */
   color: var(--text);
-  letter-spacing: 0.02em;
-  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 14px;
 }
 
 /* Shown in place of a settings block that is switched off, so the reason the
