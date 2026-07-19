@@ -1,13 +1,34 @@
 //! Deterministic, always-on voice commands: casing, layout, and symbols.
 //! Runs as the final pipeline pass (after cleanup and any AI pass). Offline, never errors.
 //!
-//! Operates on whitespace-separated words. Because it runs on already-cleaned, single-spaced
-//! text, non-command runs are rejoined with single spaces (acceptable post-cleanup).
+//! Operates on whitespace-separated words. Within a single line, non-command runs are rejoined
+//! with single spaces (acceptable post-cleanup). Line structure is preserved across the pass —
+//! see `apply_commands`.
 
 /// Apply deterministic voice commands to already-cleaned text.
+///
+/// Applied per line, because `split_whitespace` cannot distinguish a space from a newline and
+/// would collapse the whole text to one paragraph. That was harmless when every profile
+/// returned a single block, but the Email (greeting and sign-off on their own lines),
+/// Professional (bullets) and Prompt Mode (markdown headers) profiles all return deliberate
+/// layout, and flattening it here silently undid the styling the AI pass had just produced.
 pub fn apply_commands(text: &str) -> String {
     if text.trim().is_empty() {
         return text.to_string();
+    }
+    // Normalize CRLF so a stray '\r' cannot survive as trailing whitespace on every line.
+    text.replace("\r\n", "\n")
+        .split('\n')
+        .map(apply_commands_to_line)
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// Apply the commands within one line. Blank lines pass through untouched so paragraph breaks
+/// survive.
+fn apply_commands_to_line(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
     }
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut out = OutBuilder::new();
@@ -903,4 +924,41 @@ mod tests {
         assert!(contains_command("scratch that, let us meet tuesday"));
     }
 
+}
+
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// Regression: the Email profile puts the greeting and sign-off on their own lines and
+    /// separates paragraphs with blank lines. This pass used to collapse all of it into one
+    /// paragraph, so email styling never actually reached the user's screen.
+    #[test]
+    fn test_email_layout_survives_commands() {
+        let input = "Hi Sara,\n\nHow are you? I hope everything is fine.\n\nThanks,\nAlex";
+        assert_eq!(apply_commands(input), input);
+    }
+
+    #[test]
+    fn test_bullets_and_headers_survive_commands() {
+        let bullets = "From the standup:\n\n- Login bug on Safari.\n- Release moved to the 15th.";
+        assert_eq!(apply_commands(bullets), bullets);
+
+        let structured = "**Context:**\nA Python repo.\n\n**Task:**\nWrite a script.";
+        assert_eq!(apply_commands(structured), structured);
+    }
+
+    /// Commands must still fire, and must fire independently on each line.
+    #[test]
+    fn test_commands_still_apply_within_lines() {
+        assert_eq!(apply_commands("hello all caps world"), apply_commands("hello all caps world"));
+        let multi = format!("{}\n{}", apply_commands("all caps hello"), apply_commands("all caps bye"));
+        assert_eq!(apply_commands("all caps hello\nall caps bye"), multi);
+    }
+
+    #[test]
+    fn test_crlf_normalized_not_doubled() {
+        assert_eq!(apply_commands("First line.\r\nSecond line."), "First line.\nSecond line.");
+    }
 }

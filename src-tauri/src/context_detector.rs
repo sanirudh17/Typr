@@ -286,7 +286,15 @@ pub fn resolve_category(
 }
 
 fn is_browser(proc: &str) -> bool {
-    matches!(proc, "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe" | "arc.exe")
+    matches!(
+        proc,
+        "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe"
+            | "arc.exe"
+            // Newer entrants. An unrecognized browser is not a harmless miss: title heuristics
+            // are gated on this, so every site inside it (Gmail, Slack, GitHub) silently
+            // resolves to General.
+            | "comet.exe" | "zen.exe" | "floorp.exe" | "librewolf.exe"
+    )
 }
 
 /// True when a focused child-control window class belongs to a native terminal/console
@@ -490,6 +498,24 @@ mod tests {
                 resolve_category(&app, &[], "", ""),
                 ContextCategory::Developer,
                 "expected {proc} to map to Developer",
+            );
+        }
+    }
+
+    #[test]
+    fn test_newer_browsers_get_title_heuristics() {
+        // Regression: Comet resolved to General for every site, because title heuristics only
+        // run for processes recognized as browsers.
+        for proc in ["comet.exe", "zen.exe", "floorp.exe", "librewolf.exe"] {
+            let app = ForegroundApp {
+                process_name: proc.into(),
+                window_title: "Gmail - Inbox".into(),
+            };
+            assert_eq!(
+                resolve_category(&app, &[], "", ""),
+                ContextCategory::Email,
+                "{} should be treated as a browser",
+                proc
             );
         }
     }
