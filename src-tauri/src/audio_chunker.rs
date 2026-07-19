@@ -177,6 +177,45 @@ pub fn split_into_chunks(samples: &[f32], sample_rate: u32) -> Vec<Chunk<'_>> {
     out
 }
 
+/// How much of an overlapping chunk's start duplicates the previous chunk.
+///
+/// The engine needs this to know where to trim, so it is public rather than private to the
+/// splitter.
+pub const OVERLAP_SECS: f32 = FORCED_OVERLAP_SECS;
+
+/// sherpa tokenizers mark a word start with U+2581 (lower one-eighth block).
+const WORD_MARK: char = '\u{2581}';
+
+/// Rebuild text from tokens, dropping everything the previous chunk already transcribed.
+///
+/// This is the exact form of overlap removal and is preferred over the text-matching fallback
+/// below. The decoder reports when each token was spoken, so a token starting inside the
+/// replayed window is provably a repeat — no similarity heuristic, no threshold to tune, and
+/// no risk of deleting real content that merely resembles the previous chunk's tail.
+///
+/// Falls back to the whole text when the model gives no timestamps or returns a count that
+/// does not line up with the tokens, since a mismatched pair cannot be trusted to trim by.
+pub fn trim_overlap_tokens(
+    tokens: &[String],
+    timestamps: Option<&[f32]>,
+    fallback_text: &str,
+    overlap_secs: f32,
+) -> String {
+    let Some(ts) = timestamps else {
+        return fallback_text.trim().to_string();
+    };
+    if ts.len() != tokens.len() || overlap_secs <= 0.0 {
+        return fallback_text.trim().to_string();
+    }
+    let kept: String = tokens
+        .iter()
+        .zip(ts.iter())
+        .filter(|(_, t)| **t >= overlap_secs)
+        .map(|(tok, _)| tok.as_str())
+        .collect();
+    kept.replace(WORD_MARK, " ").trim().to_string()
+}
+
 /// Join per-chunk transcripts, removing text an overlapped chunk restates.
 ///
 /// The overlap is an audio window, not a word count, so the repeated text is found rather than
@@ -344,6 +383,41 @@ mod tests {
         assert!(chunks[1].overlaps_previous, "a forced cut must overlap the next chunk");
         let total: usize = chunks.iter().map(|c| c.samples.len()).sum();
         assert!(total > v.len(), "overlap means chunks cover more than the input");
+    }
+
+    #[test]
+    fn test_trim_drops_tokens_inside_the_overlap() {
+        let tokens: Vec<String> =
+            ["\u{2581}old", "\u{2581}words", "\u{2581}new", "\u{2581}words"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        // First two were spoken inside the 3s replayed window; last two after it.
+        let ts = [0.5f32, 1.8, 3.4, 4.0];
+        assert_eq!(trim_overlap_tokens(&tokens, Some(&ts), "ignored", 3.0), "new words");
+    }
+
+    #[test]
+    fn test_trim_falls_back_when_timestamps_are_absent() {
+        let tokens = vec!["\u{2581}anything".to_string()];
+        assert_eq!(trim_overlap_tokens(&tokens, None, "the full text", 3.0), "the full text");
+    }
+
+    /// A count mismatch means the pairing is unreliable, so trimming by it could delete real
+    /// speech. Returning everything risks a duplicate, which is visible and harmless by
+    /// comparison.
+    #[test]
+    fn test_trim_falls_back_when_counts_disagree() {
+        let tokens = vec!["\u{2581}a".to_string(), "\u{2581}b".to_string()];
+        let ts = [0.1f32];
+        assert_eq!(trim_overlap_tokens(&tokens, Some(&ts), "the full text", 3.0), "the full text");
+    }
+
+    #[test]
+    fn test_trim_is_a_no_op_without_overlap() {
+        let tokens = vec!["\u{2581}kept".to_string()];
+        let ts = [0.1f32];
+        assert_eq!(trim_overlap_tokens(&tokens, Some(&ts), "kept", 0.0), "kept");
     }
 
     #[test]
