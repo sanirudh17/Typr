@@ -7,7 +7,12 @@ fn groq_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(5)) // Prevents long hangs on network issues
+            // Guard the *connection*, not the whole exchange. `timeout` covers uploading the
+            // audio too, so a 5s total ceiling aborted healthy long dictations mid-upload and
+            // burned all three retries on them — a ~1 minute recording is ~2 MB of WAV. The
+            // total ceiling stays generous; the caller decides when to give up.
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_default()
     })

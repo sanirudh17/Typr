@@ -347,7 +347,7 @@ async function loadSettings() {
 
   // AI post-processing
   setAiEnabled(currentSettings.aiEnabled);
-  setAiModel(currentSettings.aiModel || "openai/gpt-oss-20b");
+  setAiModel(currentSettings.aiModel || AI_MODEL_DEFAULT);
   setAiProfile(currentSettings.aiProfile || "cleanup");
   setAiPromptFormat(currentSettings.aiPromptFormat || "natural");
   setAiTone(currentSettings.aiTone || "default");
@@ -408,8 +408,13 @@ function setAutostart(enabled: boolean) {
   if (enabled) setBackgroundMode(true);
 }
 
+// Mirrors resolve_model() in ai_postprocess.rs — keep the two allowlists in step, or the
+// dropdown silently coerces a valid choice back to the default.
+const AI_MODELS = ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+const AI_MODEL_DEFAULT = "qwen/qwen3.6-27b";
+
 function setAiModel(model: string) {
-  const m = model === "openai/gpt-oss-120b" ? "openai/gpt-oss-120b" : "openai/gpt-oss-20b";
+  const m = AI_MODELS.includes(model) ? model : AI_MODEL_DEFAULT;
   currentSettings.aiModel = m;
   aiModelSelect.value = m;
 }

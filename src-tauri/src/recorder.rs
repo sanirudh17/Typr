@@ -288,7 +288,7 @@ impl Recorder {
             let ai_started_at = Instant::now();
             let llm = match tokio::time::timeout(
                 Duration::from_millis(budget),
-                ai_postprocess::postprocess(
+                ai_postprocess::postprocess_with_fallback(
                     &settings.groq_api_key,
                     &replaced,
                     &settings.ai_model,
@@ -297,14 +297,16 @@ impl Recorder {
             )
             .await
             {
-                Ok(Ok(clean)) => {
+                Ok(Ok((clean, used_model))) => {
                     // Metadata only: timing/model/profile, never the dictated text itself.
+                    // `used_model` is the model that produced this text, which is not always the
+                    // one selected in settings — a fallback retry must be visible in the log.
                     crate::debug_log::log(
                         app_dir,
                         &format!(
                             "AI ok {}ms model={} profile={}",
                             ai_started_at.elapsed().as_millis(),
-                            ai_postprocess::resolve_model(&settings.ai_model),
+                            used_model,
                             settings.ai_profile,
                         ),
                     );

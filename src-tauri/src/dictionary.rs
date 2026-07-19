@@ -272,9 +272,14 @@ impl Dictionary {
     }
 }
 
-/// Character budget for the engine bias prompt (Whisper's prompt window is
-/// ~224 tokens; keep it conservative and truncate at an entry boundary).
-const MAX_BIAS_CHARS: usize = 800;
+/// Character budget for the engine bias prompt (Whisper's prompt window is ~224 tokens;
+/// keep it conservative and truncate at an entry boundary).
+///
+/// Sized at ~2.2 chars/token, not English prose's ~4. This budget is spent almost entirely on
+/// proper nouns and unusual names — exactly the tokens a BPE vocabulary splits hardest — so
+/// 800 chars of hints could exceed 224 tokens and be silently truncated by Whisper, dropping
+/// the tail of the user's dictionary without any error.
+const MAX_BIAS_CHARS: usize = 500;
 
 /// True when a replacement encodes its own intentional casing/structure and must
 /// NOT inherit the matched text's casing — emails, URLs, handles, code, acronyms,
