@@ -222,6 +222,12 @@ impl Recorder {
             dict.apply_replacements(&corrected)
         };
 
+        // Assemble spoken email addresses ("name at gmail dot com") into real ones. Must run
+        // before both the AI pass and the deterministic cleanup: the LLM only promises to
+        // preserve addresses it can recognize, and the entity guard can only protect one that
+        // already looks like an address.
+        let replaced = crate::email_assemble::assemble_emails(&replaced);
+
         // Deterministic cleanup is the always-available fallback.
         let deterministic = cleanup_text(&replaced);
 
