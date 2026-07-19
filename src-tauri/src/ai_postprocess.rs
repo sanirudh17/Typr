@@ -117,14 +117,20 @@ pub fn resolve_model(model: &str) -> &'static str {
     }
 }
 
-/// The model retried when the primary pass fails. Qwen falls back to gpt-oss; a gpt-oss
-/// failure is not retried on another gpt-oss, since both share the reasoning-starvation
-/// failure mode and a second attempt would likely fail the same way.
+/// The model retried when the primary pass fails. The chain is deliberately cross-family, so
+/// the retry never inherits the failure mode that caused the first attempt to fail.
+///
+/// gpt-oss falls back to Qwen specifically because gpt-oss's characteristic failure is
+/// reasoning starving the completion budget and returning empty content — and that failure is
+/// stochastic, not deterministic: the same input at the same ceiling returned empty on one run
+/// and correct output on the next. Qwen runs with reasoning off, so nothing competes with its
+/// output and it cannot fail that way at all. Retrying gpt-oss on gpt-oss would merely reroll
+/// the same dice.
 fn fallback_model(resolved: &str) -> Option<&'static str> {
     if resolved == MODEL_QWEN {
         Some(MODEL_FAST)
     } else {
-        None
+        Some(MODEL_QWEN)
     }
 }
 
@@ -417,9 +423,20 @@ pub async fn postprocess(api_key: &str, text: &str, model: &str, system_prompt: 
     let content = json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| "No content in Groq chat response".to_string())?;
+    let finish_reason = json["choices"][0]["finish_reason"].as_str().unwrap_or("");
 
     let cleaned = sanitize_output(content);
     if cleaned.is_empty() {
+        // finish_reason "length" means the completion ceiling was hit. On a reasoning model
+        // that almost always means reasoning consumed the budget before any answer was
+        // written, which is a different problem from a model that simply said nothing —
+        // name it, so the log distinguishes the two.
+        if finish_reason == "length" {
+            return Err(format!(
+                "AI post-process hit the token ceiling before emitting output (model={}, reasoning starved the answer)",
+                resolved
+            ));
+        }
         return Err("AI post-process returned empty output".to_string());
     }
     // Chain-of-thought in the content field. Never paste it: it is not what the user said.
@@ -509,12 +526,18 @@ mod tests {
         assert!(max_completion_tokens_for("openai/gpt-oss-120b") > qwen);
     }
 
+    /// The retry must always cross families, so it cannot inherit the failure that just
+    /// happened — gpt-oss's empty-output starvation is stochastic, and rerolling it on another
+    /// gpt-oss would be no fallback at all.
     #[test]
-    fn test_fallback_only_from_qwen() {
+    fn test_fallback_always_crosses_family() {
         assert_eq!(fallback_model("qwen/qwen3.6-27b"), Some("openai/gpt-oss-20b"));
-        // gpt-oss must not retry onto gpt-oss: same reasoning-starvation failure mode.
-        assert_eq!(fallback_model("openai/gpt-oss-20b"), None);
-        assert_eq!(fallback_model("openai/gpt-oss-120b"), None);
+        assert_eq!(fallback_model("openai/gpt-oss-20b"), Some("qwen/qwen3.6-27b"));
+        assert_eq!(fallback_model("openai/gpt-oss-120b"), Some("qwen/qwen3.6-27b"));
+        // And the retry target is never the model that just failed.
+        for m in ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"] {
+            assert_ne!(fallback_model(m), Some(m));
+        }
     }
 
     #[test]
