@@ -3,6 +3,7 @@ pub mod audio;
 pub mod audio_chunker;
 pub mod transcribe_local;
 pub mod transcribe_groq;
+pub mod transcribe_parakeet;
 pub mod cleanup;
 pub mod paste;
 pub mod recorder;

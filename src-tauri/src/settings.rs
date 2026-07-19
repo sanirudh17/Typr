@@ -15,6 +15,8 @@ pub struct Settings {
     #[serde(rename = "recordingMode")]
     pub recording_mode: String,
     pub hotkey: String,
+    #[serde(rename = "parakeetModel", default = "default_parakeet_model")]
+    pub parakeet_model: String,
     #[serde(rename = "cloudModel", default = "default_cloud_model")]
     pub cloud_model: String,
     #[serde(rename = "aiEnabled", default)]
@@ -43,6 +45,10 @@ pub struct Settings {
     pub app_rules: Vec<AppRule>,
     #[serde(rename = "autoContextOverride", default = "default_auto_context_override")]
     pub auto_context_override: String,
+}
+
+fn default_parakeet_model() -> String {
+    "v3".to_string()
 }
 
 fn default_cloud_model() -> String {
@@ -82,6 +88,7 @@ impl Default for Settings {
             groq_api_key: String::new(),
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
+            parakeet_model: "v3".to_string(),
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
             ai_model: "qwen/qwen3.6-27b".to_string(),
@@ -253,6 +260,25 @@ mod tests {
         let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.cloud_model, "accurate");
+    }
+
+    #[test]
+    fn test_parakeet_engine_roundtrips() {
+        let mut s = Settings::default();
+        s.engine = "parakeet".to_string();
+        s.parakeet_model = "v2".to_string();
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.engine, "parakeet");
+        assert_eq!(loaded.parakeet_model, "v2");
+    }
+
+    /// A config.json written before this phase must still load.
+    #[test]
+    fn test_config_without_parakeet_field_defaults_to_v3() {
+        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.parakeet_model, "v3");
     }
 
     #[test]

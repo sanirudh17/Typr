@@ -12,6 +12,7 @@ use crate::paste::paste_text;
 use crate::settings::Settings;
 use crate::transcribe_local;
 use crate::transcribe_groq;
+use crate::transcribe_parakeet;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum RecordingState {
@@ -196,6 +197,13 @@ impl Recorder {
             }
             "cloud" => {
                 transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt, &settings.cloud_model).await
+            }
+            "parakeet" => {
+                let model_dir = app_dir
+                    .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+                // No prompt: transducer models have no equivalent of Whisper's prompt window,
+                // so the dictionary bias the other two engines receive has nowhere to go here.
+                transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };
