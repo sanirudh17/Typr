@@ -157,18 +157,25 @@
         <section id="section-general" class="content-section">
           <div class="section-header">
             <h2 class="section-title">General</h2>
-            <p class="section-desc">Configure your audio input device</p>
+            <p class="section-desc">Input device, and how Typr runs on your system</p>
           </div>
-          <div class="settings-list">
-            <div class="setting-row">
-              <div class="setting-label">
-                <span class="label-text">Microphone</span>
-                <span class="label-hint">Select your preferred input device</span>
-              </div>
-              <div class="setting-control">
-                <select id="mic-select"></select>
+          <div class="settings-group">
+            <div class="group-title">Audio</div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Microphone</span>
+                  <span class="label-hint">Which input device Typr records from.</span>
+                </div>
+                <div class="setting-control">
+                  <select id="mic-select"></select>
+                </div>
               </div>
             </div>
+          </div>
+          <div class="settings-group">
+            <div class="group-title">Startup</div>
+            <div class="settings-list">
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">Keep running in background</span>
@@ -193,6 +200,7 @@
                 </div>
               </div>
             </div>
+            </div>
           </div>
         </section>
 
@@ -204,8 +212,8 @@
           <div class="settings-list">
             <div class="setting-row">
               <div class="setting-label">
-                <span class="label-text">Transcription Engine</span>
-                <span class="label-hint">Local runs on-device, Cloud requires an API key</span>
+                <span class="label-text">Transcription engine</span>
+                <span class="label-hint">Local runs on your machine. Cloud is faster and needs a Groq API key.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
@@ -214,10 +222,10 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row" id="local-settings">
+            <div class="setting-row setting-child" id="local-settings">
               <div class="setting-label">
-                <span class="label-text">Model Size</span>
-                <span class="label-hint">Larger models are more accurate but use more resources</span>
+                <span class="label-text">Model size</span>
+                <span class="label-hint">Larger models hear better but are slower and use more memory.</span>
               </div>
               <div class="setting-control">
                 <div class="model-row">
@@ -234,19 +242,19 @@
             <div id="download-progress" class="hidden">
               <div id="progress-bar"><div id="progress-fill"></div></div>
             </div>
-            <div class="setting-row hidden" id="cloud-settings">
+            <div class="setting-row setting-child hidden" id="cloud-settings">
               <div class="setting-label">
-                <span class="label-text">Groq API Key</span>
-                <span class="label-hint">Get your key from console.groq.com</span>
+                <span class="label-text">Groq API key</span>
+                <span class="label-hint">Get one free at console.groq.com.</span>
               </div>
               <div class="setting-control">
                 <input type="password" id="groq-key" placeholder="gsk_..." />
               </div>
             </div>
-            <div class="setting-row hidden" id="cloud-model-settings">
+            <div class="setting-row setting-child hidden" id="cloud-model-settings">
               <div class="setting-label">
-                <span class="label-text">Cloud Model</span>
-                <span class="label-hint">Accurate hears better; Fast is lower latency</span>
+                <span class="label-text">Cloud model</span>
+                <span class="label-hint">Accurate is the most accurate model Groq offers. Fast trades some accuracy for speed.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
@@ -460,11 +468,11 @@
         <section id="section-commands" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Commands</h2>
-            <p class="section-desc">Voice commands you can speak while dictating</p>
+            <p class="section-desc">Phrases you can speak mid-dictation to format text</p>
           </div>
           <div class="info-card">
             <div class="info-card-title">How voice commands work</div>
-            <div class="info-card-body">Speak a command <b>as part of the same dictation</b> &mdash; e.g. say &ldquo;camel case get user by id&rdquo; or &ldquo;we meet monday <b>scratch that</b> we meet tuesday&rdquo; in one breath. They're applied deterministically before the text is pasted, work offline, and run whether AI Cleanup is on or off. Editing commands only affect the <b>current</b> dictation &mdash; not text you've already pasted.</div>
+            <div class="info-card-body">Say the command in the same breath as your words &mdash; e.g. &ldquo;camel case get user by id&rdquo;, or &ldquo;we meet monday <b>scratch that</b> we meet tuesday&rdquo;. Commands work offline, run whether AI cleanup is on or off, and are applied before the text is pasted. Editing commands only affect the dictation in progress, never text you have already pasted.</div>
           </div>
 
           <div class="cmd-group">
@@ -508,13 +516,15 @@
         <section id="section-recording" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Recording</h2>
-            <p class="section-desc">Configure how you trigger transcription</p>
+            <p class="section-desc">How you start and stop dictation</p>
           </div>
-          <div class="settings-list">
+          <div class="settings-group">
+            <div class="group-title">Trigger</div>
+            <div class="settings-list">
             <div class="setting-row">
               <div class="setting-label">
-                <span class="label-text">Recording Mode</span>
-                <span class="label-hint">Toggle starts/stops, Push to Talk records while held</span>
+                <span class="label-text">Recording mode</span>
+                <span class="label-hint">Toggle starts and stops. Push to Talk records only while held.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
@@ -523,10 +533,15 @@
                 </div>
               </div>
             </div>
+            </div>
+          </div>
+          <div class="settings-group">
+            <div class="group-title">Hotkeys</div>
+            <div class="settings-list">
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">Hotkey</span>
-                <span class="label-hint">Global keyboard shortcut to trigger recording</span>
+                <span class="label-hint">Global shortcut that starts recording.</span>
               </div>
               <div class="setting-control hotkey-control">
                 <span id="hotkey-status" class="hotkey-status"></span>
@@ -535,19 +550,15 @@
                 <button id="hotkey-reset-btn" class="toggle-btn">Reset to default</button>
               </div>
             </div>
-            <div class="setting-row">
-              <span id="hotkey-hint" class="label-hint">
-                <strong>Setting a hotkey:</strong> Click <strong>Change</strong>, then press your
-                combo. It must include at least one modifier — <strong>Ctrl, Alt,</strong> or
-                <strong>Shift</strong> — plus another key (e.g. Ctrl + Shift + Space). Press
-                <strong>Esc</strong> to cancel. If the combo is already used by Windows or another
-                app, Typr keeps your current hotkey and tells you.
-              </span>
-            </div>
+            <p id="hotkey-hint" class="settings-note">
+              Click <strong>Change</strong>, then press your combo &mdash; at least one modifier
+              (<strong>Ctrl</strong>, <strong>Alt</strong>, or <strong>Shift</strong>) plus another key.
+              <strong>Esc</strong> cancels. If the combo is already taken, Typr keeps your current one.
+            </p>
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">AI hotkey (optional)</span>
-                <span class="label-hint">A second shortcut that runs your dictation through an AI profile (default Prompt Mode), even if AI is off.</span>
+                <span class="label-hint">A second shortcut that applies an AI profile, even when AI cleanup is off.</span>
               </div>
               <div class="setting-control hotkey-control">
                 <span id="hotkey2-status" class="hotkey-status"></span>
@@ -556,10 +567,10 @@
                 <button id="hotkey2-clear-btn" class="toggle-btn">Clear</button>
               </div>
             </div>
-            <div class="setting-row">
+            <div class="setting-row setting-child">
               <div class="setting-label">
-                <span class="label-text">AI hotkey profile</span>
-                <span class="label-hint">Which AI profile the second hotkey applies.</span>
+                <span class="label-text">Profile</span>
+                <span class="label-hint">Which profile that second hotkey uses.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
@@ -569,6 +580,7 @@
                 </div>
               </div>
             </div>
+            </div>
           </div>
         </section>
 
@@ -577,29 +589,29 @@
         <section id="section-dictionary" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Dictionary</h2>
-            <p class="section-desc">Manage custom spelling hints for the AI transcription engine.</p>
+            <p class="section-desc">Teach the transcription engine your names and terms</p>
           </div>
 
           <div class="info-card">
-            <div class="info-card-title">What are Spelling Hints?</div>
-            <div class="info-card-body">Hints are a <b>recognition aid</b>: your terms (e.g. <code>Tauri</code>, <code>IBM Plex</code>, <code>agentic</code>) are sent to the transcription engine so it's more likely to hear and spell them correctly. They only <i>nudge</i> the engine &mdash; they never rewrite your text, so everyday words are never mangled. <br><br>Need a term to <b>always</b> come out a specific way, or a shortcut expanded? Use the <b>Snippets</b> tab. Smarter, context-aware fixes (e.g. knowing <code>CAT</code> the exam from <code>cat</code> the animal) are coming with AI post-processing.</div>
+            <div class="info-card-title">How hints work</div>
+            <div class="info-card-body">Hints are a <b>recognition aid</b>. Your terms &mdash; <code>Tauri</code>, <code>IBM Plex</code>, <code>agentic</code> &mdash; are sent to the engine so it is more likely to hear and spell them correctly. They only nudge it; they never rewrite your text, so everyday words are never mangled.<br><br>Need a term to come out a specific way <b>every</b> time, or a shortcut expanded? Use <b>Snippets</b> instead.</div>
           </div>
 
           <div class="settings-list">
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 13px; font-weight: 600;">Add Spelling Hint</span>
-                <span class="label-hint">Enter a specific word, brand name, or rare term</span>
+            <div class="setting-row setting-block">
+              <div class="setting-label">
+                <span class="label-text">Add a hint</span>
+                <span class="label-hint">A name, brand, or rare term the engine keeps getting wrong.</span>
               </div>
               <div class="dict-add-row">
                 <input type="text" id="dict-hint-word" class="dict-input" placeholder="e.g. Tauri" />
                 <button id="dict-hint-add-btn" class="btn-primary">Add Hint</button>
               </div>
             </div>
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 13px; font-weight: 600;">Active Hints</span>
-                <span class="label-hint">These terms are sent directly to the AI model's context prompt.</span>
+            <div class="setting-row setting-block">
+              <div class="setting-label">
+                <span class="label-text">Active hints</span>
+                <span class="label-hint">Sent with every transcription. Keep the list short so each term carries weight.</span>
               </div>
               <div id="dict-hints-list" class="dict-list-container">
                 <!-- Injected via JS -->
@@ -611,19 +623,19 @@
         <section id="section-snippets" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Snippets</h2>
-            <p class="section-desc">Create post-processing text replacement snippets to correct transcription spelling errors or expand shorthand shortcuts.</p>
+            <p class="section-desc">Always-replace rules for fixes and shortcuts</p>
           </div>
 
           <div class="info-card">
-            <div class="info-card-title">What are Text Replacement Snippets?</div>
-            <div class="info-card-body">Strict post-processing replacement rules. Whenever the transcribed text contains the snippet <b>Find</b> shortcut (as a separate word), it is replaced by the <b>Replace With</b> snippet text. Excellent for fixing consistent AI spelling errors (e.g. <code>tory</code> &rarr; <code>Tauri</code>) or expanding short text shortcuts (e.g. <code>brb</code> &rarr; <code>be right back</code>, <code>my email</code> &rarr; <code>user@example.com</code>). Non-alphanumeric shortcuts (like <code>:)</code> &rarr; <code>😊</code>) work too!</div>
+            <div class="info-card-title">How snippets work</div>
+            <div class="info-card-body">Exact replacements, applied every time. When the transcript contains your <b>Find</b> text as a separate word, it becomes the <b>Replace with</b> text. Good for a misheard word that is always wrong the same way (<code>tory</code> &rarr; <code>Tauri</code>) or a shortcut worth expanding (<code>brb</code> &rarr; <code>be right back</code>, <code>my email</code> &rarr; <code>user@example.com</code>). Symbols work too: <code>:)</code> &rarr; <code>😊</code>.<br><br>Unlike a <b>Dictionary</b> hint, this always fires &mdash; so pick a Find term you would never say by accident.</div>
           </div>
 
           <div class="settings-list">
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 16px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 13px; font-weight: 600;">Add Text Replacement Snippet</span>
-                <span class="label-hint">Enter the word/shortcut to find and the snippet text to replace it with</span>
+            <div class="setting-row setting-block">
+              <div class="setting-label">
+                <span class="label-text">Add a snippet</span>
+                <span class="label-hint">What to look for, and what it becomes.</span>
               </div>
               <div class="replacement-add-grid">
                 <div class="input-group">
@@ -644,10 +656,10 @@
               </div>
             </div>
 
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 13px; font-weight: 600;">Active Replacement Snippets</span>
-                <span class="label-hint">Snippets are executed instantly after transcription in the order defined below.</span>
+            <div class="setting-row setting-block">
+              <div class="setting-label">
+                <span class="label-text">Active snippets</span>
+                <span class="label-hint">Applied straight after transcription, in the order shown.</span>
               </div>
               
               <div id="dict-replacements-table" class="replacements-table-container">

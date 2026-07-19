@@ -513,6 +513,26 @@ body {
   margin-bottom: 14px;
 }
 
+/* A setting whose control is a full-width composite (an add-row, a table, a list)
+   rather than a right-aligned widget. Replaces the inline flex-direction overrides
+   that were repeated on every such row in Dictionary, Snippets and App rules. */
+.setting-block {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+/* Instructional prose attached to the setting above it — help text that is too long
+   for a label hint but should not read as a setting in its own right. */
+.settings-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: -4px 0 4px;
+  padding-left: 16px;
+  border-left: 2px solid var(--border);
+}
+
 /* Shown in place of a settings block that is switched off, so the reason the
    controls are missing is stated rather than left to be inferred. */
 .settings-empty-note {
@@ -1900,13 +1920,14 @@ kbd {
   margin-bottom: 22px;
 }
 
+/* Matches .group-title so the Commands tab ranks its headings the same way every
+   other tab does. It previously stood alone as the one uppercase heading in the app. */
 .cmd-group-title {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0 0 8px;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  margin: 0 0 10px;
 }
 
 .cmd-list {
