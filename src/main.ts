@@ -88,6 +88,9 @@ const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
 const aiProfileAuto = document.getElementById("ai-profile-auto")!;
 const aiFormatSettings = document.getElementById("ai-format-settings")!;
+const autoContextRow = document.getElementById("auto-context-row")!;
+const aiOptions = document.getElementById("ai-options")!;
+const aiDisabledNote = document.getElementById("ai-disabled-note")!;
 const aiToneDefault = document.getElementById("ai-tone-default")!;
 const aiToneFormal = document.getElementById("ai-tone-formal")!;
 const aiToneCasual = document.getElementById("ai-tone-casual")!;
@@ -392,6 +395,11 @@ function setAiEnabled(enabled: boolean) {
   currentSettings.aiEnabled = enabled;
   aiOff.classList.toggle("active", !enabled);
   aiOn.classList.toggle("active", enabled);
+  // Every setting below the toggle only takes effect when AI is on. Leaving them
+  // visible while off invites the reader to change them and wonder why nothing
+  // happens, so hide the lot and say why in their place.
+  aiOptions.classList.toggle("hidden", !enabled);
+  aiDisabledNote.classList.toggle("hidden", enabled);
 }
 
 function setBackgroundMode(enabled: boolean) {
@@ -425,8 +433,11 @@ function setAiProfile(profile: string) {
   aiProfileCleanup.classList.toggle("active", p === "cleanup");
   aiProfilePrompt.classList.toggle("active", p === "prompt");
   aiProfileAuto.classList.toggle("active", p === "auto");
-  // Format sub-selector only applies to Prompt Mode.
+  // Both sub-selectors qualify the profile above them, so each is shown only for
+  // the profile it belongs to. The context picker was previously never toggled at
+  // all and sat visible under Cleanup and Prompt Mode, where it does nothing.
   aiFormatSettings.classList.toggle("hidden", p !== "prompt");
+  autoContextRow.classList.toggle("hidden", p !== "auto");
 }
 
 function setAiPromptFormat(format: string) {

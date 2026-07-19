@@ -140,9 +140,11 @@
                 <span class="label-hint">Recent transcriptions</span>
               </div>
               <div class="history-toolbar">
-                <span class="toolbar-label">Export</span>
-                <button id="export-json-btn" class="btn-secondary">JSON</button>
-                <button id="export-md-btn" class="btn-secondary">Markdown</button>
+                <span class="toolbar-label">Export as</span>
+                <div class="btn-cluster">
+                  <button id="export-json-btn" class="btn-secondary">JSON</button>
+                  <button id="export-md-btn" class="btn-secondary">Markdown</button>
+                </div>
               </div>
             </div>
             <input type="text" id="history-search" class="history-search-input" placeholder="Search transcriptions…" />
@@ -281,6 +283,8 @@
               </div>
             </div>
           </div>
+          <p id="ai-disabled-note" class="settings-empty-note hidden">AI cleanup is off. Turn it on to choose a profile, model, and output style.</p>
+          <div id="ai-options">
           <div class="settings-group">
             <div class="group-title">Behaviour</div>
             <div class="settings-list">
@@ -426,8 +430,9 @@
             </div>
           </div>
           <details class="settings-advanced">
-            <summary>App context rules</summary>
+            <summary>Advanced</summary>
             <div class="settings-advanced-body">
+              <div class="group-title">App context rules</div>
               <p class="label-hint" style="margin-bottom: 12px;">Force a style for one app, e.g. <code>obsidian.exe</code>. Leave the app blank and set only a title filter to match a site like <code>youtube</code> in any browser.</p>
               <div class="dict-add-row">
                 <div class="app-picker">
@@ -449,6 +454,7 @@
               </div>
             </div>
           </details>
+          </div>
         </section>
 
         <section id="section-commands" class="content-section">

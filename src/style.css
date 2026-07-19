@@ -478,16 +478,31 @@ body {
    label turns it into a few short lists instead. Spacing does the work here —
    no new colours or type styles, only the existing tokens. */
 
+/* A rule between groups does the separating; the label then only has to name the
+   group rather than carry the separation on its own. */
 .settings-group + .settings-group {
-  margin-top: 30px;
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
 }
 
 .group-title {
   font-size: 12px;
   font-weight: 600;
+  /* Full-strength text, not secondary: at --text-secondary on --bg this sat around
+     3.5:1 and read as another dim hint rather than as a heading for what follows. */
+  color: var(--text);
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+}
+
+/* Shown in place of a settings block that is switched off, so the reason the
+   controls are missing is stated rather than left to be inferred. */
+.settings-empty-note {
+  font-size: 13px;
   color: var(--text-secondary);
-  letter-spacing: 0.01em;
-  margin-bottom: 6px;
+  line-height: 1.5;
+  padding: 4px 0 2px;
 }
 
 /* A row that only makes sense as a refinement of the row above it (e.g. the
@@ -1081,7 +1096,35 @@ kbd {
 .toolbar-label {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-right: 2px;
+  margin-right: 8px;
+}
+
+/* Two buttons that are one choice — same action, different format — joined into a
+   single control so they read as one export affordance instead of two competing
+   buttons floating at the edge of the header. */
+.btn-cluster {
+  display: inline-flex;
+}
+
+.btn-cluster .btn-secondary {
+  border-radius: 0;
+  margin-left: -1px;
+}
+
+.btn-cluster .btn-secondary:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+  margin-left: 0;
+}
+
+.btn-cluster .btn-secondary:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+/* Keep the joined seam visible when one side is focused or hovered. */
+.btn-cluster .btn-secondary:hover,
+.btn-cluster .btn-secondary:focus-visible {
+  position: relative;
+  z-index: 1;
 }
 
 .history-search-input {
