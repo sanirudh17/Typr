@@ -113,6 +113,15 @@ pub async fn transcribe_parakeet(
         let recognizer = &guard.as_ref().expect("just built").1;
 
         let chunks = audio_chunker::split_into_chunks(&samples, sample_rate);
+        // Logged because the Whisper path announces itself loudly and this one did not, which
+        // made a run on the wrong engine impossible to spot in the console.
+        println!(
+            "[Typr] Parakeet transcribing {:.1}s in {} chunk(s), model {}",
+            samples.len() as f32 / sample_rate as f32,
+            chunks.len(),
+            model_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        );
+        let started = std::time::Instant::now();
         let mut pieces: Vec<String> = Vec::new();
         for chunk in &chunks {
             let stream = recognizer.create_stream();
@@ -131,6 +140,7 @@ pub async fn transcribe_parakeet(
                 pieces.push(text);
             }
         }
+        println!("[Typr] Parakeet completed in {:?}", started.elapsed());
         Ok(pieces.join(" "))
     })
     .await
