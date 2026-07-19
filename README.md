@@ -7,7 +7,7 @@
 
 A voice-to-text dictation app for Windows. Press a hotkey, speak, and your words are typed into whatever window you are already in — Gmail, VS Code, WhatsApp, a terminal.
 
-Transcription runs either **fully offline** on your own GPU, or through the **Groq Cloud API** when you want speed on a machine without one. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
+Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU with Parakeet — or through the **Groq Cloud API** when you want the lowest latency. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
 
 ---
 
@@ -76,7 +76,8 @@ Everything between releasing the hotkey and text appearing runs as one pipeline.
    (cpal, any rate)          (what every Whisper model expects)
         │
         ▼
-  transcription ───────────► Local Whisper (GPU)  or  Groq Cloud
+  transcription ───────────► Local Whisper (GPU) · Local Parakeet (CPU) · Groq Cloud
+                             long audio is split at speech boundaries first
         │
         ▼
   dictionary hints  ───────► terms you added bias what the engine hears
@@ -142,7 +143,7 @@ Qwen is the default because it was both quickest and produced the best-structure
 
 **General** — microphone selection; whether Typr keeps running in the tray when you close the window; whether it starts on login.
 
-**Engine** — Local Whisper or Groq Cloud. Local exposes model size and a download button; Cloud exposes your API key and the speed/accuracy choice.
+**Engine** — Local Whisper, Local Parakeet, or Groq Cloud. Whisper exposes model size and a download button; Parakeet exposes its variant (v3 multilingual or v2 English-only) and a download button; Cloud exposes your API key and the speed/accuracy choice.
 
 **AI** — the cleanup toggle, and everything it controls:
 - *Profile* — Cleanup, Prompt Mode, or Auto
