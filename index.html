@@ -140,11 +140,12 @@
                 <span class="label-hint">Recent transcriptions</span>
               </div>
               <div class="history-toolbar">
-                <input type="text" id="history-search" class="history-search-input" placeholder="Search transcriptions…" />
-                <button id="export-json-btn" class="btn-secondary">Export JSON</button>
-                <button id="export-md-btn" class="btn-secondary">Export Markdown</button>
+                <span class="toolbar-label">Export</span>
+                <button id="export-json-btn" class="btn-secondary">JSON</button>
+                <button id="export-md-btn" class="btn-secondary">Markdown</button>
               </div>
             </div>
+            <input type="text" id="history-search" class="history-search-input" placeholder="Search transcriptions…" />
             <div id="transcription-feed">
               <!-- Feed items injected via JS -->
             </div>
@@ -262,99 +263,86 @@
           </div>
           <div class="info-card">
             <div class="info-card-title">AI Post-Processing</div>
-            <div class="info-card-body">When enabled, your transcript text is sent to <b>Groq</b> for an AI cleanup pass that fixes spelling, casing, punctuation, filler words, and context-based mis-hearings (e.g. <code>CAT</code> the exam vs <code>cat</code> the animal). <b>Requires internet</b> and sends text to Groq &mdash; it is off by default. If you're offline or it's slow, Typr instantly falls back to the standard cleanup, so dictation never stalls.</div>
+            <div class="info-card-body">Sends your transcript to <b>Groq</b> for a cleanup pass that fixes spelling, casing, punctuation, filler words, and context-based mis-hearings (e.g. <code>CAT</code> the exam vs <code>cat</code> the animal). Needs internet. If it's offline or slow, Typr falls back to standard cleanup instantly, so dictation never stalls.</div>
           </div>
-          <div class="settings-list">
-            <div class="setting-row">
-              <div class="setting-label">
-                <span class="label-text">AI Cleanup</span>
-                <span class="label-hint">Send transcripts to Groq for an AI cleanup pass</span>
-              </div>
-              <div class="setting-control">
-                <div class="toggle-group">
-                  <button id="ai-off" class="toggle-btn active">Off</button>
-                  <button id="ai-on" class="toggle-btn">On</button>
+          <div class="settings-group">
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">AI Cleanup</span>
+                  <span class="label-hint">Off by default. Everything below applies only when this is on.</span>
+                </div>
+                <div class="setting-control">
+                  <div class="toggle-group">
+                    <button id="ai-off" class="toggle-btn active">Off</button>
+                    <button id="ai-on" class="toggle-btn">On</button>
+                  </div>
                 </div>
               </div>
             </div>
-            <div class="setting-row">
-              <div class="setting-label">
-                <span class="label-text">Profile</span>
-                <span class="label-hint">Cleanup tidies your words; Prompt Mode rewrites a ramble into a prompt; Auto matches the style to the app you're dictating into</span>
+          </div>
+          <div class="settings-group">
+            <div class="group-title">Behaviour</div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Profile</span>
+                  <span class="label-hint">What the AI does with your words. Auto matches the app you're dictating into.</span>
+                </div>
+                <div class="setting-control">
+                  <div class="toggle-group">
+                    <button id="ai-profile-cleanup" class="toggle-btn active">Cleanup</button>
+                    <button id="ai-profile-prompt" class="toggle-btn">Prompt Mode</button>
+                    <button id="ai-profile-auto" class="toggle-btn">Auto</button>
+                  </div>
+                </div>
               </div>
-              <div class="setting-control">
-                <div class="toggle-group">
-                  <button id="ai-profile-cleanup" class="toggle-btn active">Cleanup</button>
-                  <button id="ai-profile-prompt" class="toggle-btn">Prompt Mode</button>
-                  <button id="ai-profile-auto" class="toggle-btn">Auto</button>
+              <div class="setting-row setting-child" id="auto-context-row">
+                <div class="setting-label">
+                  <span class="label-text">Style</span>
+                  <span class="label-hint">Auto-detect reads the focused app. Pick one to use it everywhere instead.</span>
+                </div>
+                <div class="setting-control">
+                  <select id="auto-context-override">
+                    <option value="auto">Auto-detect</option>
+                    <option value="developer">Developer</option>
+                    <option value="email">Email</option>
+                    <option value="messaging">Messaging</option>
+                    <option value="professional">Professional</option>
+                    <option value="general">General</option>
+                  </select>
+                </div>
+              </div>
+              <div class="setting-row setting-child hidden" id="ai-format-settings">
+                <div class="setting-label">
+                  <span class="label-text">Prompt format</span>
+                  <span class="label-hint">Natural is a clean paragraph. Structured uses Context / Task / Constraints / Output.</span>
+                </div>
+                <div class="setting-control">
+                  <div class="toggle-group">
+                    <button id="ai-format-natural" class="toggle-btn active">Natural</button>
+                    <button id="ai-format-structured" class="toggle-btn">Structured</button>
+                  </div>
+                </div>
+              </div>
+              <div class="setting-row" id="ai-model-settings">
+                <div class="setting-label">
+                  <span class="label-text">Model</span>
+                  <span class="label-hint">Qwen is the fastest and handles most dictation best. The gpt-oss models reason before answering.</span>
+                </div>
+                <div class="setting-control">
+                  <select id="ai-model-select">
+                    <option value="qwen/qwen3.6-27b">Recommended &middot; Qwen 3.6 27B</option>
+                    <option value="openai/gpt-oss-20b">Fast &middot; gpt-oss-20b</option>
+                    <option value="openai/gpt-oss-120b">Quality &middot; gpt-oss-120b</option>
+                  </select>
                 </div>
               </div>
             </div>
-            <div class="setting-row" id="auto-context-row">
-              <div class="setting-label">
-                <span class="label-text">Auto context</span>
-                <span class="label-hint">Auto-detect picks a style from the focused app; or pin one style for every dictation in Auto mode</span>
-              </div>
-              <div class="setting-control">
-                <select id="auto-context-override">
-                  <option value="auto">Auto-detect</option>
-                  <option value="developer">Developer</option>
-                  <option value="email">Email</option>
-                  <option value="messaging">Messaging</option>
-                  <option value="professional">Professional</option>
-                  <option value="general">General</option>
-                </select>
-              </div>
-            </div>
-            <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-              <div class="setting-label" style="margin-bottom: 0;">
-                <span class="label-text" style="font-size: 13px; font-weight: 600;">App context rules</span>
-                <span class="label-hint">Force a style for a specific app (e.g. <code>obsidian.exe</code>), optionally narrowed by window title. Or leave the app blank and set just a title filter to match a browser site (e.g. <code>youtube</code>) in any browser.</span>
-              </div>
-              <div class="dict-add-row">
-                <div class="app-picker">
-                  <input type="text" id="app-rule-process" class="dict-input" placeholder="pick a running app or type e.g. obsidian.exe" autocomplete="off" />
-                  <div id="app-picker-panel" class="app-picker-panel hidden"></div>
-                </div>
-                <input type="text" id="app-rule-title" class="dict-input" placeholder="title contains (optional)" />
-                <select id="app-rule-category">
-                  <option value="developer">Developer</option>
-                  <option value="email">Email</option>
-                  <option value="messaging">Messaging</option>
-                  <option value="professional">Professional</option>
-                  <option value="general">General</option>
-                </select>
-                <button id="app-rule-add-btn" class="btn-primary">Add Rule</button>
-              </div>
-              <div id="app-rules-list" class="dict-list-container">
-                <!-- Injected via JS -->
-              </div>
-            </div>
-            <div class="setting-row hidden" id="ai-format-settings">
-              <div class="setting-label">
-                <span class="label-text">Prompt Format</span>
-                <span class="label-hint">Natural is a clean prompt; Structured uses Context / Task / Constraints / Output</span>
-              </div>
-              <div class="setting-control">
-                <div class="toggle-group">
-                  <button id="ai-format-natural" class="toggle-btn active">Natural</button>
-                  <button id="ai-format-structured" class="toggle-btn">Structured</button>
-                </div>
-              </div>
-            </div>
-            <div class="setting-row" id="ai-model-settings">
-              <div class="setting-label">
-                <span class="label-text">AI Model</span>
-                <span class="label-hint">Fast is quicker; Quality is more thorough</span>
-              </div>
-              <div class="setting-control">
-                <select id="ai-model-select">
-                  <option value="qwen/qwen3.6-27b">Recommended &middot; Qwen 3.6 27B</option>
-                  <option value="openai/gpt-oss-20b">Fast &middot; gpt-oss-20b</option>
-                  <option value="openai/gpt-oss-120b">Quality &middot; gpt-oss-120b</option>
-                </select>
-              </div>
-            </div>
+          </div>
+          <div class="settings-group">
+            <div class="group-title">Output style</div>
+            <div class="settings-list">
             <div class="setting-row" id="ai-presets-settings">
               <div class="setting-label">
                 <span class="label-text">Presets <span class="preset-help" title="One-click Tone + Formatting combos:&#10;Email = Formal + Paragraphs&#10;Chat = Casual&#10;Notes = Bullets&#10;Brief = Concise&#10;Reset = profile defaults">&#9432;</span></span>
@@ -427,15 +415,40 @@
             </div>
             <div class="setting-row" id="ai-custom-settings">
               <div class="setting-label">
-                <span class="label-text">Custom Instructions</span>
-                <span class="label-hint">Extra rules applied to every AI cleanup (leave blank for none)</span>
+                <span class="label-text">Custom instructions</span>
+                <span class="label-hint">Extra rules applied to every cleanup. Leave blank for none.</span>
               </div>
               <div class="setting-control">
                 <textarea id="ai-custom-instructions" class="custom-instructions" rows="3"
                   placeholder="e.g. Use British spelling. · Never use em-dashes. · Keep my acronyms as-is."></textarea>
               </div>
             </div>
+            </div>
           </div>
+          <details class="settings-advanced">
+            <summary>App context rules</summary>
+            <div class="settings-advanced-body">
+              <p class="label-hint" style="margin-bottom: 12px;">Force a style for one app, e.g. <code>obsidian.exe</code>. Leave the app blank and set only a title filter to match a site like <code>youtube</code> in any browser.</p>
+              <div class="dict-add-row">
+                <div class="app-picker">
+                  <input type="text" id="app-rule-process" class="dict-input" placeholder="pick a running app or type e.g. obsidian.exe" autocomplete="off" />
+                  <div id="app-picker-panel" class="app-picker-panel hidden"></div>
+                </div>
+                <input type="text" id="app-rule-title" class="dict-input" placeholder="title contains (optional)" />
+                <select id="app-rule-category">
+                  <option value="developer">Developer</option>
+                  <option value="email">Email</option>
+                  <option value="messaging">Messaging</option>
+                  <option value="professional">Professional</option>
+                  <option value="general">General</option>
+                </select>
+                <button id="app-rule-add-btn" class="btn-primary">Add Rule</button>
+              </div>
+              <div id="app-rules-list" class="dict-list-container">
+                <!-- Injected via JS -->
+              </div>
+            </div>
+          </details>
         </section>
 
         <section id="section-commands" class="content-section">

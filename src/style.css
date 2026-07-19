@@ -472,6 +472,87 @@ body {
   flex-direction: column;
 }
 
+/* ── Setting groups ─────────────────────────────────── */
+/* A long settings page reads as one undifferentiated column of rows, which is
+   what makes a dense tab feel crowded. Grouping related rows under a quiet
+   label turns it into a few short lists instead. Spacing does the work here —
+   no new colours or type styles, only the existing tokens. */
+
+.settings-group + .settings-group {
+  margin-top: 30px;
+}
+
+.group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.01em;
+  margin-bottom: 6px;
+}
+
+/* A row that only makes sense as a refinement of the row above it (e.g. the
+   context picker that qualifies the chosen Profile). The rule ties it to its
+   parent so it is not read as an independent setting. */
+.setting-row.setting-child {
+  margin-left: 2px;
+  padding-left: 16px;
+  border-left: 2px solid var(--border);
+}
+
+/* ── Advanced disclosure ────────────────────────────── */
+/* Power features stay available but stop competing with everyday settings.
+   Native <details> so keyboard and screen-reader behaviour comes for free. */
+
+.settings-advanced {
+  margin-top: 30px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.settings-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-advanced > summary:hover {
+  color: var(--text);
+}
+
+/* Chevron drawn from a rotated corner so no icon asset is needed. */
+.settings-advanced > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+
+.settings-advanced[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.settings-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.settings-advanced-body {
+  padding-bottom: 8px;
+}
+
 .setting-row {
   display: flex;
   align-items: flex-start;
@@ -995,6 +1076,14 @@ kbd {
   justify-content: flex-end;
 }
 
+/* Quiet caption naming what the adjacent buttons do, so each button carries a
+   format ("JSON") instead of repeating the verb ("Export JSON", "Export Markdown"). */
+.toolbar-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-right: 2px;
+}
+
 .history-search-input {
   font-family: inherit;
   font-size: 13px;
@@ -1003,7 +1092,10 @@ kbd {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 6px 12px;
-  min-width: 200px;
+  /* Search is the primary action on a list that only grows, so it gets its own
+     full-width row below the header rather than competing with export for space. */
+  width: 100%;
+  margin: 12px 0;
 }
 
 .history-search-input::placeholder {
