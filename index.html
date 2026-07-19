@@ -213,11 +213,12 @@
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">Transcription engine</span>
-                <span class="label-hint">Local runs on your machine. Cloud is faster and needs a Groq API key.</span>
+                <span class="label-hint">Local Whisper needs an NVIDIA GPU. Local Parakeet runs on any modern CPU. Cloud is fastest and needs a Groq API key.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
                   <button id="engine-local" class="toggle-btn active">Local Whisper</button>
+                  <button id="engine-parakeet" class="toggle-btn">Local Parakeet</button>
                   <button id="engine-cloud" class="toggle-btn">Groq Cloud</button>
                 </div>
               </div>
@@ -249,6 +250,21 @@
               </div>
               <div class="setting-control">
                 <input type="password" id="groq-key" placeholder="gsk_..." />
+              </div>
+            </div>
+            <div class="setting-row setting-child hidden" id="parakeet-settings">
+              <div class="setting-label">
+                <span class="label-text">Parakeet model</span>
+                <span class="label-hint">Runs on the CPU, no GPU needed. About 640 MB on disk, and slower than Whisper on a machine with a GPU.</span>
+              </div>
+              <div class="setting-control">
+                <div class="model-row">
+                  <select id="parakeet-model-select">
+                    <option value="v3">v3 &middot; 25 languages &middot; recommended</option>
+                    <option value="v2">v2 &middot; English only &middot; faster</option>
+                  </select>
+                  <button id="parakeet-download-btn" class="btn-primary">Download</button>
+                </div>
               </div>
             </div>
             <div class="setting-row setting-child hidden" id="cloud-model-settings">

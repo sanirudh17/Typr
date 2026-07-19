@@ -493,6 +493,65 @@ fn check_model_downloaded(state: State<AppState>, model_size: String) -> bool {
 }
 
 #[tauri::command]
+fn check_parakeet_downloaded(state: State<AppState>, variant: String) -> bool {
+    let dir = state.app_dir.join(typr_lib::transcribe_parakeet::model_dir_name(&variant));
+    typr_lib::transcribe_parakeet::model_files_present(&dir)
+}
+
+/// Fetch and unpack a Parakeet model.
+///
+/// Parakeet ships as a bz2 archive of four files where Whisper ships one .bin, so the existing
+/// downloader handles the fetch and extraction is added on top. Extraction runs in-process
+/// rather than shelling out to tar, which a Windows machine may not have.
+#[tauri::command]
+async fn download_parakeet_model(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    variant: String,
+) -> Result<(), String> {
+    use std::io::Read;
+
+    let url = typr_lib::transcribe_parakeet::model_download_url(&variant);
+    let target = state
+        .app_dir
+        .join(typr_lib::transcribe_parakeet::model_dir_name(&variant));
+    let archive = state.app_dir.join("parakeet-download.tar.bz2");
+
+    downloader::download_model(app.clone(), &url, &archive).await?;
+
+    std::fs::create_dir_all(&target).map_err(|e| format!("Could not create model dir: {}", e))?;
+    let file = std::fs::File::open(&archive).map_err(|e| format!("Could not open archive: {}", e))?;
+    let mut tar = tar::Archive::new(bzip2::read::BzDecoder::new(file));
+
+    // Entries are re-rooted by filename: the archive's top-level directory name is not
+    // guaranteed to match ours, and only the four files the recognizer needs are kept — the
+    // bundled sample WAVs are skipped.
+    let wanted = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
+    for entry in tar.entries().map_err(|e| format!("Could not read archive: {}", e))? {
+        let mut entry = entry.map_err(|e| format!("Corrupt archive entry: {}", e))?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !wanted.contains(&name.as_str()) {
+            continue;
+        }
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).map_err(|e| format!("Could not extract {}: {}", name, e))?;
+        std::fs::write(target.join(&name), buf)
+            .map_err(|e| format!("Could not write {}: {}", name, e))?;
+    }
+    let _ = std::fs::remove_file(&archive);
+
+    // A partial extract would otherwise surface much later as an opaque failure inside the
+    // C API, so it is caught here where the cause is still obvious.
+    if !typr_lib::transcribe_parakeet::model_files_present(&target) {
+        return Err("Download finished but the model files are incomplete.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn download_model(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -650,6 +709,8 @@ fn main() {
             hotkey_tx: hotkey_tx.clone(),
         })
         .invoke_handler(tauri::generate_handler![
+            check_parakeet_downloaded,
+            download_parakeet_model,
             get_settings,
             save_settings,
             list_microphones,

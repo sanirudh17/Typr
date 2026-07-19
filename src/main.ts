@@ -11,6 +11,7 @@ interface Settings {
   recordingMode: string;
   hotkey: string;
   cloudModel: string;
+  parakeetModel: string;
   aiEnabled: boolean;
   aiModel: string;
   aiProfile: string;
@@ -67,6 +68,10 @@ const statusText = document.getElementById("status-text")!;
 const micSelect = document.getElementById("mic-select") as HTMLSelectElement;
 const engineLocal = document.getElementById("engine-local")!;
 const engineCloud = document.getElementById("engine-cloud")!;
+const engineParakeet = document.getElementById("engine-parakeet")!;
+const parakeetSettings = document.getElementById("parakeet-settings")!;
+const parakeetModelSelect = document.getElementById("parakeet-model-select") as HTMLSelectElement;
+const parakeetDownloadBtn = document.getElementById("parakeet-download-btn") as HTMLButtonElement;
 const localSettings = document.getElementById("local-settings")!;
 const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
@@ -335,6 +340,8 @@ async function loadSettings() {
 
   // Cloud model
   setCloudModel(currentSettings.cloudModel || "accurate");
+  setParakeetModel(currentSettings.parakeetModel || "v3");
+  refreshParakeetDownloadState();
 
   // Recording mode
   setRecordingMode(currentSettings.recordingMode);
@@ -375,13 +382,36 @@ async function populateMics() {
   micSelect.value = previous;
 }
 
+// Mirrors the dispatch arms in recorder.rs. An unrecognized value falls back to local so a
+// stale config can never leave the engine unset.
 function setEngine(engine: string) {
-  currentSettings.engine = engine;
-  engineLocal.classList.toggle("active", engine === "local");
-  engineCloud.classList.toggle("active", engine === "cloud");
-  localSettings.classList.toggle("hidden", engine !== "local");
-  cloudSettings.classList.toggle("hidden", engine !== "cloud");
-  cloudModelSettings.classList.toggle("hidden", engine !== "cloud");
+  const e = engine === "cloud" ? "cloud" : engine === "parakeet" ? "parakeet" : "local";
+  currentSettings.engine = e;
+  engineLocal.classList.toggle("active", e === "local");
+  engineParakeet.classList.toggle("active", e === "parakeet");
+  engineCloud.classList.toggle("active", e === "cloud");
+  localSettings.classList.toggle("hidden", e !== "local");
+  parakeetSettings.classList.toggle("hidden", e !== "parakeet");
+  cloudSettings.classList.toggle("hidden", e !== "cloud");
+  cloudModelSettings.classList.toggle("hidden", e !== "cloud");
+}
+
+function setParakeetModel(variant: string) {
+  const v = variant === "v2" ? "v2" : "v3";
+  currentSettings.parakeetModel = v;
+  parakeetModelSelect.value = v;
+}
+
+/// Reflect whether the selected variant is on disk, so the button says what it will do.
+async function refreshParakeetDownloadState() {
+  try {
+    const present = await invoke<boolean>("check_parakeet_downloaded", {
+      variant: currentSettings.parakeetModel || "v3",
+    });
+    parakeetDownloadBtn.textContent = present ? "Re-download" : "Download";
+  } catch {
+    parakeetDownloadBtn.textContent = "Download";
+  }
 }
 
 function setCloudModel(model: string) {
@@ -503,6 +533,37 @@ engineLocal.addEventListener("click", () => {
 engineCloud.addEventListener("click", () => {
   setEngine("cloud");
   saveSettings();
+});
+
+engineParakeet.addEventListener("click", () => {
+  setEngine("parakeet");
+  saveSettings();
+  refreshParakeetDownloadState();
+});
+
+parakeetModelSelect.addEventListener("change", () => {
+  setParakeetModel(parakeetModelSelect.value);
+  saveSettings();
+  refreshParakeetDownloadState();
+});
+
+parakeetDownloadBtn.addEventListener("click", async () => {
+  const variant = currentSettings.parakeetModel || "v3";
+  const original = parakeetDownloadBtn.textContent;
+  parakeetDownloadBtn.disabled = true;
+  parakeetDownloadBtn.textContent = "Downloading…";
+  downloadProgress.classList.remove("hidden");
+  try {
+    await invoke("download_parakeet_model", { variant });
+    showToast("Parakeet model ready");
+  } catch (e) {
+    showToast(String(e));
+  } finally {
+    downloadProgress.classList.add("hidden");
+    parakeetDownloadBtn.disabled = false;
+    parakeetDownloadBtn.textContent = original ?? "Download";
+    refreshParakeetDownloadState();
+  }
 });
 
 micSelect.addEventListener("change", () => saveSettings());
