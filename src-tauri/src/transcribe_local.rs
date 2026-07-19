@@ -31,11 +31,31 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
+/// Transcribe with the local Whisper model.
+///
+/// # The `prompt` argument is accepted and deliberately NOT used
+///
+/// It carries the dictionary bias terms, and passing them to Whisper as an `initial_prompt`
+/// makes the model silently drop speech.
+///
+/// Measured on `ggml-medium.en-q5_0` with a 77-second dictation containing a seven-item
+/// numbered list. With no prompt it transcribed all seven items, twice in a row. With a prompt
+/// it returned two of seven and dropped the rest without a trace — and that held for the full
+/// dictionary, for three terms, for a prose-style sentence, and for the single word "Tauri".
+/// Neither length nor phrasing mattered; only presence.
+///
+/// The lost words are not mangled, they are absent, and nothing in the output suggests anything
+/// is missing. Silent deletion is worse than no bias at all, so no bias is applied here.
+///
+/// The dictionary still works on this path: `vocab_correct` fixes its terms after
+/// transcription rather than biasing before it. Groq is unaffected and still receives the
+/// prompt. The parameter stays so the engine signatures match and re-enabling is one line if
+/// this is ever fixed upstream.
 pub async fn transcribe_local(
     app: &AppHandle,
     model_path: &PathBuf,
     audio_path: &PathBuf,
-    prompt: &str,
+    _prompt: &str,
 ) -> Result<String, String> {
     if !model_path.exists() {
         return Err("Whisper model not found. Please download a model first.".to_string());
@@ -79,14 +99,12 @@ pub async fn transcribe_local(
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
                 .unwrap();
-            let mut form = reqwest::multipart::Form::new()
+            // NO PROMPT. See `prompt` on the function signature — passing dictionary hints as
+            // an initial prompt makes this model silently skip speech.
+            reqwest::multipart::Form::new()
                 .part("file", part)
                 .text("temperature", "0.0")
-                .text("response_format", "json");
-            if !prompt.is_empty() {
-                form = form.text("prompt", prompt.to_string());
-            }
-            form
+                .text("response_format", "json")
         };
 
         // Guard the hot path on model identity: reuse the warm server only if it is
@@ -171,7 +189,7 @@ pub async fn transcribe_local(
     );
     let started_gpu = Instant::now();
 
-    let mut cuda_cmd_args = vec![
+    let cuda_cmd_args = vec![
         "-m".to_string(),
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
@@ -188,10 +206,8 @@ pub async fn transcribe_local(
         "en".to_string(),
     ];
 
-    if !prompt.is_empty() {
-        cuda_cmd_args.push("--prompt".to_string());
-        cuda_cmd_args.push(prompt.to_string());
-    }
+    // No --prompt: see the note on the `prompt` parameter. The sidecars run the same model
+    // as the server and skip speech the same way.
 
     let gpu_result = app
         .shell()
@@ -234,7 +250,7 @@ pub async fn transcribe_local(
     );
     let started_cpu = Instant::now();
 
-    let mut cpu_cmd_args = vec![
+    let cpu_cmd_args = vec![
         "-m".to_string(),
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
@@ -251,10 +267,7 @@ pub async fn transcribe_local(
         "en".to_string(),
     ];
 
-    if !prompt.is_empty() {
-        cpu_cmd_args.push("--prompt".to_string());
-        cpu_cmd_args.push(prompt.to_string());
-    }
+    // No --prompt: see the note on the `prompt` parameter.
 
     let cpu_output = app
         .shell()
