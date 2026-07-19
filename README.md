@@ -1,143 +1,226 @@
-# Typr ✨
+# Typr
 
-**Typr** is a lightning-fast, premium desktop voice-to-text dictation application built for Windows. Siting quietly in your system tray or background, Typr allows you to transcribe your speech into text using either an ultra-fast, local, privacy-first **Whisper engine with GPU acceleration**, or the **Groq Cloud API**. Once transcription completes, Typr instantly and automatically types your speech directly into whichever text input window you currently have open.
+[![Release](https://img.shields.io/badge/release-v0.1.0-5e6ad2)](https://github.com/sanirudh17/Typr/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d4)](https://github.com/sanirudh17/Typr/releases)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24c8db)](https://tauri.app)
 
----
+A voice-to-text dictation app for Windows. Press a hotkey, speak, and your words are typed into whatever window you are already in — Gmail, VS Code, WhatsApp, a terminal.
 
-## ✨ Features
-
-- **Push-to-Talk & Toggle Modes**: Start recording instantly using a customizable global hotkey (default `Cmd/Ctrl+Shift+D`), or hold it down for Push-to-Talk precision.
-- **Auto-Typing / Pasting**: Replaces the slow clipboard loop by automatically writing your transcribed voice directly into your active window (Notepad, browser, IDE, Slack, etc.) using native keyboard event injection.
-- **Hardware-Accelerated Local Whisper Engine**:
-  - **100% Offline & Private**: Transcribe sensitive notes locally without sending any data over the internet.
-  - **Nvidia GPU/CUDA Support**: Native hardware acceleration using bundled `cublas64_12.dll`, `cublasLt64_12.dll`, and `ggml-cuda.dll` dynamic libraries, delivering lightning-fast transcrips in seconds.
-  - **Dynamic DLL Resolution**: No system-wide CUDA SDK installs required—everything runs out-of-the-box from the local installer package.
-- **Groq Cloud API Support**: Optionally switch to the ultra-fast Groq API (`whisper-large-v3-turbo`) for near-instant transcription on lower-end devices or laptops without dedicated GPUs.
-- **Sleek, Premium Dark Theme UI**:
-  - **Elegant Glassmorphic Sidebar**: Modern sidebar navigation with clean iconography and smooth animations.
-  - **Live Glowing Status Indicator**: A beautiful breathing status pill showing at a glance whether the app is *Ready*, *Listening*, or *Transcribing*.
-- **Custom Dictionary & Vocabulary Memory**: Feed personal names, specialized abbreviations, acronyms, or development terms (e.g., specific framework names) into Typr's context so it spells them correctly every single time.
-- **Categorized History Log**: Persistent, private history database categorized by date. Click any previous card to instantly copy it back to your clipboard.
-- **Self-Cleaning Core**: Safe process hook automatically shuts down background Whisper threads upon app close to prevent memory leaks or zombie processes.
+Transcription runs either **fully offline** on your own GPU, or through the **Groq Cloud API** when you want speed on a machine without one. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
 
 ---
 
-## 🛠️ Tech Stack & Architecture
+## Contents
 
-Typr is architected for maximum speed and minimal background memory overhead:
-
-* **Frontend**: HTML5, Vanilla CSS3 (custom dark/glassmorphic design system), and TypeScript powered by **Vite** and **TypeScript Compiler**.
-* **Backend**: **Rust** via the **Tauri v2** framework. Handles OS window hooks, system audio capture (`cpal`), clipboard manipulation (`arboard`), and global shortcut listeners.
-* **Local Inference**: Powered by custom `whisper-server-cuda` running as a backend sidecar, communicating locally over HTTP sockets for high throughput and zero-lag audio submission.
+- [Features](#features)
+- [Download & Install](#download--install)
+- [Building from Source](#building-from-source)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Configuration & Data](#configuration--data)
+- [Privacy](#privacy)
+- [License](#license)
 
 ---
 
-## 🚀 Getting Started
+## Features
 
-### Prerequisites
+**Dictation**
+- **Toggle or Push-to-Talk**, on a global hotkey (default `Ctrl+Shift+Space`) that works from any app.
+- **Types directly into the focused window** rather than leaving text on your clipboard.
+- **A second optional hotkey** that applies an AI profile on demand, even when the AI pass is otherwise off.
+- **Live waveform overlay** while recording, so you can see audio is actually reaching the app.
 
-To compile or build Typr from source, your system needs:
-- **Node.js** (v18 or newer)
-- **Rust** & Cargo (Stable channel, version 1.75+)
-- **Nvidia GPU** (Recommended for GPU-accelerated local transcription) along with up-to-date graphics drivers.
+**Two transcription engines**
+- **Local Whisper with CUDA acceleration.** Runs entirely on your machine. Ships its own CUDA libraries, so no system-wide CUDA install is required. Four model sizes, ~190 MB to ~1.5 GB.
+- **Groq Cloud.** `whisper-large-v3` for accuracy, or `whisper-large-v3-turbo` for lower latency.
 
-### First-Time Setup (Installed App)
+**Optional AI cleanup**
+- Fixes spelling, casing, punctuation, filler words, and mis-hearings that only context can resolve.
+- **Profiles** — *Cleanup* tidies what you said, *Prompt Mode* rewrites a spoken ramble into a structured prompt, and *Auto* matches the style to the app in front of you.
+- **Auto context detection** picks Messaging, Email, Professional, Developer, or General from the focused application, with custom rules for anything it does not recognise.
+- **Model choice** — Qwen 3.6 27B by default, or either GPT-OSS model. If one fails, another takes over; if all of them do, deterministic cleanup still runs, so a dictation is never lost.
+- **Tone and formatting controls**, plus custom instructions applied to every pass.
 
-When launching Typr for the first time after installing a release build:
+**Voice commands** — spoken mid-sentence, applied offline, and independent of whether AI cleanup is on
+- Casing: *"camel case get user by id"* → `getUserById`
+- Layout: *"new line"*, *"new paragraph"*, *"new bullet"*
+- Symbols: *"open paren"*, *"semicolon"*, *"hyphen"*
+- Editing: *"scratch that"*, *"delete last word"*, *"all caps that"*, *"make it a list"*
 
-1. Open the app and navigate to the **Engine** tab via the sidebar.
-2. Select your preferred **Model Size** (`small` ~466 MB or `medium` ~1.5 GB).
-3. Click the **Download** button to fetch the Whisper model file from HuggingFace.
-   *(The model is saved to `C:\Users\<You>\AppData\Roaming\com.typr.app\ggml-<size>.bin`)*
-4. Once the download completes, the engine is ready to transcribe.
+**Getting your words right**
+- **Dictionary** — names and rare terms are sent to the engine so it is likelier to hear them correctly. These bias recognition; they never rewrite your text, so ordinary words are never mangled.
+- **Snippets** — exact find-and-replace rules that always fire. Good for a word that is always misheard the same way, or for expanding a shortcut like `brb` or `my email`.
 
-> **Note:** A Whisper model must be downloaded before any local transcription can occur. If you switch to the Cloud (Groq) engine, no model download is required — just enter your API key.
+**Around the app**
+- **History** with search and export to JSON or Markdown.
+- **Tray / background mode** and optional start on login, so the hotkey works without the window open.
 
-### Setup & Local Development (From Source)
+---
 
-The app requires three **whisper.cpp sidecar binaries** in `src-tauri/binaries/` to function:
-- `whisper-cpp` (CPU fallback)
-- `whisper-cpp-cuda` (GPU direct)
-- `whisper-server-cuda` (persistent HTTP server)
+## Download & Install
 
-These are **not** the model files (which are downloaded later via the app UI) — they are compiled executables from the [whisper.cpp](https://github.com/ggml-org/whisper.cpp) project. The `src-tauri/binaries/` directory is gitignored, so you must build or obtain them yourself.
+Grab the latest installer from the [Releases page](https://github.com/sanirudh17/Typr/releases):
 
-#### Option A: Build from whisper.cpp source
+- **`Typr_0.1.0_x64-setup.exe`** — NSIS installer (recommended, smaller)
+- **`Typr_0.1.0_x64_en-US.msi`** — MSI installer
+
+**Requirements**
+- Windows 10 or 11 (64-bit)
+- An NVIDIA GPU for the local engine's CUDA acceleration. Without one, use the Groq Cloud engine.
+- A [Groq API key](https://console.groq.com) if you want cloud transcription or AI cleanup. Both are optional.
+
+### First run
+
+A Whisper model must be downloaded before local transcription will work:
+
+1. Open the **Engine** tab.
+2. Pick a **Model size** — Medium English (~539 MB) is a good default.
+3. Click **Download**. The model is saved to `%APPDATA%\com.typr.app\`.
+
+If you use the Groq Cloud engine instead, no download is needed — just enter your API key.
+
+---
+
+## Building from Source
+
+**Prerequisites**
+- [Node.js](https://nodejs.org) 18 or newer
+- [Rust](https://rustup.rs) 1.75+ (stable)
+- Visual Studio Build Tools with the C++ workload, and the [Tauri v2 prerequisites](https://tauri.app/start/prerequisites/)
+
+### Sidecar binaries (required)
+
+The app runs `whisper.cpp` as a sidecar. `src-tauri/binaries/` is gitignored, so you must supply three executables yourself:
+
+| File | Role |
+|---|---|
+| `whisper-cpp.exe` | CPU fallback |
+| `whisper-cpp-cuda.exe` | GPU direct |
+| `whisper-server-cuda.exe` | persistent HTTP server |
+
+All three entries may be the **same compiled binary** — the app selects the execution mode at runtime with command-line flags.
+
+*Build them:*
 
 ```bash
-# Clone whisper.cpp alongside the Typr repo
 git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
 cd whisper.cpp
-
-# Build with CUDA support (requires CUDA toolkit)
 cmake -B build -DGGML_CUDA=ON
 cmake --build build --config Release
 
-# Copy the sidecar binaries to the Typr binaries directory
-# (adjust extensions/paths for your platform)
-cp build/bin/whisper-cli.exe ../Typr/src-tauri/binaries/whisper-cpp.exe
-cp build/bin/whisper-cli.exe ../Typr/src-tauri/binaries/whisper-cpp-cuda.exe
+cp build/bin/whisper-cli.exe    ../Typr/src-tauri/binaries/whisper-cpp.exe
+cp build/bin/whisper-cli.exe    ../Typr/src-tauri/binaries/whisper-cpp-cuda.exe
 cp build/bin/whisper-server.exe ../Typr/src-tauri/binaries/whisper-server-cuda.exe
 ```
 
-> **Note:** All three sidecar entries (`whisper-cpp`, `whisper-cpp-cuda`, `whisper-server-cuda`) in `tauri.conf.json` use the same compiled whisper.cpp binary — the app selects the appropriate execution mode at runtime via command-line flags. You may use the same binary for all three.
+*Or download them* from the [whisper.cpp releases page](https://github.com/ggml-org/whisper.cpp/releases) and rename them as above.
 
-#### Option B: Download pre-built releases
+For GPU acceleration, also place `cublas64_12.dll`, `cublasLt64_12.dll`, and `ggml-cuda.dll` into `src-tauri/binaries/`.
 
-Download pre-built whisper.cpp executables for your platform from the [whisper.cpp releases page](https://github.com/ggml-org/whisper.cpp/releases) and place them in `src-tauri/binaries/` with the correct names above.
+### Run and build
 
-#### Running the app
+```bash
+git clone https://github.com/sanirudh17/Typr.git
+cd Typr
+npm install
 
-1. **Clone the Repository**:
-   ```bash
-   git clone https://github.com/sanirudh17/Typr.git
-   cd Typr
-   ```
+npm run tauri dev     # development
+npm run tauri build   # installers
+```
 
-2. **Ensure sidecar binaries are in place** (see above).
+Installers land in:
+- `src-tauri/target/release/bundle/nsis/Typr_0.1.0_x64-setup.exe` (~278 MB)
+- `src-tauri/target/release/bundle/msi/Typr_0.1.0_x64_en-US.msi` (~436 MB)
 
-3. **Install Frontend Dependencies**:
-   ```bash
-   npm install
-   ```
+To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
 
-4. **Install CUDA DLLs** (optional, for GPU acceleration):
-   Place `cublas64_12.dll`, `cublasLt64_12.dll`, and `ggml-cuda.dll` into `src-tauri/binaries/`.
+### Tests
 
-5. **Start the App in Dev Mode**:
-   ```bash
-   npm run tauri dev
-   ```
-   *This starts the frontend Vite server and compiles the Rust backend, launching the local app window.*
-
-6. **Download a Whisper model** via the Engine settings tab in the app (see "First-Time Setup" above).
+```bash
+cd src-tauri && cargo test   # Rust unit tests
+npx tsc --noEmit             # frontend typecheck
+```
 
 ---
 
-## 📦 Packaging & Compiling for Production
+## Tech Stack
 
-To compile Typr into a single fully-packaged production installer:
-
-1. **Place the whisper.cpp sidecar binaries** (`whisper-cpp.exe`, `whisper-cpp-cuda.exe`, `whisper-server-cuda.exe`) into `src-tauri/binaries/` (see "Setup & Local Development" above for how to obtain these).
-2. **Place CUDA DLLs** (optional) — `cublas64_12.dll`, `cublasLt64_12.dll`, `ggml-cuda.dll` — into `src-tauri/binaries/` for GPU acceleration.
-3. **Bundle a Whisper model** (optional) — to skip the first-run download, place a `ggml-small.bin` into `src-tauri/binaries/`. If omitted, users download a model from within the app's Engine settings on first launch.
-4. Run the production build command:
-   ```bash
-   npm run tauri build
-   ```
-
-Upon completion, Tauri will package two high-quality installer formats:
-* **EXE Installer (NSIS Setup)**:
-  `src-tauri/target/release/bundle/nsis/Typr_0.1.0_x64-setup.exe` *(Highly compressed, ~278 MB)*
-* **MSI Installer (Windows Installer)**:
-  `src-tauri/target/release/bundle/msi/Typr_0.1.0_x64_en-US.msi` *(Cabinet bundle, ~436 MB)*
+| Layer | Technology |
+|---|---|
+| Shell | [Tauri v2](https://tauri.app) |
+| Backend | Rust |
+| Frontend | TypeScript, vanilla CSS, [Vite](https://vitejs.dev) |
+| Audio capture | [`cpal`](https://github.com/RustAudio/cpal) |
+| Local inference | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp) with CUDA, run as a sidecar |
+| Cloud transcription | Groq (`whisper-large-v3`, `whisper-large-v3-turbo`) |
+| AI cleanup | Groq chat completions (Qwen 3.6, GPT-OSS) |
+| System integration | Win32 APIs for foreground-window detection, global hotkeys, keystroke injection |
 
 ---
 
-## ⚙️ Configuration & Data Storage
+## Project Structure
 
-All persistent settings, history data, and custom vocabulary dictionaries are securely stored locally inside your OS's user-specific configuration directory:
-* **Windows**: `C:\Users\<Your-Username>\AppData\Roaming\com.typr.app`
-* **macOS**: `~/Library/Application Support/com.typr.app`
+```
+Typr/
+├── index.html                  # single-page settings UI
+├── src/                        # frontend
+│   ├── main.ts                 # UI wiring and settings
+│   └── style.css               # design system
+└── src-tauri/
+    ├── src/
+    │   ├── recorder.rs         # the stop-to-text pipeline
+    │   ├── audio.rs            # capture, resampling, level metering
+    │   ├── transcribe_local.rs
+    │   ├── transcribe_groq.rs
+    │   ├── whisper_server.rs   # local sidecar lifecycle
+    │   ├── ai_postprocess.rs   # profiles, prompts, model fallback
+    │   ├── context_detector.rs # focused app → writing style
+    │   ├── commands.rs         # spoken voice commands
+    │   ├── dictionary.rs       # hints and snippets
+    │   ├── cleanup.rs          # deterministic fallback cleanup
+    │   ├── hotkey.rs  paste.rs  history.rs  settings.rs
+    │   └── ...
+    └── tauri.conf.json
+```
 
-Data is stored in plaintext JSON and local SQLite databases, guaranteeing absolute privacy.
+---
+
+## Configuration & Data
+
+Settings, history, dictionary, and snippets are stored as plain JSON in your user config directory:
+
+```
+%APPDATA%\com.typr.app\
+├── config.json        # settings, including your Groq API key
+├── dictionary.json    # hints and snippets
+├── history.json       # transcription history
+└── ggml-*.bin         # downloaded Whisper models
+```
+
+Your Groq API key is stored in plaintext in `config.json`. It never leaves your machine except as an authorization header to Groq.
+
+---
+
+## Privacy
+
+Where your audio and text go depends on which engine you choose, so it is worth being precise:
+
+**Fully offline** — with the **Local Whisper** engine and **AI cleanup off**, nothing leaves your machine. Audio is transcribed on your GPU and typed straight into the focused window.
+
+**Sent to Groq** — two features are network-backed, and both are opt-in:
+- The **Groq Cloud** engine uploads your recorded audio to Groq for transcription.
+- **AI cleanup** sends the transcribed text to Groq, whichever engine produced it.
+
+**Always local** — history, dictionary, snippets, and settings stay on disk. Typr has no analytics, no telemetry, and no account.
+
+**Window titles are never recorded.** Auto context detection reads the focused application to choose a writing style, but the debug log stores only the process name, window class, and resulting category — never the title of the window you are typing into.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Sanirudh (sanirudh17)
+
+Built on [Tauri](https://tauri.app), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), and [OpenAI Whisper](https://github.com/openai/whisper). Cloud transcription and AI cleanup are served by [Groq](https://groq.com).
