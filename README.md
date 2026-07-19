@@ -36,8 +36,9 @@ Transcription runs either **fully offline** on your own GPU, or through the **Gr
 - **A second optional hotkey** that applies an AI profile on demand, even when the AI pass is otherwise off.
 - **Live waveform overlay** while recording, so you can see audio is actually reaching the app.
 
-**Two transcription engines**
+**Three transcription engines**
 - **Local Whisper with CUDA acceleration.** Runs entirely on your machine. Ships its own CUDA libraries, so no system-wide CUDA install is required. Four model sizes, ~190 MB to ~1.5 GB.
+- **Local Parakeet on the CPU.** NVIDIA's Parakeet TDT 0.6B, run in-process — no GPU, no sidecar process, no CUDA. One model, ~640 MB, covering 25 European languages with automatic detection.
 - **Groq Cloud.** `whisper-large-v3` for accuracy, or `whisper-large-v3-turbo` for lower latency.
 
 **Optional AI cleanup**
@@ -107,13 +108,19 @@ Everything between releasing the hotkey and text appearing runs as one pipeline.
 
 **Transcription**
 
-| | Local Whisper | Groq Cloud |
-|---|---|---|
-| Runs on | Your GPU (CUDA) | Groq's servers |
-| Network | None | Required |
-| Audio leaves your machine | No | Yes |
-| Model download | 190 MB – 1.5 GB, once | None |
-| Best for | Sensitive work, offline use | Machines without an NVIDIA GPU |
+| | Local Whisper | Local Parakeet | Groq Cloud |
+|---|---|---|---|
+| Runs on | Your GPU (CUDA) | Any modern CPU | Groq's servers |
+| Network | None | None | Required |
+| Audio leaves your machine | No | No | Yes |
+| Model download | 190 MB – 1.5 GB | ~640 MB | None |
+| Languages | 99+ | 25 (v3) or English (v2) | 99+ |
+| Speed, measured on an 82s dictation | ~12s | ~15s | ~2s |
+| Best for | Sensitive work on a GPU machine | Machines with no NVIDIA GPU | Speed |
+
+Speed figures are measured end-to-end on one machine, not vendor claims. The ordering matters
+more than the numbers: Parakeet exists to make local transcription work **without** a GPU, not
+to be the fastest option on a machine that has one.
 
 Groq offers two speech models. `whisper-large-v3` is the more accurate of the two and is the default; `whisper-large-v3-turbo` trades some accuracy for lower latency.
 
@@ -165,7 +172,7 @@ Grab the latest installer from the [Releases page](https://github.com/sanirudh17
 
 **Requirements**
 - Windows 10 or 11 (64-bit)
-- An NVIDIA GPU for the local engine's CUDA acceleration. Without one, use the Groq Cloud engine.
+- An NVIDIA GPU is **optional**. With one, Local Whisper is fastest. Without one, use Local Parakeet (CPU) or Groq Cloud.
 - A [Groq API key](https://console.groq.com) if you want cloud transcription or AI cleanup. Both are optional.
 
 ### First run
@@ -251,6 +258,7 @@ npx tsc --noEmit             # frontend typecheck
 | Frontend | TypeScript, vanilla CSS, [Vite](https://vitejs.dev) |
 | Audio capture | [`cpal`](https://github.com/RustAudio/cpal) |
 | Local inference | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp) with CUDA, run as a sidecar |
+| Local Parakeet | [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/) (statically linked), NVIDIA Parakeet TDT 0.6B |
 | Cloud transcription | Groq (`whisper-large-v3`, `whisper-large-v3-turbo`) |
 | AI cleanup | Groq chat completions (Qwen 3.6, GPT-OSS) |
 | System integration | Win32 APIs for foreground-window detection, global hotkeys, keystroke injection |
@@ -271,6 +279,8 @@ Typr/
     │   ├── audio.rs            # capture, resampling, level metering
     │   ├── transcribe_local.rs
     │   ├── transcribe_groq.rs
+    │   ├── transcribe_parakeet.rs # in-process CPU engine, cached recognizer
+    │   ├── audio_chunker.rs    # split long audio at speech boundaries
     │   ├── whisper_server.rs   # local sidecar lifecycle
     │   ├── ai_postprocess.rs   # profiles, prompts, model fallback
     │   ├── context_detector.rs # focused app → writing style
@@ -336,6 +346,12 @@ It is off by default. When off, the settings beneath it are hidden and a note sa
 **Auto mode picks the wrong style.**
 Add an App context rule under **AI → Advanced**. Leave the app blank and set only a title filter to match a website in any browser.
 
+**Parakeet transcription fails to start.**
+The model has to be downloaded from the Engine tab first — it is not bundled with the installer. Parakeet also needs a CPU with AVX support (Intel 6th generation / Skylake or the AMD equivalent, or newer).
+
+**A long Parakeet dictation repeats a phrase.**
+Long recordings are split into overlapping pieces so no words are lost at the joins, and the overlap is normally removed automatically. Occasionally the model repeats a phrase within a single piece, which the AI cleanup pass strips if it is enabled.
+
 **A name is always transcribed wrong.**
 Try a Dictionary hint first, since it biases recognition without touching anything else. If it is still wrong, a Snippet will replace it outright.
 
@@ -345,4 +361,4 @@ Try a Dictionary hint first, since it biases recognition without touching anythi
 
 [MIT](LICENSE) © 2026 Sanirudh (sanirudh17)
 
-Built on [Tauri](https://tauri.app), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), and [OpenAI Whisper](https://github.com/openai/whisper). Cloud transcription and AI cleanup are served by [Groq](https://groq.com).
+Built on [Tauri](https://tauri.app), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [OpenAI Whisper](https://github.com/openai/whisper), [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0), and NVIDIA's [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0, NVIDIA Open Model License). Cloud transcription and AI cleanup are served by [Groq](https://groq.com).
