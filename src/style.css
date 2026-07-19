@@ -516,10 +516,21 @@ body {
 /* A setting whose control is a full-width composite (an add-row, a table, a list)
    rather than a right-aligned widget. Replaces the inline flex-direction overrides
    that were repeated on every such row in Dictionary, Snippets and App rules. */
-.setting-block {
+/* Both class names, not `.setting-block` alone: `.setting-row` is declared later in
+   this file and at equal specificity, so its `align-items: flex-start` won and the
+   contents shrank to fit instead of filling the row. A narrow window hides that —
+   shrink-to-fit and full width look identical there — so it only appeared when the
+   window was maximised and everything collapsed to the left. */
+.setting-row.setting-block {
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
+}
+
+/* A label in a block sits above full-width content rather than beside a control, so
+   the column cap that keeps side-by-side rows readable does not apply to it. */
+.setting-row.setting-block > .setting-label {
+  max-width: none;
 }
 
 /* Instructional prose attached to the setting above it — help text that is too long
@@ -1916,8 +1927,17 @@ kbd {
   filter: grayscale(0.5);
 }
 
+/* Matches the rhythm of .settings-group: the command tables are dense, so the gap
+   between them has to be clearly larger than the gap between rows inside one, or the
+   three groups read as a single long table. */
+.cmd-group + .cmd-group {
+  margin-top: 30px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
 .cmd-group {
-  margin-bottom: 22px;
+  margin-bottom: 0;
 }
 
 /* Matches .group-title so the Commands tab ranks its headings the same way every
@@ -1941,7 +1961,9 @@ kbd {
   gap: 10px;
   flex-wrap: wrap;
   font-size: 13px;
-  padding: 7px 0;
+  /* Each row is a phrase and its result, so it needs enough room to read as one
+     unit; at 7px the rows ran together into a block of text. */
+  padding: 9px 0;
   border-bottom: 1px solid var(--border);
 }
 
