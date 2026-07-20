@@ -31,8 +31,13 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
-/// Strip a leading `[00:00:09.000 --> 00:00:12.000]` marker from one CLI output line.
-/// Returns the line unchanged if it doesn't carry one.
+/// Spaces whisper.cpp's CLI prints between the `[start --> end]` marker and the segment text.
+/// The segment carries its own leading space on top of these, and that one is meaningful —
+/// see `normalize_transcript` — so exactly this much padding is removed and no more.
+const CLI_MARKER_PAD: usize = 2;
+
+/// Strip a leading `[00:00:09.000 --> 00:00:12.000]` marker, plus the CLI's fixed padding,
+/// from one output line. Returns the line unchanged if it doesn't carry a marker.
 fn strip_timestamp_marker(line: &str) -> &str {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('[') {
@@ -41,7 +46,15 @@ fn strip_timestamp_marker(line: &str) -> &str {
     match trimmed.find(']') {
         // Only treat it as a marker if it actually spans a range, so dictated text that
         // legitimately begins with a bracket survives.
-        Some(end) if trimmed[..end].contains("-->") => &trimmed[end + 1..],
+        Some(end) if trimmed[..end].contains("-->") => {
+            let rest = &trimmed[end + 1..];
+            let pad = rest
+                .char_indices()
+                .take(CLI_MARKER_PAD)
+                .take_while(|&(_, c)| c == ' ')
+                .count();
+            &rest[pad..]
+        }
         _ => line,
     }
 }
@@ -55,17 +68,41 @@ fn strip_timestamp_marker(line: &str) -> &str {
 /// `cleanup_text` would collapse these breaks anyway, but the command-bearing path in
 /// `recorder::stop_and_transcribe` deliberately skips cleanup, so without this a dictation
 /// containing a command would paste with a line break at every segment boundary.
+///
+/// # Segments are concatenated, not space-joined
+///
+/// Whisper prefixes a segment with a space when it starts a new word, and omits that space
+/// when the segment continues the previous word — a word can straddle a segment boundary.
+/// Verified against the warm server's raw output: every ordinary segment came back as
+/// `' continuous tape.'`, `' Item 3 is round robin.'`, leading space included.
+///
+/// So the separator is already in the data. Trimming each segment and re-joining with a space
+/// discards that distinction and splits any straddling word — which is how "multilingual" was
+/// pasted as "mult ilingual". Concatenating verbatim and collapsing whitespace afterwards
+/// preserves both cases.
 pub fn normalize_transcript(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+    let mut joined = String::with_capacity(raw.len());
     for line in raw.lines() {
-        let body = strip_timestamp_marker(line).trim();
-        if body.is_empty() {
+        let body = strip_timestamp_marker(line);
+        if body.trim().is_empty() {
             continue;
         }
-        if !out.is_empty() {
-            out.push(' ');
+        joined.push_str(body);
+    }
+
+    // Collapse whitespace runs (including the newlines we just dropped) to single spaces.
+    let mut out = String::with_capacity(joined.len());
+    let mut pending_space = false;
+    for ch in joined.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch);
         }
-        out.push_str(body);
     }
     out
 }
@@ -412,11 +449,33 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_transcript_keeps_word_split_across_segments() {
+        // A word can straddle a segment boundary. Whisper signals it by omitting the leading
+        // space on the continuation, so the two halves must be concatenated, not space-joined.
+        // Space-joining here is what pasted "multilingual" as "mult ilingual".
+        let server = " This is to test the medium mult\nilingual model.";
+        assert_eq!(
+            normalize_transcript(server),
+            "This is to test the medium multilingual model."
+        );
+
+        // Same case through the CLI, where the marker and its two-space pad precede the
+        // segment's own (here absent) leading space.
+        let cli = "[00:00:00.000 --> 00:00:03.000]   the medium mult\n\
+                   [00:00:03.000 --> 00:00:04.200]  ilingual model.";
+        assert_eq!(normalize_transcript(cli), "the medium multilingual model.");
+    }
+
+    #[test]
     fn test_normalize_transcript_edges() {
         assert_eq!(normalize_transcript(""), "");
         assert_eq!(normalize_transcript("   \n\n  \n"), "");
-        // Blank segments are dropped rather than becoming double spaces.
-        assert_eq!(normalize_transcript("one\n\n\ntwo"), "one two");
+        // Blank segments are dropped rather than becoming double spaces. Real segments carry
+        // their own leading space, which is what separates them.
+        assert_eq!(normalize_transcript(" one\n\n\n two"), "one two");
+        // Without that leading space the two are one word, by the same rule that keeps
+        // "mult" + "ilingual" together.
+        assert_eq!(normalize_transcript(" one\ntwo"), "onetwo");
         // A marker with no text after it contributes nothing.
         assert_eq!(
             normalize_transcript("[00:00:00.000 --> 00:00:04.000]\nreal text"),
