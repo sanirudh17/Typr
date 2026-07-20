@@ -90,6 +90,18 @@ fn hint_matches(token_lower: &str, hint: &str) -> bool {
     if is_common_word(token_lower) {
         return false; // never overwrite an ordinary word
     }
+    // A contraction is ordinary English, and `common_words.txt` carries no apostrophes at
+    // all, so the check above can never protect one. Dictionary hints are technical terms
+    // and names, which essentially never contain an apostrophe — so a contraction matching
+    // a non-contraction hint is a false positive, not a mis-hearing.
+    //
+    // This is not hypothetical: "let's" was rewritten to the hint "notes" mid-dictation.
+    // Both key to the same phonetic skeleton (L320 / N320 -> "320"), the first-letter
+    // mismatch widened the budget to 3 edits, and levenshtein("let's", "notes") is exactly
+    // 3 — so a five-letter word matched with three of five characters different.
+    if token_lower.contains('\'') && !hint_lower.contains('\'') {
+        return false;
+    }
     // Phonetic gate, first-letter-insensitive: mis-hearings often drop or swap the
     // first sound ("Ori"/"Hori" for "Tauri"), so a full-key match OR a match on the
     // consonant-digit skeleton (key minus its leading letter) passes.
@@ -181,6 +193,38 @@ mod tests {
         // Empty / non-alpha input.
         assert_eq!(soundex(""), "");
         assert_eq!(soundex("123"), "");
+    }
+
+    #[test]
+    fn test_contraction_never_corrected_to_hint() {
+        // The real regression: "let's" was rewritten to the hint "notes". Both key to the
+        // same phonetic skeleton and the edit distance sat exactly on the widened budget.
+        assert!(!hint_matches("let's", "notes"));
+        // The same shape for other everyday contractions, none of which appear in
+        // common_words.txt (it contains no apostrophes at all).
+        assert!(!hint_matches("that's", "types"));
+        assert!(!hint_matches("it's", "its"));
+        // The apostrophe-less spellings are already covered: "dont", "its" and "thats" are
+        // all listed in common_words.txt, so `is_common_word` rejects them before this guard
+        // is reached. It is specifically the apostrophe forms the word list cannot protect.
+        assert!(is_common_word("dont") && is_common_word("its") && is_common_word("thats"));
+
+        // The guard is one-directional. A hint that IS a contraction can still be matched
+        // from a token that dropped the apostrophe — a genuine mis-transcription, and not
+        // an ordinary word, so nothing rejects it earlier.
+        assert!(hint_matches("oreilly", "O'Reilly"));
+
+        // End to end, against the exact hint list that caused the regression.
+        let hints: Vec<String> = ["Tauri", "Rust", "notes", "claude", "Typr", "sanir"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            correct_vocabulary("Okay, let's move on to the branch", &hints),
+            "Okay, let's move on to the branch"
+        );
+        // And the correction it exists to do still happens.
+        assert_eq!(correct_vocabulary("the ori framework", &hints), "the Tauri framework");
     }
 
     #[test]

@@ -31,6 +31,24 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
+/// Non-speech markers whisper.cpp prints for segments it decodes as silence or noise.
+///
+/// These surfaced once `--no-timestamps` was removed — that flag had been suppressing them —
+/// and `[BLANK_AUDIO]` was observed pasted into a real dictation. They are annotations about
+/// the audio, never words the user spoke, so they are dropped.
+///
+/// This is an explicit list rather than a pattern like `[A-Z_]+` on purpose: dictated text
+/// can legitimately contain a bracketed capitalised token (`[TODO]`), and a pattern would eat
+/// it. Only markers we know the engine emits are removed.
+const NON_SPEECH_MARKERS: [&str; 6] = [
+    "[BLANK_AUDIO]",
+    "[SOUND]",
+    "[MUSIC]",
+    "[NOISE]",
+    "[LAUGHTER]",
+    "[APPLAUSE]",
+];
+
 /// Spaces whisper.cpp's CLI prints between the `[start --> end]` marker and the segment text.
 /// The segment carries its own leading space on top of these, and that one is meaningful —
 /// see `normalize_transcript` — so exactly this much padding is removed and no more.
@@ -83,11 +101,16 @@ fn strip_timestamp_marker(line: &str) -> &str {
 pub fn normalize_transcript(raw: &str) -> String {
     let mut joined = String::with_capacity(raw.len());
     for line in raw.lines() {
-        let body = strip_timestamp_marker(line);
+        let mut body = strip_timestamp_marker(line).to_string();
+        for marker in NON_SPEECH_MARKERS {
+            if body.contains(marker) {
+                body = body.replace(marker, "");
+            }
+        }
         if body.trim().is_empty() {
             continue;
         }
-        joined.push_str(body);
+        joined.push_str(&body);
     }
 
     // Collapse whitespace runs (including the newlines we just dropped) to single spaces.
@@ -464,6 +487,25 @@ mod tests {
         let cli = "[00:00:00.000 --> 00:00:03.000]   the medium mult\n\
                    [00:00:03.000 --> 00:00:04.200]  ilingual model.";
         assert_eq!(normalize_transcript(cli), "the medium multilingual model.");
+    }
+
+    #[test]
+    fn test_normalize_transcript_drops_non_speech_markers() {
+        // Observed in a real dictation once `--no-timestamps` was removed: the marker was
+        // pasted verbatim at the end of the user's sentence.
+        assert_eq!(
+            normalize_transcript(" I want to know the status [BLANK_AUDIO]"),
+            "I want to know the status"
+        );
+        // A marker occupying its whole segment leaves nothing behind — no stray space.
+        assert_eq!(
+            normalize_transcript(" first part.\n [BLANK_AUDIO]\n second part."),
+            "first part. second part."
+        );
+        // Other engine annotations go too.
+        assert_eq!(normalize_transcript(" hello [MUSIC] world"), "hello world");
+        // But a bracketed word the user actually dictated must survive.
+        assert_eq!(normalize_transcript("[TODO] fix this"), "[TODO] fix this");
     }
 
     #[test]
