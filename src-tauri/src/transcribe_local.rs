@@ -31,6 +31,45 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
+/// Strip a leading `[00:00:09.000 --> 00:00:12.000]` marker from one CLI output line.
+/// Returns the line unchanged if it doesn't carry one.
+fn strip_timestamp_marker(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('[') {
+        return line;
+    }
+    match trimmed.find(']') {
+        // Only treat it as a marker if it actually spans a range, so dictated text that
+        // legitimately begins with a bracket survives.
+        Some(end) if trimmed[..end].contains("-->") => &trimmed[end + 1..],
+        _ => line,
+    }
+}
+
+/// Flatten Whisper's per-segment output into the single line the rest of the pipeline expects.
+///
+/// Whisper emits one segment per line. The warm server returns them clean; the CLI sidecars
+/// prefix each with a timestamp marker (we no longer pass `--no-timestamps` — see the note in
+/// `whisper_server::ensure_running` for why suppressing timestamps deletes speech).
+///
+/// `cleanup_text` would collapse these breaks anyway, but the command-bearing path in
+/// `recorder::stop_and_transcribe` deliberately skips cleanup, so without this a dictation
+/// containing a command would paste with a line break at every segment boundary.
+pub fn normalize_transcript(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let body = strip_timestamp_marker(line).trim();
+        if body.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(body);
+    }
+    out
+}
+
 /// Transcribe with the local Whisper model.
 ///
 /// # The `prompt` argument is accepted and deliberately NOT used
@@ -160,7 +199,7 @@ pub async fn transcribe_local(
                     text: String,
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
-                    let text = inf_res.text.trim().to_string();
+                    let text = normalize_transcript(&inf_res.text);
                     crate::whisper_server::note_activity();
                     let elapsed = http_start.elapsed();
                     println!(
@@ -194,7 +233,9 @@ pub async fn transcribe_local(
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
         audio_path.to_str().unwrap().to_string(),
-        "--no-timestamps".to_string(),
+        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
+        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
+        // result, which `normalize_transcript` strips.
         "-t".to_string(),
         cuda_threads,
         // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
@@ -222,7 +263,7 @@ pub async fn transcribe_local(
 
     match gpu_result {
         Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
             println!(
                 "[Typr] GPU (CUDA) Whisper completed in {:?}. Output: {}",
                 started_gpu.elapsed(),
@@ -257,7 +298,9 @@ pub async fn transcribe_local(
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
         audio_path.to_str().unwrap().to_string(),
-        "--no-timestamps".to_string(),
+        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
+        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
+        // result, which `normalize_transcript` strips.
         "-t".to_string(),
         cpu_threads,
         // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
@@ -283,7 +326,7 @@ pub async fn transcribe_local(
 
     match cpu_output {
         Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
             println!(
                 "[Typr] CPU Fallback Whisper completed in {:?}. Output: {}",
                 started_cpu.elapsed(),
@@ -334,6 +377,50 @@ mod tests {
         assert_eq!(
             model_download_url("medium.en-q5_0"),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin"
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_strips_cli_timestamps() {
+        // The CLI shape once `--no-timestamps` is gone.
+        let raw = "\n[00:00:00.000 --> 00:00:04.000]   This is a test.\n\
+                   [00:00:04.000 --> 00:00:09.000]   Item 1 is first come first serve.\n";
+        assert_eq!(
+            normalize_transcript(raw),
+            "This is a test. Item 1 is first come first serve."
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_flattens_server_segments() {
+        // The warm server returns clean text, one segment per line, no markers. Those breaks
+        // must still collapse: the command-bypass path skips `cleanup_text`, so a stray
+        // newline here would land in the pasted output.
+        let raw = " This is a transcription accuracy test\n recorded in a single take.\n Item 1.\n";
+        assert_eq!(
+            normalize_transcript(raw),
+            "This is a transcription accuracy test recorded in a single take. Item 1."
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_preserves_dictated_brackets() {
+        // A line that genuinely starts with a bracket is not a timestamp marker and must
+        // survive intact — only `[start --> end]` is stripped.
+        assert_eq!(normalize_transcript("[TODO] fix this"), "[TODO] fix this");
+        assert_eq!(normalize_transcript("[draft] and [final]"), "[draft] and [final]");
+    }
+
+    #[test]
+    fn test_normalize_transcript_edges() {
+        assert_eq!(normalize_transcript(""), "");
+        assert_eq!(normalize_transcript("   \n\n  \n"), "");
+        // Blank segments are dropped rather than becoming double spaces.
+        assert_eq!(normalize_transcript("one\n\n\ntwo"), "one two");
+        // A marker with no text after it contributes nothing.
+        assert_eq!(
+            normalize_transcript("[00:00:00.000 --> 00:00:04.000]\nreal text"),
+            "real text"
         );
     }
 

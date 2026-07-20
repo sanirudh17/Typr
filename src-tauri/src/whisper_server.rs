@@ -174,7 +174,25 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
-        "-nt".to_string(),
+        // No `-nt` / `--no-timestamps`. It silently deletes speech.
+        //
+        // Measured on a real 62s dictation containing a seven-item numbered list, same audio
+        // and same flags, varying only this one:
+        //
+        //     model             -bs 5   -bs 5 -nt   -bs 1   -bs 1 -nt
+        //     medium.en-q5_0      7         0         7         0
+        //     medium              7         0         7         0
+        //     small               7         6         7         0
+        //     small.en-q5_1       7         6         7         0
+        //
+        // Every model returns all seven items without it, at either beam size, and collapses
+        // with it. Timestamp tokens are what the decoder uses to segment audio; suppressing
+        // them removes its means of deciding a segment has ended, so it terminates early and
+        // the rest of the window is dropped without a trace.
+        //
+        // The server's JSON `text` needs no parsing as a result — it comes back clean, one
+        // segment per line — but `normalize_transcript` still flattens those breaks so the
+        // command-bypass path (which skips `cleanup_text`) doesn't paste stray newlines.
         "-l".to_string(),
         "en".to_string(),
     ];
