@@ -161,8 +161,16 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "8080".to_string(),
         "-t".to_string(),
         threads,
+        // Beam search, whisper.cpp's own default. `-bs 1` is greedy decoding, and greedy
+        // decoding silently deletes enumerated speech: measured on a real 62s dictation
+        // containing a seven-item numbered list, `-bs 1` returned ZERO of the seven items
+        // across every run, while `-bs 5` returned all seven. Isolated one flag at a time —
+        // `-nf` and `-mc 0` made no difference to this, only `-bs` did. Greedy decoding takes
+        // the single highest-probability token at each step, so once it commits to ending a
+        // segment early on repetitive input ("Item 1 is... Item 2 is...") it has no way back;
+        // a beam keeps the alternative alive and recovers. Costs ~2.8s on a 62s clip.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),

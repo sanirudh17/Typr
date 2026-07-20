@@ -197,8 +197,10 @@ pub async fn transcribe_local(
         "--no-timestamps".to_string(),
         "-t".to_string(),
         cuda_threads,
+        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
+        // `-bs 1` silently drops enumerated speech.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
@@ -258,8 +260,9 @@ pub async fn transcribe_local(
         "--no-timestamps".to_string(),
         "-t".to_string(),
         cpu_threads,
+        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
