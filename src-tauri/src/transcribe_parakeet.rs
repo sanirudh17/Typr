@@ -65,6 +65,18 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, 
     // Two threads, matching the reference implementations. More does not help a 0.6B model on
     // a typical laptop and competes with whatever the user is actually doing.
     config.model_config.num_threads = 2;
+    // Beam search instead of the library-default greedy decode. Greedy commits to the single
+    // highest-probability token at every step; beam search keeps several hypotheses and picks
+    // the best-scoring whole sequence, which is the correct decode for a transducer.
+    //
+    // Measured on the three real 62s dictations (v3-int8, chunking held constant): greedy
+    // scored 41/48, beam width 8 scored 42/48 and was never worse than greedy on any single
+    // sample, at no measurable time cost (~10.1s vs ~9.9s, inside run-to-run variance). Width 4
+    // and a blank penalty both scored *below* greedy, so 8 is the width, not 4. The gain is
+    // small — the stubborn errors ("multi-level"->"multiple", "dining"->"dynamic") are int8
+    // acoustic mishearings that no decoder setting recovers — but it is real and free.
+    config.decoding_method = Some("modified_beam_search".to_string());
+    config.max_active_paths = 8;
     sherpa_onnx::OfflineRecognizer::create(&config)
         .ok_or_else(|| "Failed to load the Parakeet model.".to_string())
 }
