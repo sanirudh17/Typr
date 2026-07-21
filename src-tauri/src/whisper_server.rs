@@ -145,7 +145,9 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
     // instantly on Windows: binding too early makes the new server exit(1), and the health
     // check false-positives against the dying old process (the `exited code 1` +
     // `have None` restart churn seen when switching models).
-    stop_server().await;
+    // Inner (lock-free): we already hold ENSURE_LOCK. Calling the public stop_server here
+    // would try to re-acquire it and deadlock.
+    stop_server_inner().await;
     wait_for_port_free().await;
 
     println!(
@@ -294,8 +296,10 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
     }
 }
 
-/// Terminates the persistent Whisper server process if it is running.
-pub async fn stop_server() {
+/// Terminates the persistent Whisper server process if it is running. Does NOT acquire
+/// `ENSURE_LOCK`: it is called from inside `ensure_running`, which already holds it, so
+/// locking here would deadlock. External callers must use `stop_server` (below) instead.
+async fn stop_server_inner() {
     let child = {
         let mut child_guard = SERVER_CHILD.lock().unwrap();
         child_guard.take()
@@ -308,6 +312,20 @@ pub async fn stop_server() {
     // Clear the current-pid marker too, so the killed server's own Terminated
     // handler treats itself as stale and doesn't race a replacement's state.
     *CURRENT_PID.lock().unwrap() = None;
+}
+
+/// Stop the server from OUTSIDE a (re)start — engine switches, the idle reaper, app shutdown.
+///
+/// Acquires `ENSURE_LOCK` first, so a stop can never land in the middle of an `ensure_running`
+/// that is spawning or health-checking a new server. Without this, a fast engine toggle let
+/// the detached settings-handler stop race a concurrent restart: it killed a server mid model
+/// load (whisper.cpp: "not all tensors loaded ... expected 947, got 24", exit 3) or tripped its
+/// health check. Serialising through the same lock means each switch fully completes before the
+/// next begins. `ensure_running` must NOT call this — it holds the lock and calls
+/// `stop_server_inner` directly.
+pub async fn stop_server() {
+    let _ensure_guard = ENSURE_LOCK.lock().await;
+    stop_server_inner().await;
 }
 
 /// After stopping the server, poll until the port stops accepting connections — i.e. the old
@@ -384,6 +402,14 @@ mod tests {
         assert!(!should_stop_on_engine_switch("parakeet", "local"));
         assert!(!should_stop_on_engine_switch("cloud", "local"));
         assert!(!should_stop_on_engine_switch("parakeet", "cloud"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_server_completes_without_a_running_server() {
+        // Regression guard for the ENSURE_LOCK serialisation: the public stop_server must
+        // acquire the lock, do its work, and return — not deadlock — even with no server up.
+        stop_server().await;
+        assert!(!is_server_running());
     }
 
     #[test]
