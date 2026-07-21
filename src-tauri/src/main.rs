@@ -183,6 +183,7 @@ async fn save_settings(
     let mic_changed = old_settings.microphone != settings.microphone;
     let engine_changed = old_settings.engine != settings.engine;
     let model_changed = old_settings.whisper_model != settings.whisper_model;
+    let parakeet_model_changed = old_settings.parakeet_model != settings.parakeet_model;
 
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings.clone();
@@ -209,27 +210,49 @@ async fn save_settings(
     let app_dir_clone = state.app_dir.clone();
     let settings_clone = settings.clone();
     tauri::async_runtime::spawn(async move {
-        if settings_clone.engine == "local" {
-            // Start/restart if switched from cloud, or if model changed
-            if engine_changed || model_changed {
-                let model_path = app_dir_clone.join(transcribe_local::model_filename(&settings_clone.whisper_model));
-                println!("[Typr] On-demand engine/model change: ensuring Whisper server is running with {:?}", model_path);
-                if let Err(e) = typr_lib::whisper_server::ensure_running(&app_clone, &model_path).await {
-                    eprintln!("[Typr] Failed to start local Whisper HTTP server: {}", e);
-                }
-            }
-        } else if typr_lib::whisper_server::should_stop_on_engine_switch(
+        // If we just left the Whisper engine (for Parakeet or Cloud), stop the CUDA server now
+        // to free VRAM instead of waiting on the idle reaper. Previously only the Cloud switch
+        // did this, so Whisper -> Parakeet kept the dGPU engaged for ~3 minutes.
+        if typr_lib::whisper_server::should_stop_on_engine_switch(
             &old_settings.engine,
             &settings_clone.engine,
         ) {
-            // Left Whisper for Parakeet (CPU) or Cloud (remote): stop the CUDA server now to
-            // free VRAM instead of waiting on the idle reaper. Previously only the Cloud
-            // switch did this, so Whisper -> Parakeet kept the dGPU engaged for ~3 minutes.
             println!(
                 "[Typr] Leaving Whisper for '{}': stopping Whisper HTTP server to free VRAM...",
                 settings_clone.engine
             );
             typr_lib::whisper_server::stop_server().await;
+        }
+
+        // Warm the engine we switched TO, so the first dictation isn't stalled by a cold load.
+        match settings_clone.engine.as_str() {
+            "local" => {
+                if engine_changed || model_changed {
+                    let model_path = app_dir_clone
+                        .join(transcribe_local::model_filename(&settings_clone.whisper_model));
+                    println!("[Typr] On-demand engine/model change: ensuring Whisper server is running with {:?}", model_path);
+                    if let Err(e) = typr_lib::whisper_server::ensure_running(&app_clone, &model_path).await {
+                        eprintln!("[Typr] Failed to start local Whisper HTTP server: {}", e);
+                    }
+                }
+            }
+            "parakeet" => {
+                if engine_changed || parakeet_model_changed {
+                    // Parakeet loads its ONNX model (~4-6s) into a cached recognizer on first
+                    // use. Prewarm it now — in a blocking task, since it is CPU-bound — so the
+                    // first dictation after selecting Parakeet isn't stalled by that build. This
+                    // is Parakeet's analogue of the Whisper server pre-start above.
+                    let model_dir = app_dir_clone
+                        .join(typr_lib::transcribe_parakeet::model_dir_name(&settings_clone.parakeet_model));
+                    println!("[Typr] Engine/model change to Parakeet: prewarming {:?}", model_dir);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = typr_lib::transcribe_parakeet::prewarm(&model_dir) {
+                            eprintln!("[Typr] Parakeet prewarm failed: {}", e);
+                        }
+                    });
+                }
+            }
+            _ => {}
         }
     });
 
@@ -920,6 +943,16 @@ fn main() {
                     if let Err(e) = typr_lib::whisper_server::ensure_running(&handle_for_server, &model_path).await {
                         eprintln!("[Typr] Failed to pre-start local Whisper HTTP server on startup: {}", e);
                     }
+                } else if settings.engine == "parakeet" {
+                    // Same reasoning as the Whisper pre-start: load the Parakeet model now so the
+                    // first dictation isn't stalled ~4-6s by a cold build. Blocking/CPU-bound.
+                    let model_dir = state_clone.app_dir.join(typr_lib::transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+                    println!("[Typr] Pre-warming Parakeet model on startup: {:?}", model_dir);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = typr_lib::transcribe_parakeet::prewarm(&model_dir) {
+                            eprintln!("[Typr] Failed to pre-warm Parakeet model on startup: {}", e);
+                        }
+                    });
                 }
             });
 

@@ -81,11 +81,42 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, 
         .ok_or_else(|| "Failed to load the Parakeet model.".to_string())
 }
 
-/// Drop the cached model, freeing ~640 MB. Called when switching away from this engine.
+/// Drop the cached model, freeing ~640 MB. NOT currently wired up: the model is deliberately
+/// kept loaded across engine switches so returning to Parakeet stays fast (rebuilding costs
+/// ~4-6s). Retained for a future memory-pressure path that would trade that latency back.
 pub fn release_model() {
     if let Ok(mut guard) = RECOGNIZER.lock() {
         *guard = None;
     }
+}
+
+/// Build and cache the recognizer WITHOUT transcribing, so the first dictation after Parakeet
+/// is selected doesn't pay the ~4-6s model load. That load otherwise happens lazily inside the
+/// first `transcribe_parakeet` and is invisible in the "completed in" log (whose timer starts
+/// after the build) — it was the "first dictation 8s, second 1.5s" bug. Idempotent: a no-op
+/// when the recognizer is already built for `model_dir`. Blocking and CPU-bound — call it from a
+/// blocking task, never on an async worker.
+pub fn prewarm(model_dir: &Path) -> Result<(), String> {
+    if !model_files_present(model_dir) {
+        return Err(format!(
+            "Parakeet model not found in {}. Download it from the Engine tab.",
+            model_dir.display()
+        ));
+    }
+    let mut guard = RECOGNIZER
+        .lock()
+        .map_err(|_| "Parakeet model lock poisoned; restart Typr.".to_string())?;
+    let needs_build = !matches!(&*guard, Some((dir, _)) if dir == model_dir);
+    if needs_build {
+        let started = std::time::Instant::now();
+        println!(
+            "[Typr] Prewarming Parakeet model {}...",
+            model_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        );
+        *guard = Some((model_dir.to_path_buf(), build_recognizer(model_dir)?));
+        println!("[Typr] Parakeet model ready in {:?}", started.elapsed());
+    }
+    Ok(())
 }
 
 /// Transcribe a 16 kHz mono WAV. `audio.rs` already produces exactly that format.
