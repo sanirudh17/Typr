@@ -161,12 +161,38 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "8080".to_string(),
         "-t".to_string(),
         threads,
+        // Beam search, whisper.cpp's own default. `-bs 1` is greedy decoding, and greedy
+        // decoding silently deletes enumerated speech: measured on a real 62s dictation
+        // containing a seven-item numbered list, `-bs 1` returned ZERO of the seven items
+        // across every run, while `-bs 5` returned all seven. Isolated one flag at a time —
+        // `-nf` and `-mc 0` made no difference to this, only `-bs` did. Greedy decoding takes
+        // the single highest-probability token at each step, so once it commits to ending a
+        // segment early on repetitive input ("Item 1 is... Item 2 is...") it has no way back;
+        // a beam keeps the alternative alive and recovers. Costs ~2.8s on a 62s clip.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
-        "-nt".to_string(),
+        // No `-nt` / `--no-timestamps`. It silently deletes speech.
+        //
+        // Measured on a real 62s dictation containing a seven-item numbered list, same audio
+        // and same flags, varying only this one:
+        //
+        //     model             -bs 5   -bs 5 -nt   -bs 1   -bs 1 -nt
+        //     medium.en-q5_0      7         0         7         0
+        //     medium              7         0         7         0
+        //     small               7         6         7         0
+        //     small.en-q5_1       7         6         7         0
+        //
+        // Every model returns all seven items without it, at either beam size, and collapses
+        // with it. Timestamp tokens are what the decoder uses to segment audio; suppressing
+        // them removes its means of deciding a segment has ended, so it terminates early and
+        // the rest of the window is dropped without a trace.
+        //
+        // The server's JSON `text` needs no parsing as a result — it comes back clean, one
+        // segment per line — but `normalize_transcript` still flattens those breaks so the
+        // command-bypass path (which skips `cleanup_text`) doesn't paste stray newlines.
         "-l".to_string(),
         "en".to_string(),
     ];

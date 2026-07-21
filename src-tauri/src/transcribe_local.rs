@@ -31,11 +31,130 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
+/// Non-speech markers whisper.cpp prints for segments it decodes as silence or noise.
+///
+/// These surfaced once `--no-timestamps` was removed — that flag had been suppressing them —
+/// and `[BLANK_AUDIO]` was observed pasted into a real dictation. They are annotations about
+/// the audio, never words the user spoke, so they are dropped.
+///
+/// This is an explicit list rather than a pattern like `[A-Z_]+` on purpose: dictated text
+/// can legitimately contain a bracketed capitalised token (`[TODO]`), and a pattern would eat
+/// it. Only markers we know the engine emits are removed.
+const NON_SPEECH_MARKERS: [&str; 6] = [
+    "[BLANK_AUDIO]",
+    "[SOUND]",
+    "[MUSIC]",
+    "[NOISE]",
+    "[LAUGHTER]",
+    "[APPLAUSE]",
+];
+
+/// Spaces whisper.cpp's CLI prints between the `[start --> end]` marker and the segment text.
+/// The segment carries its own leading space on top of these, and that one is meaningful —
+/// see `normalize_transcript` — so exactly this much padding is removed and no more.
+const CLI_MARKER_PAD: usize = 2;
+
+/// Strip a leading `[00:00:09.000 --> 00:00:12.000]` marker, plus the CLI's fixed padding,
+/// from one output line. Returns the line unchanged if it doesn't carry a marker.
+fn strip_timestamp_marker(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('[') {
+        return line;
+    }
+    match trimmed.find(']') {
+        // Only treat it as a marker if it actually spans a range, so dictated text that
+        // legitimately begins with a bracket survives.
+        Some(end) if trimmed[..end].contains("-->") => {
+            let rest = &trimmed[end + 1..];
+            let pad = rest
+                .char_indices()
+                .take(CLI_MARKER_PAD)
+                .take_while(|&(_, c)| c == ' ')
+                .count();
+            &rest[pad..]
+        }
+        _ => line,
+    }
+}
+
+/// Flatten Whisper's per-segment output into the single line the rest of the pipeline expects.
+///
+/// Whisper emits one segment per line. The warm server returns them clean; the CLI sidecars
+/// prefix each with a timestamp marker (we no longer pass `--no-timestamps` — see the note in
+/// `whisper_server::ensure_running` for why suppressing timestamps deletes speech).
+///
+/// `cleanup_text` would collapse these breaks anyway, but the command-bearing path in
+/// `recorder::stop_and_transcribe` deliberately skips cleanup, so without this a dictation
+/// containing a command would paste with a line break at every segment boundary.
+///
+/// # Segments are concatenated, not space-joined
+///
+/// Whisper prefixes a segment with a space when it starts a new word, and omits that space
+/// when the segment continues the previous word — a word can straddle a segment boundary.
+/// Verified against the warm server's raw output: every ordinary segment came back as
+/// `' continuous tape.'`, `' Item 3 is round robin.'`, leading space included.
+///
+/// So the separator is already in the data. Trimming each segment and re-joining with a space
+/// discards that distinction and splits any straddling word — which is how "multilingual" was
+/// pasted as "mult ilingual". Concatenating verbatim and collapsing whitespace afterwards
+/// preserves both cases.
+pub fn normalize_transcript(raw: &str) -> String {
+    let mut joined = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let mut body = strip_timestamp_marker(line).to_string();
+        for marker in NON_SPEECH_MARKERS {
+            if body.contains(marker) {
+                body = body.replace(marker, "");
+            }
+        }
+        if body.trim().is_empty() {
+            continue;
+        }
+        joined.push_str(&body);
+    }
+
+    // Collapse whitespace runs (including the newlines we just dropped) to single spaces.
+    let mut out = String::with_capacity(joined.len());
+    let mut pending_space = false;
+    for ch in joined.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Transcribe with the local Whisper model.
+///
+/// # The `prompt` argument is accepted and deliberately NOT used
+///
+/// It carries the dictionary bias terms, and passing them to Whisper as an `initial_prompt`
+/// makes the model silently drop speech.
+///
+/// Measured on `ggml-medium.en-q5_0` with a 77-second dictation containing a seven-item
+/// numbered list. With no prompt it transcribed all seven items, twice in a row. With a prompt
+/// it returned two of seven and dropped the rest without a trace — and that held for the full
+/// dictionary, for three terms, for a prose-style sentence, and for the single word "Tauri".
+/// Neither length nor phrasing mattered; only presence.
+///
+/// The lost words are not mangled, they are absent, and nothing in the output suggests anything
+/// is missing. Silent deletion is worse than no bias at all, so no bias is applied here.
+///
+/// The dictionary still works on this path: `vocab_correct` fixes its terms after
+/// transcription rather than biasing before it. Groq is unaffected and still receives the
+/// prompt. The parameter stays so the engine signatures match and re-enabling is one line if
+/// this is ever fixed upstream.
 pub async fn transcribe_local(
     app: &AppHandle,
     model_path: &PathBuf,
     audio_path: &PathBuf,
-    prompt: &str,
+    _prompt: &str,
 ) -> Result<String, String> {
     if !model_path.exists() {
         return Err("Whisper model not found. Please download a model first.".to_string());
@@ -79,14 +198,12 @@ pub async fn transcribe_local(
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
                 .unwrap();
-            let mut form = reqwest::multipart::Form::new()
+            // NO PROMPT. See `prompt` on the function signature — passing dictionary hints as
+            // an initial prompt makes this model silently skip speech.
+            reqwest::multipart::Form::new()
                 .part("file", part)
                 .text("temperature", "0.0")
-                .text("response_format", "json");
-            if !prompt.is_empty() {
-                form = form.text("prompt", prompt.to_string());
-            }
-            form
+                .text("response_format", "json")
         };
 
         // Guard the hot path on model identity: reuse the warm server only if it is
@@ -142,7 +259,7 @@ pub async fn transcribe_local(
                     text: String,
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
-                    let text = inf_res.text.trim().to_string();
+                    let text = normalize_transcript(&inf_res.text);
                     crate::whisper_server::note_activity();
                     let elapsed = http_start.elapsed();
                     println!(
@@ -171,16 +288,20 @@ pub async fn transcribe_local(
     );
     let started_gpu = Instant::now();
 
-    let mut cuda_cmd_args = vec![
+    let cuda_cmd_args = vec![
         "-m".to_string(),
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
         audio_path.to_str().unwrap().to_string(),
-        "--no-timestamps".to_string(),
+        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
+        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
+        // result, which `normalize_transcript` strips.
         "-t".to_string(),
         cuda_threads,
+        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
+        // `-bs 1` silently drops enumerated speech.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
@@ -188,10 +309,8 @@ pub async fn transcribe_local(
         "en".to_string(),
     ];
 
-    if !prompt.is_empty() {
-        cuda_cmd_args.push("--prompt".to_string());
-        cuda_cmd_args.push(prompt.to_string());
-    }
+    // No --prompt: see the note on the `prompt` parameter. The sidecars run the same model
+    // as the server and skip speech the same way.
 
     let gpu_result = app
         .shell()
@@ -204,7 +323,7 @@ pub async fn transcribe_local(
 
     match gpu_result {
         Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
             println!(
                 "[Typr] GPU (CUDA) Whisper completed in {:?}. Output: {}",
                 started_gpu.elapsed(),
@@ -234,16 +353,19 @@ pub async fn transcribe_local(
     );
     let started_cpu = Instant::now();
 
-    let mut cpu_cmd_args = vec![
+    let cpu_cmd_args = vec![
         "-m".to_string(),
         model_path.to_str().unwrap().to_string(),
         "-f".to_string(),
         audio_path.to_str().unwrap().to_string(),
-        "--no-timestamps".to_string(),
+        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
+        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
+        // result, which `normalize_transcript` strips.
         "-t".to_string(),
         cpu_threads,
+        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
         "-bs".to_string(),
-        "1".to_string(),
+        "5".to_string(),
         "-mc".to_string(),
         "0".to_string(),
         "-nf".to_string(),
@@ -251,10 +373,7 @@ pub async fn transcribe_local(
         "en".to_string(),
     ];
 
-    if !prompt.is_empty() {
-        cpu_cmd_args.push("--prompt".to_string());
-        cpu_cmd_args.push(prompt.to_string());
-    }
+    // No --prompt: see the note on the `prompt` parameter.
 
     let cpu_output = app
         .shell()
@@ -267,7 +386,7 @@ pub async fn transcribe_local(
 
     match cpu_output {
         Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
             println!(
                 "[Typr] CPU Fallback Whisper completed in {:?}. Output: {}",
                 started_cpu.elapsed(),
@@ -318,6 +437,91 @@ mod tests {
         assert_eq!(
             model_download_url("medium.en-q5_0"),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin"
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_strips_cli_timestamps() {
+        // The CLI shape once `--no-timestamps` is gone.
+        let raw = "\n[00:00:00.000 --> 00:00:04.000]   This is a test.\n\
+                   [00:00:04.000 --> 00:00:09.000]   Item 1 is first come first serve.\n";
+        assert_eq!(
+            normalize_transcript(raw),
+            "This is a test. Item 1 is first come first serve."
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_flattens_server_segments() {
+        // The warm server returns clean text, one segment per line, no markers. Those breaks
+        // must still collapse: the command-bypass path skips `cleanup_text`, so a stray
+        // newline here would land in the pasted output.
+        let raw = " This is a transcription accuracy test\n recorded in a single take.\n Item 1.\n";
+        assert_eq!(
+            normalize_transcript(raw),
+            "This is a transcription accuracy test recorded in a single take. Item 1."
+        );
+    }
+
+    #[test]
+    fn test_normalize_transcript_preserves_dictated_brackets() {
+        // A line that genuinely starts with a bracket is not a timestamp marker and must
+        // survive intact — only `[start --> end]` is stripped.
+        assert_eq!(normalize_transcript("[TODO] fix this"), "[TODO] fix this");
+        assert_eq!(normalize_transcript("[draft] and [final]"), "[draft] and [final]");
+    }
+
+    #[test]
+    fn test_normalize_transcript_keeps_word_split_across_segments() {
+        // A word can straddle a segment boundary. Whisper signals it by omitting the leading
+        // space on the continuation, so the two halves must be concatenated, not space-joined.
+        // Space-joining here is what pasted "multilingual" as "mult ilingual".
+        let server = " This is to test the medium mult\nilingual model.";
+        assert_eq!(
+            normalize_transcript(server),
+            "This is to test the medium multilingual model."
+        );
+
+        // Same case through the CLI, where the marker and its two-space pad precede the
+        // segment's own (here absent) leading space.
+        let cli = "[00:00:00.000 --> 00:00:03.000]   the medium mult\n\
+                   [00:00:03.000 --> 00:00:04.200]  ilingual model.";
+        assert_eq!(normalize_transcript(cli), "the medium multilingual model.");
+    }
+
+    #[test]
+    fn test_normalize_transcript_drops_non_speech_markers() {
+        // Observed in a real dictation once `--no-timestamps` was removed: the marker was
+        // pasted verbatim at the end of the user's sentence.
+        assert_eq!(
+            normalize_transcript(" I want to know the status [BLANK_AUDIO]"),
+            "I want to know the status"
+        );
+        // A marker occupying its whole segment leaves nothing behind — no stray space.
+        assert_eq!(
+            normalize_transcript(" first part.\n [BLANK_AUDIO]\n second part."),
+            "first part. second part."
+        );
+        // Other engine annotations go too.
+        assert_eq!(normalize_transcript(" hello [MUSIC] world"), "hello world");
+        // But a bracketed word the user actually dictated must survive.
+        assert_eq!(normalize_transcript("[TODO] fix this"), "[TODO] fix this");
+    }
+
+    #[test]
+    fn test_normalize_transcript_edges() {
+        assert_eq!(normalize_transcript(""), "");
+        assert_eq!(normalize_transcript("   \n\n  \n"), "");
+        // Blank segments are dropped rather than becoming double spaces. Real segments carry
+        // their own leading space, which is what separates them.
+        assert_eq!(normalize_transcript(" one\n\n\n two"), "one two");
+        // Without that leading space the two are one word, by the same rule that keeps
+        // "mult" + "ilingual" together.
+        assert_eq!(normalize_transcript(" one\ntwo"), "onetwo");
+        // A marker with no text after it contributes nothing.
+        assert_eq!(
+            normalize_transcript("[00:00:00.000 --> 00:00:04.000]\nreal text"),
+            "real text"
         );
     }
 
