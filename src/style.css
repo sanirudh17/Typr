@@ -811,12 +811,14 @@ input[type="password"]::placeholder {
 
 /* ── Progress Bar ───────────────────────────────────── */
 
-#download-progress {
+#download-progress,
+#parakeet-download-progress {
   padding: 0 0 16px;
   border-bottom: 1px solid var(--border);
 }
 
-#progress-bar {
+#progress-bar,
+#parakeet-progress-bar {
   height: 3px;
   background: var(--surface);
   border-radius: 2px;
@@ -824,7 +826,8 @@ input[type="password"]::placeholder {
   margin-top: 8px;
 }
 
-#progress-fill {
+#progress-fill,
+#parakeet-progress-fill {
   height: 100%;
   background: var(--accent);
   border-radius: 2px;

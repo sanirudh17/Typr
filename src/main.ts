@@ -78,6 +78,14 @@ const modelSelect = document.getElementById("model-select") as HTMLSelectElement
 const downloadBtn = document.getElementById("download-btn")!;
 const downloadProgress = document.getElementById("download-progress")!;
 const progressFill = document.getElementById("progress-fill")!;
+const parakeetDownloadProgress = document.getElementById("parakeet-download-progress")!;
+const parakeetProgressFill = document.getElementById("parakeet-progress-fill")!;
+// Each engine owns its own progress bar (a single shared one jumped position when switching
+// tabs mid-download). A download is in flight only for the engine whose flag is set; the
+// progress event routes to whichever fill is active.
+let whisperDownloading = false;
+let parakeetDownloading = false;
+let activeProgressFill: HTMLElement | null = null;
 const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 const cloudModelSettings = document.getElementById("cloud-model-settings")!;
 const modelFast = document.getElementById("model-fast")!;
@@ -394,6 +402,11 @@ function setEngine(engine: string) {
   parakeetSettings.classList.toggle("hidden", e !== "parakeet");
   cloudSettings.classList.toggle("hidden", e !== "cloud");
   cloudModelSettings.classList.toggle("hidden", e !== "cloud");
+  // A progress bar shows only on its own engine's tab, and only while that engine is
+  // actually downloading — so switching tabs mid-download never strands a bar in the
+  // wrong place, and returning to the tab shows it again at its real progress.
+  downloadProgress.classList.toggle("hidden", !(e === "local" && whisperDownloading));
+  parakeetDownloadProgress.classList.toggle("hidden", !(e === "parakeet" && parakeetDownloading));
 }
 
 function setParakeetModel(variant: string) {
@@ -512,8 +525,10 @@ async function checkModelStatus() {
   const downloaded = await invoke<boolean>("check_model_downloaded", {
     modelSize: modelSelect.value,
   });
-  downloadBtn.textContent = downloaded ? "\u2713" : "Download";
-  (downloadBtn as HTMLButtonElement).disabled = downloaded;
+  // Standardized with Parakeet: a present model offers "Re-download" (still clickable) rather
+  // than a disabled checkmark, so a corrupted or interrupted file can be re-fetched from the UI.
+  downloadBtn.textContent = downloaded ? "Re-download" : "Download";
+  (downloadBtn as HTMLButtonElement).disabled = false;
 }
 
 async function saveSettings() {
@@ -549,19 +564,23 @@ parakeetModelSelect.addEventListener("change", () => {
 
 parakeetDownloadBtn.addEventListener("click", async () => {
   const variant = currentSettings.parakeetModel || "v3";
-  const original = parakeetDownloadBtn.textContent;
   parakeetDownloadBtn.disabled = true;
   parakeetDownloadBtn.textContent = "Downloading…";
-  downloadProgress.classList.remove("hidden");
+  parakeetDownloading = true;
+  activeProgressFill = parakeetProgressFill;
+  parakeetProgressFill.style.width = "0%";
+  parakeetDownloadProgress.classList.remove("hidden");
   try {
     await invoke("download_parakeet_model", { variant });
     showToast("Parakeet model ready");
   } catch (e) {
     showToast(String(e));
   } finally {
-    downloadProgress.classList.add("hidden");
+    parakeetDownloading = false;
+    if (activeProgressFill === parakeetProgressFill) activeProgressFill = null;
+    parakeetDownloadProgress.classList.add("hidden");
     parakeetDownloadBtn.disabled = false;
-    parakeetDownloadBtn.textContent = original ?? "Download";
+    // refreshParakeetDownloadState sets the label to "Re-download" (present) or "Download".
     refreshParakeetDownloadState();
   }
 });
@@ -579,17 +598,22 @@ modelSelect.addEventListener("change", async () => {
 
 downloadBtn.addEventListener("click", async () => {
   (downloadBtn as HTMLButtonElement).disabled = true;
-  downloadProgress.classList.remove("hidden");
+  downloadBtn.textContent = "Downloading\u2026";
+  whisperDownloading = true;
+  activeProgressFill = progressFill;
   progressFill.style.width = "0%";
+  downloadProgress.classList.remove("hidden");
 
   try {
     await invoke("download_model", { modelSize: modelSelect.value });
-    downloadBtn.textContent = "\u2713";
+    downloadBtn.textContent = "Re-download";
   } catch (e) {
     downloadBtn.textContent = "Retry";
-    (downloadBtn as HTMLButtonElement).disabled = false;
     console.error("Download failed:", e);
   }
+  whisperDownloading = false;
+  if (activeProgressFill === progressFill) activeProgressFill = null;
+  (downloadBtn as HTMLButtonElement).disabled = false;
   downloadProgress.classList.add("hidden");
 });
 
@@ -1002,10 +1026,11 @@ listen<string>("recording-state", (event) => {
   statusText.textContent = recordingLabel;
 });
 
-// Listen for download progress
+// Listen for download progress. Routes to whichever engine's bar is currently downloading,
+// so the Whisper and Parakeet fills never cross-update.
 listen<DownloadProgress>("download-progress", (event) => {
   const { percent } = event.payload;
-  progressFill.style.width = `${percent}%`;
+  if (activeProgressFill) activeProgressFill.style.width = `${percent}%`;
 });
 
 // Listen for history updates

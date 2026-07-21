@@ -218,9 +218,17 @@ async fn save_settings(
                     eprintln!("[Typr] Failed to start local Whisper HTTP server: {}", e);
                 }
             }
-        } else if old_settings.engine == "local" && settings_clone.engine == "cloud" {
-            // Switched from local to cloud: stop the server immediately to free VRAM
-            println!("[Typr] Switching to Cloud mode: stopping Whisper HTTP server to free VRAM...");
+        } else if typr_lib::whisper_server::should_stop_on_engine_switch(
+            &old_settings.engine,
+            &settings_clone.engine,
+        ) {
+            // Left Whisper for Parakeet (CPU) or Cloud (remote): stop the CUDA server now to
+            // free VRAM instead of waiting on the idle reaper. Previously only the Cloud
+            // switch did this, so Whisper -> Parakeet kept the dGPU engaged for ~3 minutes.
+            println!(
+                "[Typr] Leaving Whisper for '{}': stopping Whisper HTTP server to free VRAM...",
+                settings_clone.engine
+            );
             typr_lib::whisper_server::stop_server().await;
         }
     });

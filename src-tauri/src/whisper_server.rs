@@ -87,6 +87,16 @@ pub fn should_prewarm(engine: &str, warm_matches: bool) -> bool {
     engine == "local" && !warm_matches
 }
 
+/// Whether switching engines should stop the Whisper HTTP server immediately. True when
+/// leaving the local (Whisper) engine for anything else. Only Whisper uses the CUDA server;
+/// Parakeet runs entirely on the CPU and Cloud runs remotely, so both would otherwise leave
+/// the GPU server holding VRAM until the idle reaper eventually fires ~3 minutes later. The
+/// earlier code stopped the server only for the switch to Cloud, so Whisper -> Parakeet
+/// silently kept the dGPU engaged.
+pub fn should_stop_on_engine_switch(old_engine: &str, new_engine: &str) -> bool {
+    old_engine == "local" && new_engine != "local"
+}
+
 /// Whether the idle reaper should spin the warm server down now. Pure so it can be
 /// unit-tested without a live server: the reaper reads live state, this decides.
 pub fn should_spin_down(
@@ -360,6 +370,20 @@ mod tests {
         // Cloud engine -> never prewarm the local server.
         assert!(!should_prewarm("cloud", false));
         assert!(!should_prewarm("cloud", true));
+    }
+
+    #[test]
+    fn test_should_stop_on_engine_switch() {
+        // Leaving Whisper for a CPU/remote engine must stop the GPU server.
+        assert!(should_stop_on_engine_switch("local", "parakeet"));
+        assert!(should_stop_on_engine_switch("local", "cloud"));
+        // Staying on Whisper (e.g. only the model changed) must NOT stop it.
+        assert!(!should_stop_on_engine_switch("local", "local"));
+        // Arriving at Whisper, or moving between two non-Whisper engines, is not this
+        // function's job — there is no Whisper server to stop.
+        assert!(!should_stop_on_engine_switch("parakeet", "local"));
+        assert!(!should_stop_on_engine_switch("cloud", "local"));
+        assert!(!should_stop_on_engine_switch("parakeet", "cloud"));
     }
 
     #[test]
