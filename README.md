@@ -1,9 +1,23 @@
+<div align="center">
+
+<img src="src-tauri/icons/128x128@2x.png" width="112" alt="Typr icon" />
+
 # Typr
 
-[![Release](https://img.shields.io/badge/release-v0.1.0-5e6ad2)](https://github.com/sanirudh17/Typr/releases)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078d4)](https://github.com/sanirudh17/Typr/releases)
-[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24c8db)](https://tauri.app)
+**A fast, local-first voice-to-text dictation app for Windows.**
+
+Press a hotkey, speak, and your words are typed straight into the window you are already in — no cloud required, no accounts.
+
+[![Latest release](https://img.shields.io/github/v/release/sanirudh17/Typr?label=download&color=5e6ad2)](https://github.com/sanirudh17/Typr/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-5e6ad2.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6.svg)](#download--install)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24c8db.svg)](https://v2.tauri.app/)
+
+</div>
+
+---
+
+## Overview
 
 A voice-to-text dictation app for Windows. Press a hotkey, speak, and your words are typed into whatever window you are already in — Gmail, VS Code, WhatsApp, a terminal.
 
@@ -168,8 +182,8 @@ Qwen is the default because it was both quickest and produced the best-structure
 
 Grab the latest installer from the [Releases page](https://github.com/sanirudh17/Typr/releases):
 
-- **`Typr_0.1.0_x64-setup.exe`** — NSIS installer (recommended, smaller)
-- **`Typr_0.1.0_x64_en-US.msi`** — MSI installer
+- **`Typr_0.1.1_x64-setup.exe`** — NSIS installer (recommended, smaller)
+- **`Typr_0.1.1_x64_en-US.msi`** — MSI installer
 
 **Requirements**
 - Windows 10 or 11 (64-bit)
@@ -236,8 +250,8 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.1.0_x64-setup.exe` (~278 MB)
-- `src-tauri/target/release/bundle/msi/Typr_0.1.0_x64_en-US.msi` (~436 MB)
+- `src-tauri/target/release/bundle/nsis/Typr_0.1.1_x64-setup.exe` (~278 MB)
+- `src-tauri/target/release/bundle/msi/Typr_0.1.1_x64_en-US.msi` (~436 MB)
 
 To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
 
