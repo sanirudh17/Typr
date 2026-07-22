@@ -469,11 +469,32 @@ fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
     }
 }
 
+/// Number of taps in the anti-aliasing low-pass. Odd so the filter has an integer delay.
+/// Kept modest so the whole resample stays cheap even in an unoptimized debug build — the
+/// kernel is precomputed once, so the hot loop is pure multiply-add with no transcendentals
+/// (an earlier windowed-sinc-per-sample version made a debug build take ~30s per clip).
+const RESAMPLE_LOWPASS_TAPS: usize = 31;
+
 fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate {
+    if from_rate == to_rate || samples.is_empty() {
         return samples.to_vec();
     }
 
+    // Anti-aliasing only matters when downsampling: decimating 48 kHz -> 16 kHz without a
+    // low-pass first folds all 8-24 kHz energy back into the 0-8 kHz speech band as noise the
+    // model then has to hear through. Upsampling can't fold anything in, so it is left alone.
+    let filtered;
+    let src: &[f32] = if from_rate > to_rate {
+        // Cutoff just under the OUTPUT Nyquist, expressed in cycles per INPUT sample.
+        let fc = 0.5 * (to_rate as f64 / from_rate as f64) * 0.90;
+        filtered = lowpass(samples, fc, RESAMPLE_LOWPASS_TAPS);
+        &filtered
+    } else {
+        samples
+    };
+
+    // Unchanged from before: linear interpolation to the target rate. The output length formula
+    // is identical, so the WAV (and everything downstream) is byte-for-byte the same shape.
     let ratio = from_rate as f64 / to_rate as f64;
     let output_len = (samples.len() as f64 / ratio) as usize;
     let mut output = Vec::with_capacity(output_len);
@@ -483,16 +504,57 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
         let idx = src_idx as usize;
         let frac = src_idx - idx as f64;
 
-        let sample = if idx + 1 < samples.len() {
-            samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac
+        let sample = if idx + 1 < src.len() {
+            src[idx] as f64 * (1.0 - frac) + src[idx + 1] as f64 * frac
         } else {
-            samples[idx.min(samples.len() - 1)] as f64
+            src[idx.min(src.len() - 1)] as f64
         };
 
         output.push(sample as f32);
     }
 
     output
+}
+
+/// Symmetric windowed-sinc low-pass FIR (Hamming window, normalized to unity DC gain).
+/// `fc` is the cutoff in cycles per sample (0..0.5). The kernel is built once (a handful of
+/// transcendentals), then the convolution is pure multiply-add — so this is fast even in a
+/// debug build. Edges are handled by treating out-of-range input as zero.
+fn lowpass(samples: &[f32], fc: f64, taps: usize) -> Vec<f32> {
+    let taps = taps | 1; // force odd for a symmetric, integer-delay filter
+    let m = (taps - 1) as f64;
+    let mut kernel = vec![0.0f64; taps];
+    let mut sum = 0.0;
+    for (n, k) in kernel.iter_mut().enumerate() {
+        let d = n as f64 - m / 2.0;
+        let sinc = if d.abs() < 1e-9 {
+            2.0 * fc
+        } else {
+            (2.0 * std::f64::consts::PI * fc * d).sin() / (std::f64::consts::PI * d)
+        };
+        let window = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / m).cos(); // Hamming
+        let v = sinc * window;
+        *k = v;
+        sum += v;
+    }
+    for k in kernel.iter_mut() {
+        *k /= sum; // unity gain at DC — the filter must not change loudness
+    }
+
+    let half = (taps / 2) as isize;
+    let n = samples.len() as isize;
+    let mut out = vec![0.0f32; samples.len()];
+    for i in 0..samples.len() {
+        let mut acc = 0.0f64;
+        for (j, &kv) in kernel.iter().enumerate() {
+            let src = i as isize + j as isize - half;
+            if src >= 0 && src < n {
+                acc += samples[src as usize] as f64 * kv;
+            }
+        }
+        out[i] = acc as f32;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -528,6 +590,54 @@ mod tests {
         assert!((agc_update(1.0, 0.1, 0.995, 0.3) - 0.995).abs() < 1e-6);
         // Never falls below the floor.
         assert!((agc_update(0.0, 0.0, 0.995, 0.3) - 0.0001).abs() < 1e-9);
+    }
+
+    fn rms(v: &[f32]) -> f32 {
+        (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
+    fn tone(freq: f64, sr: u32, secs: f64) -> Vec<f32> {
+        let n = (sr as f64 * secs) as usize;
+        (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sr as f64).sin() as f32)
+            .collect()
+    }
+
+    #[test]
+    fn test_resample_passthrough_and_length() {
+        // Equal rates: untouched.
+        let s = vec![0.1f32, 0.2, 0.3, 0.4];
+        assert_eq!(resample(&s, 16000, 16000), s);
+        // The output-length contract must be exactly what it was before (downstream depends on it).
+        assert_eq!(resample(&vec![0.0f32; 48000], 48000, 16000).len(), 16000);
+        assert!(resample(&[], 48000, 16000).is_empty());
+    }
+
+    #[test]
+    fn test_resample_anti_aliases_but_keeps_speech_band() {
+        // The whole point of the fix. A 3 kHz tone is well inside the 8 kHz output Nyquist and
+        // must survive; a 11 kHz tone is above it and, under naive decimation, would fold down
+        // into the speech band as noise — the anti-aliased resampler must crush it instead.
+        let low = resample(&tone(3000.0, 48000, 1.0), 48000, 16000);
+        let high = resample(&tone(11000.0, 48000, 1.0), 48000, 16000);
+        // Trim filter edges before measuring.
+        let low_rms = rms(&low[200..low.len() - 200]);
+        let high_rms = rms(&high[200..high.len() - 200]);
+        assert!(low_rms > 0.5, "3kHz speech-band tone should pass, rms {}", low_rms);
+        assert!(high_rms < 0.1, "11kHz tone should be attenuated, rms {}", high_rms);
+    }
+
+    #[test]
+    fn test_resample_is_fast_enough_in_debug() {
+        // Guard against ever reintroducing the slow resampler that made a debug build take ~30s
+        // to paste. A 30s dictation at 48 kHz must resample in well under a second even here,
+        // unoptimized. (Release is ~30x faster still.)
+        let input: Vec<f32> = (0..48000 * 30).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
+        let start = std::time::Instant::now();
+        let out = resample(&input, 48000, 16000);
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 16000 * 30);
+        assert!(elapsed < std::time::Duration::from_secs(2), "resample too slow: {:?}", elapsed);
     }
 
     #[test]
