@@ -562,10 +562,12 @@ body {
   line-height: 1.5;
   padding: 10px 12px;
   margin: 0 0 14px;
-  border: 1px solid var(--yellow);
-  border-left-width: 3px;
+  /* The surrounding ring is translucent so the note reads as a tint rather than a boxed
+     alert; only the left edge carries the full accent, and thinly. */
+  border: 1px solid rgba(245, 166, 35, 0.28);
+  border-left: 2px solid rgba(245, 166, 35, 0.85);
   border-radius: 6px;
-  background: rgba(245, 166, 35, 0.08);
+  background: rgba(245, 166, 35, 0.06);
 }
 
 /* A row that only makes sense as a refinement of the row above it (e.g. the
