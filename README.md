@@ -23,6 +23,8 @@ A voice-to-text dictation app for Windows. Press a hotkey, speak, and your words
 
 Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU with Parakeet — or through the **Groq Cloud API** when you want the lowest latency. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
 
+> **New here?** Follow the step-by-step [**Setup guide**](#download--install) — about five minutes, and it covers the one-time model download.
+
 ---
 
 ## Contents
@@ -180,25 +182,88 @@ Qwen is the default because it was both quickest and produced the best-structure
 
 ## Download & Install
 
-Grab the latest installer from the [Releases page](https://github.com/sanirudh17/Typr/releases):
-
-- **`Typr_0.1.1_x64-setup.exe`** — NSIS installer (recommended, smaller)
-- **`Typr_0.1.1_x64_en-US.msi`** — MSI installer
-
 **Requirements**
 - Windows 10 or 11 (64-bit)
-- An NVIDIA GPU is **optional**. With one, Local Whisper is fastest. Without one, use Local Parakeet (CPU) or Groq Cloud.
-- A [Groq API key](https://console.groq.com) if you want cloud transcription or AI cleanup. Both are optional.
+- An NVIDIA GPU is **optional** — see Step 2 for the engine that suits your machine
+- Roughly 1 GB of free disk space for a local model (not needed if you use the Cloud engine)
 
-### First run
+### Step 1 — Install the app
 
-A Whisper model must be downloaded before local transcription will work:
+1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
+2. Under **Assets**, download **`Typr_0.1.1_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
+4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
-1. Open the **Engine** tab.
-2. Pick a **Model size** — Medium English (~539 MB) is a good default.
-3. Click **Download**. The model is saved to `%APPDATA%\com.typr.app\`.
+> Typr keeps running in the system tray after you close the window, so the hotkey keeps working. That is intentional — find it by the waveform icon near the clock.
 
-If you use the Groq Cloud engine instead, no download is needed — just enter your API key.
+### Step 2 — Pick your transcription engine
+
+Open the **Engine** tab and choose **one**. This is the most important choice, and it decides what you set up next:
+
+| Your situation | Choose | What it needs |
+|---|---|---|
+| You have an **NVIDIA** graphics card | **Local Whisper** | A one-time model download (Step 3) |
+| **No NVIDIA card** (most laptops, AMD/Intel graphics) | **Local Parakeet** | A one-time model download (Step 3) |
+| You want the **fastest** results and don't mind audio going to a server | **Groq Cloud** | A free API key (Step 4) |
+
+Not sure whether you have an NVIDIA card? Press `Ctrl+Shift+Esc` to open Task Manager → **Performance** tab. If you see an entry starting with **NVIDIA**, choose Local Whisper. Otherwise choose Local Parakeet.
+
+Both local engines run entirely on your computer, and nothing you say leaves the machine.
+
+### Step 3 — Download a model (Local Whisper or Local Parakeet only)
+
+**Neither local engine can transcribe anything until you do this.** Until a model is downloaded, pressing the hotkey produces nothing. Typr shows a yellow warning on the Engine tab while a model is missing.
+
+**For Local Whisper:**
+1. On the **Engine** tab, make sure **Local Whisper** is selected.
+2. From **Model size**, pick **Medium · English (~539 MB) · recommended**.
+3. Click **Download** and wait for the progress bar to finish. It only has to be done once.
+
+**For Local Parakeet:**
+1. On the **Engine** tab, make sure **Local Parakeet** is selected.
+2. Leave **Parakeet model** on **v3 · 25 languages · recommended**.
+3. Click **Download** (about 640 MB) and wait for it to finish. Once only.
+
+Models are saved to `%APPDATA%\com.typr.app\`. Paste that path into the File Explorer address bar to see them.
+
+**Skip to Step 5 if you chose a local engine and don't want AI cleanup.** You are done setting up.
+
+### Step 4 — Get a Groq API key (only for Cloud transcription or AI cleanup)
+
+A key is needed for **exactly two optional things**: the **Groq Cloud** engine, and the optional **AI cleanup** pass. If you are using a local engine with AI cleanup off, you do not need a key at all and can skip this step.
+
+> ### ⚠️ Groq, not Grok
+> The site is **`console.groq.com`** — **Groq** with a **Q**, an AI inference company.
+> It is **not** `grok.com`, which is Elon Musk's Grok chatbot and a completely different
+> product. A key from grok.com (or an OpenAI / ChatGPT key) **will not work** in Typr.
+> Groq keys always start with **`gsk_`**.
+
+**Getting the key:**
+
+1. Go to **[console.groq.com](https://console.groq.com)** and sign in — you can use a Google account. It is free, and no credit card is asked for.
+2. In the left sidebar, click **API Keys**.
+3. Click **Create API Key**, give it any name (e.g. `Typr`), and confirm.
+4. The key is shown **once**. Click **Copy**. It looks like `gsk_AbCd1234...`.
+   If you close the dialog without copying, the key cannot be shown again — just delete it and create another.
+
+**Putting the key into Typr:**
+
+- **For Cloud transcription** — **Engine** tab → select **Groq Cloud** → paste into the **Groq API key** box.
+- **For AI cleanup** — **AI** tab → turn **AI Cleanup** to **On** → paste into the **Groq API key** box that appears.
+
+It is the same key and the same setting in both places — entering it in one fills in the other. Click anywhere outside the box to save; there is no Save button. The key is stored on your machine in `%APPDATA%\com.typr.app\config.json`.
+
+### Step 5 — Dictate
+
+1. Click into any window where you can type — Notepad, Gmail, WhatsApp, VS Code.
+2. Press **`Ctrl+Shift+Space`** and speak.
+3. Press **`Ctrl+Shift+Space`** again to stop. Your words are typed into that window.
+
+A waveform overlay appears while recording, which confirms your microphone is being heard.
+
+Out of the box the hotkey **toggles** — press once to start, once more to stop. If you would rather hold the keys down while speaking and have it stop when you let go, go to **Recording** → **Push-to-Talk**. Both modes use the same hotkey, which you can change on that tab.
+
+If nothing is typed, see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -356,7 +421,13 @@ The local engine is only fast with CUDA. Confirm the three CUDA DLLs are present
 Check the API key in Engine, and that you have network access. Groq's free tier is rate-limited per minute — rapid back-to-back dictations can hit that ceiling, which shows up as a retry rather than an error.
 
 **AI cleanup seems to do nothing.**
-It is off by default. When off, the settings beneath it are hidden and a note says so. If it is on and output still looks unstyled, the guards may be rejecting the result and falling back to deterministic cleanup — the log records which.
+First check it has a key: **AI** tab → **Groq API key**. Without one, AI cleanup cannot run at all — Typr falls back to standard cleanup so your dictation is never lost, and shows a yellow warning on the AI tab saying so. It is also off by default; when off, the settings beneath it are hidden and a note says so. If it is on, has a key, and output still looks unstyled, the guards may be rejecting the result and falling back to deterministic cleanup — the log records which.
+
+**My API key is rejected, or the key page looks nothing like the instructions.**
+Check you are on **`console.groq.com`** — **Groq** with a **Q**. `grok.com` is Elon Musk's Grok chatbot, an unrelated product, and its keys will not work here. Neither will an OpenAI/ChatGPT key. A valid Groq key starts with `gsk_`.
+
+**I downloaded a model but dictation still does nothing.**
+Confirm the engine you selected is the one you downloaded for — the Whisper and Parakeet models are separate downloads, and selecting the other engine will report its own model as missing. The Engine tab shows a yellow warning whenever the selected engine has no model.
 
 **Auto mode picks the wrong style.**
 Add an App context rule under **AI → Advanced**. Leave the app blank and set only a title filter to match a website in any browser.

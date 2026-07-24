@@ -283,6 +283,7 @@
               </div>
             </div>
           </div>
+          <p id="engine-setup-note" class="settings-warning-note hidden"></p>
         </section>
 
         <section id="section-ai" class="content-section">
@@ -312,6 +313,21 @@
           </div>
           <p id="ai-disabled-note" class="settings-empty-note hidden">AI cleanup is off. Turn it on to choose a profile, model, and output style.</p>
           <div id="ai-options">
+          <div class="settings-group">
+            <div class="group-title">Connection</div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Groq API key</span>
+                  <span class="label-hint">Required for AI cleanup. Get one free at <b>console.groq.com</b> (Groq, not grok.com). The same key is used for the Cloud engine.</span>
+                </div>
+                <div class="setting-control">
+                  <input type="password" id="ai-groq-key" placeholder="gsk_..." />
+                </div>
+              </div>
+            </div>
+          </div>
+          <p id="ai-key-missing-note" class="settings-warning-note hidden">No Groq API key set, so AI cleanup cannot run &mdash; your dictation still works and falls back to standard cleanup. Paste a key above to turn it on.</p>
           <div class="settings-group">
             <div class="group-title">Behaviour</div>
             <div class="settings-list">

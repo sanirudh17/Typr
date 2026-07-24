@@ -553,6 +553,21 @@ body {
   padding: 4px 0 2px;
 }
 
+/* A setting is on but cannot actually run because something it depends on is
+   missing. Stated in the UI because the failure is otherwise silent — the
+   pipeline falls back rather than erroring, so nothing would surface it. */
+.settings-warning-note {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 10px 12px;
+  margin: 0 0 14px;
+  border: 1px solid var(--yellow);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(245, 166, 35, 0.08);
+}
+
 /* A row that only makes sense as a refinement of the row above it (e.g. the
    context picker that qualifies the chosen Profile). The rule ties it to its
    parent so it is not read as an independent setting. */

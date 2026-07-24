@@ -87,6 +87,18 @@ let whisperDownloading = false;
 let parakeetDownloading = false;
 let activeProgressFill: HTMLElement | null = null;
 const groqKey = document.getElementById("groq-key") as HTMLInputElement;
+// The same key powers two different features on two different tabs: Cloud transcription
+// (Engine) and AI cleanup (AI). It used to live only under the Engine tab's Cloud block,
+// which is hidden unless Cloud is the selected engine — so anyone on Local Whisper or
+// Parakeet could turn AI cleanup on and have nowhere to enter the key it needs. Both inputs
+// edit one setting and are mirrored on every keystroke.
+const aiGroqKey = document.getElementById("ai-groq-key") as HTMLInputElement;
+const aiKeyMissingNote = document.getElementById("ai-key-missing-note")!;
+const engineSetupNote = document.getElementById("engine-setup-note")!;
+// Whether the model each local engine is set to use is actually on disk. Cached from the
+// last backend check so the setup note can re-render without re-querying.
+let whisperModelPresent = false;
+let parakeetModelPresent = false;
 const cloudModelSettings = document.getElementById("cloud-model-settings")!;
 const modelFast = document.getElementById("model-fast")!;
 const modelAccurate = document.getElementById("model-accurate")!;
@@ -343,8 +355,8 @@ async function loadSettings() {
   }
   await checkModelStatus();
 
-  // Groq key
-  groqKey.value = currentSettings.groqApiKey;
+  // Groq key — mirrored into both the Engine and AI tab inputs.
+  syncGroqKeyInputs(currentSettings.groqApiKey);
 
   // Cloud model
   setCloudModel(currentSettings.cloudModel || "accurate");
@@ -407,6 +419,7 @@ function setEngine(engine: string) {
   // wrong place, and returning to the tab shows it again at its real progress.
   downloadProgress.classList.toggle("hidden", !(e === "local" && whisperDownloading));
   parakeetDownloadProgress.classList.toggle("hidden", !(e === "parakeet" && parakeetDownloading));
+  updateEngineSetupNote();
 }
 
 function setParakeetModel(variant: string) {
@@ -422,9 +435,30 @@ async function refreshParakeetDownloadState() {
       variant: currentSettings.parakeetModel || "v3",
     });
     parakeetDownloadBtn.textContent = present ? "Re-download" : "Download";
+    parakeetModelPresent = present;
   } catch {
     parakeetDownloadBtn.textContent = "Download";
   }
+  updateEngineSetupNote();
+}
+
+/// First-run guidance: name the one thing still missing for the selected engine. A new user
+/// otherwise sees an ordinary settings page with nothing to indicate that local transcription
+/// needs a model downloaded before the hotkey will produce anything at all.
+function updateEngineSetupNote() {
+  let msg = "";
+  if (currentSettings.engine === "local" && !whisperModelPresent) {
+    msg =
+      "No Whisper model downloaded yet — dictation won't work until you download one. Pick a size above and click Download.";
+  } else if (currentSettings.engine === "parakeet" && !parakeetModelPresent) {
+    msg =
+      "No Parakeet model downloaded yet — dictation won't work until you download one. Click Download above (about 640 MB).";
+  } else if (currentSettings.engine === "cloud" && !(currentSettings.groqApiKey || "").trim()) {
+    msg =
+      "No Groq API key set — cloud transcription won't work until you add one. Get a free key at console.groq.com (Groq, not grok.com).";
+  }
+  engineSetupNote.textContent = msg;
+  engineSetupNote.classList.toggle("hidden", !msg);
 }
 
 function setCloudModel(model: string) {
@@ -443,6 +477,27 @@ function setAiEnabled(enabled: boolean) {
   // happens, so hide the lot and say why in their place.
   aiOptions.classList.toggle("hidden", !enabled);
   aiDisabledNote.classList.toggle("hidden", enabled);
+  updateAiKeyWarning();
+}
+
+/// Keep the Engine-tab and AI-tab key inputs showing one value, and refresh the warning.
+function syncGroqKeyInputs(value: string) {
+  value = value || "";
+  currentSettings.groqApiKey = value;
+  if (groqKey.value !== value) groqKey.value = value;
+  if (aiGroqKey.value !== value) aiGroqKey.value = value;
+  updateAiKeyWarning();
+  updateEngineSetupNote();
+}
+
+/// Say so when AI cleanup is on but has no key. Without this the failure is invisible:
+/// the pipeline treats a missing key as a failed AI call, falls back to deterministic
+/// cleanup, and records the reason only in the debug log — so the feature looks broken.
+function updateAiKeyWarning() {
+  // Tolerate a config written by an older build that has no key field at all: a throw here
+  // would abort loadSettings and leave the whole window half-populated.
+  const missing = currentSettings.aiEnabled && !(currentSettings.groqApiKey || "").trim();
+  aiKeyMissingNote.classList.toggle("hidden", !missing);
 }
 
 function setBackgroundMode(enabled: boolean) {
@@ -529,12 +584,16 @@ async function checkModelStatus() {
   // than a disabled checkmark, so a corrupted or interrupted file can be re-fetched from the UI.
   downloadBtn.textContent = downloaded ? "Re-download" : "Download";
   (downloadBtn as HTMLButtonElement).disabled = false;
+  whisperModelPresent = downloaded;
+  updateEngineSetupNote();
 }
 
 async function saveSettings() {
   currentSettings.microphone = micSelect.value;
   currentSettings.whisperModel = modelSelect.value;
-  currentSettings.groqApiKey = groqKey.value;
+  // Both key inputs are mirrored, so either is authoritative; syncing here keeps a save
+  // triggered by some other control from writing back a stale value.
+  syncGroqKeyInputs(currentSettings.groqApiKey);
   currentSettings.aiCustomInstructions = aiCustomInstructions.value;
   await invoke("save_settings", { settings: currentSettings });
 }
@@ -607,6 +666,10 @@ downloadBtn.addEventListener("click", async () => {
   try {
     await invoke("download_model", { modelSize: modelSelect.value });
     downloadBtn.textContent = "Re-download";
+    // The model is on disk now, so clear the first-run note. Set directly rather than via
+    // checkModelStatus() so the "Retry" label on the failure path below is left alone.
+    whisperModelPresent = true;
+    updateEngineSetupNote();
   } catch (e) {
     downloadBtn.textContent = "Retry";
     console.error("Download failed:", e);
@@ -617,7 +680,12 @@ downloadBtn.addEventListener("click", async () => {
   downloadProgress.classList.add("hidden");
 });
 
+// Mirror on every keystroke so the warning clears as soon as a key is pasted, and persist
+// on change (blur) as before — one setting, edited from either tab.
+groqKey.addEventListener("input", () => syncGroqKeyInputs(groqKey.value));
+aiGroqKey.addEventListener("input", () => syncGroqKeyInputs(aiGroqKey.value));
 groqKey.addEventListener("change", () => saveSettings());
+aiGroqKey.addEventListener("change", () => saveSettings());
 
 aiOff.addEventListener("click", () => {
   setAiEnabled(false);
