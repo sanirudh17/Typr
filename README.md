@@ -34,6 +34,7 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 - [Choosing an Engine](#choosing-an-engine)
 - [Settings Reference](#settings-reference)
 - [Download & Install](#download--install)
+- [Updating](#updating)
 - [Building from Source](#building-from-source)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
@@ -190,11 +191,13 @@ Qwen is the default because it was both quickest and produced the best-structure
 ### Step 1 — Install the app
 
 1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
-2. Under **Assets**, download **`Typr_0.1.1_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+2. Under **Assets**, download **`Typr_0.1.2_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
 3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
 4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
 > Typr keeps running in the system tray after you close the window, so the hotkey keeps working. That is intentional — find it by the waveform icon near the clock.
+
+**You only have to do this once.** From 0.1.2 onward Typr updates itself — see [Updating](#updating) below.
 
 ### Step 2 — Pick your transcription engine
 
@@ -267,6 +270,18 @@ If nothing is typed, see [Troubleshooting](#troubleshooting).
 
 ---
 
+## Updating
+
+From **0.1.2** onward Typr updates itself. On startup it quietly asks GitHub whether a newer release exists; if one does, **General → Updates** shows the new version and a **Download & install** button. Installing runs with a progress bar and no setup wizard — Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
+
+You can check whenever you like from **General → Updates**. A failed check on startup is silent by design (no network, or GitHub rate-limiting, is not something worth interrupting you for); press the button and it will tell you exactly what went wrong.
+
+> **Coming from 0.1.0 or 0.1.1?** Those builds have no updater in them, so this one time you need to download and run the installer from the [Releases page](https://github.com/sanirudh17/Typr/releases/latest) yourself. Install it over your existing copy — nothing is lost. Every update after that is automatic.
+
+Each update downloads the full ~300 MB installer rather than a small patch, because the bundled CUDA runtime dominates the package. It replaces your install in place; it does not accumulate copies.
+
+---
+
 ## Building from Source
 
 **Prerequisites**
@@ -315,10 +330,44 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.1.1_x64-setup.exe` (~278 MB)
-- `src-tauri/target/release/bundle/msi/Typr_0.1.1_x64_en-US.msi` (~436 MB)
+- `src-tauri/target/release/bundle/nsis/Typr_0.1.2_x64-setup.exe` (~278 MB)
+- `src-tauri/target/release/bundle/msi/Typr_0.1.2_x64_en-US.msi` (~436 MB)
 
 To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
+
+### Cutting a release (updater signing)
+
+The updater only trusts bundles signed with the private key matching `plugins.updater.pubkey`
+in `tauri.conf.json`. **A release built without the key still installs fine, but no existing
+install will ever accept it as an update** — the signature check fails silently on the client.
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/typr.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run tauri build
+```
+
+This writes `Typr_<version>_x64-setup.exe` plus a matching `.sig` next to it. Upload **both**,
+together with a `latest.json` describing the release, as assets on the GitHub release. The
+updater fetches `latest.json` from the *latest* release tag, so it must be attached to
+whichever release should be handed out.
+
+```json
+{
+  "version": "0.1.3",
+  "notes": "What changed",
+  "pub_date": "2026-07-24T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<contents of the .sig file>",
+      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.1.3/Typr_0.1.3_x64-setup.exe"
+    }
+  }
+}
+```
+
+Keep `~/.tauri/typr.key` backed up somewhere safe and out of the repository. If it is lost,
+existing installs can never be updated again — every user would have to reinstall by hand.
 
 ### Tests
 

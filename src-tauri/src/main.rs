@@ -731,6 +731,11 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
+        // In-app updates. The updater fetches latest.json from the GitHub release, verifies
+        // the bundle against the public key in tauri.conf.json, and runs the NSIS installer
+        // in passive mode. `process` provides the relaunch after it finishes.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             recorder: Recorder::new(),
             settings: Mutex::new(settings),

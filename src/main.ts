@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
+import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
 interface Settings {
   microphone: string;
@@ -1800,5 +1803,102 @@ document.addEventListener("mousedown", (e) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// In-app updates
+//
+// The updater compares this build's version against latest.json on the GitHub release and,
+// if newer, downloads the signed NSIS installer and runs it in passive mode (a progress bar,
+// no wizard to click through). Windows terminates the app as the installer takes over, so
+// the relaunch below only matters if that ever stops being true.
+//
+// A failed check is deliberately quiet on startup — no network, a rate-limited GitHub, or a
+// release without latest.json must never greet someone with an error they cannot act on.
+// The same failure IS reported when the check was asked for by the button.
+// ---------------------------------------------------------------------------
+const updateBtn = document.getElementById("update-btn") as HTMLButtonElement;
+const updateStatus = document.getElementById("update-status")!;
+const appVersion = document.getElementById("app-version")!;
+const updateProgress = document.getElementById("update-progress")!;
+const updateProgressFill = document.getElementById("update-progress-fill")!;
+
+/// The update found by the last check, held so the button can install it on the next click
+/// without re-querying GitHub.
+let pendingUpdate: Update | null = null;
+
+async function installUpdate(update: Update) {
+  updateBtn.disabled = true;
+  updateBtn.textContent = "Downloading…";
+  updateProgress.classList.remove("hidden");
+  updateProgressFill.style.width = "0%";
+
+  // contentLength arrives on Started; Progress events carry only the size of each chunk, so
+  // the total has to be accumulated here to show a percentage.
+  let total = 0;
+  let received = 0;
+  try {
+    await update.downloadAndInstall((event) => {
+      switch (event.event) {
+        case "Started":
+          total = event.data.contentLength ?? 0;
+          break;
+        case "Progress":
+          received += event.data.chunkLength;
+          if (total > 0) {
+            updateProgressFill.style.width = `${Math.min(100, (received / total) * 100)}%`;
+          }
+          break;
+        case "Finished":
+          updateProgressFill.style.width = "100%";
+          updateStatus.textContent = "Installing… Typr will restart.";
+          break;
+      }
+    });
+    await relaunch();
+  } catch (e) {
+    updateProgress.classList.add("hidden");
+    updateStatus.textContent = `Update failed: ${String(e)}`;
+    updateBtn.disabled = false;
+    updateBtn.textContent = "Retry";
+  }
+}
+
+async function runUpdateCheck(userAsked: boolean) {
+  if (pendingUpdate) {
+    await installUpdate(pendingUpdate);
+    return;
+  }
+  if (userAsked) {
+    updateBtn.disabled = true;
+    updateStatus.textContent = "Checking…";
+  }
+  try {
+    const update = await checkForUpdate();
+    if (update) {
+      pendingUpdate = update;
+      updateStatus.textContent = `Version ${update.version} is available.`;
+      updateBtn.textContent = "Download & install";
+      updateBtn.disabled = false;
+    } else if (userAsked) {
+      updateStatus.textContent = "You're on the latest version.";
+      updateBtn.disabled = false;
+    }
+  } catch (e) {
+    if (userAsked) {
+      updateStatus.textContent = `Could not check for updates: ${String(e)}`;
+      updateBtn.disabled = false;
+    } else {
+      console.warn("Background update check failed:", e);
+    }
+  }
+}
+
+updateBtn.addEventListener("click", () => runUpdateCheck(true));
+
 // Initialize
 loadSettings();
+getVersion()
+  .then((v) => {
+    appVersion.textContent = v;
+  })
+  .catch(() => {});
+runUpdateCheck(false);

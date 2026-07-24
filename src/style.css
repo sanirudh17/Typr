@@ -835,7 +835,8 @@ input[type="password"]::placeholder {
 }
 
 #progress-bar,
-#parakeet-progress-bar {
+#parakeet-progress-bar,
+#update-progress-bar {
   height: 3px;
   background: var(--surface);
   border-radius: 2px;
@@ -844,7 +845,8 @@ input[type="password"]::placeholder {
 }
 
 #progress-fill,
-#parakeet-progress-fill {
+#parakeet-progress-fill,
+#update-progress-fill {
   height: 100%;
   background: var(--accent);
   border-radius: 2px;

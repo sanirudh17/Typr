@@ -31,3 +31,7 @@ src-tauri/binaries/
 whisper.cpp/
 *.exe
 *.msi
+
+# Updater signing keys — must never be committed
+*.key
+*.key.pub
