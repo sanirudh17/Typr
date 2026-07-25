@@ -191,13 +191,13 @@ Qwen is the default because it was both quickest and produced the best-structure
 ### Step 1 — Install the app
 
 1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
-2. Under **Assets**, download **`Typr_0.1.2_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+2. Under **Assets**, download **`Typr_0.1.3_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
 3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
 4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
 > Typr keeps running in the system tray after you close the window, so the hotkey keeps working. That is intentional — find it by the waveform icon near the clock.
 
-**You only have to do this once.** From 0.1.2 onward Typr updates itself — see [Updating](#updating) below.
+**You only have to do this once.** From 0.1.3 onward Typr updates itself — see [Updating](#updating) below.
 
 ### Step 2 — Pick your transcription engine
 
@@ -272,15 +272,17 @@ If nothing is typed, see [Troubleshooting](#troubleshooting).
 
 ## Updating
 
-From **0.1.2** onward Typr updates itself. On startup it quietly asks GitHub whether a newer release exists; if one does, a banner appears across the top of the window — *"Typr 0.1.3 is available"* — with an **Update** button next to it. Installing runs with a progress bar and no setup wizard: Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
+From **0.1.3** onward Typr tells you when it can update itself. On startup it quietly asks GitHub whether a newer release exists; if one does, a message appears in the title bar — *"Typr 0.1.4 is available"* — with **Update** and **Later** beside it. Installing runs with a progress bar and no setup wizard: Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
 
 Nothing is ever downloaded or installed without you clicking **Update**.
 
-**Closing the banner (✕) dismisses that version for good.** It will not reappear on later launches, no matter how many times you restart. When a *newer* version is released the banner returns, because it only stays quiet about the exact version you dismissed. A dismissed update is never lost — **General → Updates** still lists it and will still install it on demand.
+**Pressing Later dismisses that version for good.** It will not reappear on later launches, no matter how many times you restart. When a *newer* version is released the message returns, because it only stays quiet about the exact version you dismissed. A dismissed update is never lost — **General → Updates** still lists it and will still install it on demand.
 
 You can check whenever you like from **General → Updates**. A failed check on startup is silent by design (no network, or GitHub rate-limiting, is not something worth interrupting you for); press the button and it will tell you exactly what went wrong.
 
 > **Coming from 0.1.0 or 0.1.1?** Those builds have no updater in them, so this one time you need to download and run the installer from the [Releases page](https://github.com/sanirudh17/Typr/releases/latest) yourself. Install it over your existing copy — nothing is lost. Every update after that is automatic.
+>
+> **On 0.1.2?** You can update from inside the app, but 0.1.2 has no title-bar message — it only shows the new version under **General → Updates**, so you have to look. From 0.1.3 on, Typr comes and tells you.
 
 Each update downloads the full ~300 MB installer rather than a small patch, because the bundled CUDA runtime dominates the package. It replaces your install in place; it does not accumulate copies.
 
@@ -334,8 +336,8 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.1.2_x64-setup.exe` (~278 MB)
-- `src-tauri/target/release/bundle/msi/Typr_0.1.2_x64_en-US.msi` (~436 MB)
+- `src-tauri/target/release/bundle/nsis/Typr_0.1.3_x64-setup.exe` (~278 MB)
+- `src-tauri/target/release/bundle/msi/Typr_0.1.3_x64_en-US.msi` (~436 MB)
 
 To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
 
