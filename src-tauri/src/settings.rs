@@ -45,6 +45,11 @@ pub struct Settings {
     pub app_rules: Vec<AppRule>,
     #[serde(rename = "autoContextOverride", default = "default_auto_context_override")]
     pub auto_context_override: String,
+    /// The update version the user closed the banner on, so it is never offered
+    /// unprompted again. Empty means nothing has been dismissed. Only the banner
+    /// respects this — an explicit check from Settings always offers the update.
+    #[serde(rename = "dismissedUpdateVersion", default)]
+    pub dismissed_update_version: String,
 }
 
 fn default_parakeet_model() -> String {
@@ -103,6 +108,7 @@ impl Default for Settings {
             secondary_profile: "prompt".to_string(),
             app_rules: Vec::new(),
             auto_context_override: "auto".to_string(),
+            dismissed_update_version: String::new(),
         }
     }
 }

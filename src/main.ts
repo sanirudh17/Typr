@@ -28,6 +28,7 @@ interface Settings {
   secondaryProfile: string;
   autoContextOverride: string;
   appRules: AppRule[];
+  dismissedUpdateVersion: string;
 }
 
 interface AppRule {
@@ -1820,12 +1821,17 @@ const updateStatus = document.getElementById("update-status")!;
 const appVersion = document.getElementById("app-version")!;
 const updateProgress = document.getElementById("update-progress")!;
 const updateProgressFill = document.getElementById("update-progress-fill")!;
+const updateBanner = document.getElementById("update-banner")!;
+const updateBannerText = document.getElementById("update-banner-text")!;
+const updateBannerAction = document.getElementById("update-banner-action")!;
+const updateBannerDismiss = document.getElementById("update-banner-dismiss")!;
 
 /// The update found by the last check, held so the button can install it on the next click
 /// without re-querying GitHub.
 let pendingUpdate: Update | null = null;
 
 async function installUpdate(update: Update) {
+  updateBanner.classList.add("hidden");
   updateBtn.disabled = true;
   updateBtn.textContent = "Downloading…";
   updateProgress.classList.remove("hidden");
@@ -1862,6 +1868,32 @@ async function installUpdate(update: Update) {
   }
 }
 
+/// Shows the banner unless this exact version was already dismissed. The comparison is an
+/// equality check, not an ordering one: dismissing 0.1.3 must not also silence 0.1.4, and a
+/// release that is pulled and re-cut keeps its identity.
+function showUpdateBanner(version: string) {
+  if (version === (currentSettings?.dismissedUpdateVersion || "")) return;
+  updateBannerText.textContent = `Typr ${version} is available.`;
+  updateBanner.classList.remove("hidden");
+}
+
+/// Remembers the dismissal so restarts stay quiet. Settings are the store rather than
+/// localStorage so this survives a webview data reset and is inspectable in settings.json.
+updateBannerDismiss.addEventListener("click", () => {
+  updateBanner.classList.add("hidden");
+  if (!pendingUpdate || !currentSettings) return;
+  currentSettings.dismissedUpdateVersion = pendingUpdate.version;
+  saveSettings();
+});
+
+// Send the user to the Updates panel first, so the download progress is somewhere visible
+// rather than happening behind a banner that has just vanished.
+updateBannerAction.addEventListener("click", () => {
+  updateBanner.classList.add("hidden");
+  (document.querySelector('.nav-item[data-section="general"]') as HTMLElement | null)?.click();
+  runUpdateCheck(true);
+});
+
 async function runUpdateCheck(userAsked: boolean) {
   if (pendingUpdate) {
     await installUpdate(pendingUpdate);
@@ -1878,6 +1910,9 @@ async function runUpdateCheck(userAsked: boolean) {
       updateStatus.textContent = `Version ${update.version} is available.`;
       updateBtn.textContent = "Download & install";
       updateBtn.disabled = false;
+      // An explicit check always surfaces the update in the panel above; the banner is the
+      // unprompted channel, so only it honours a past dismissal.
+      if (!userAsked) showUpdateBanner(update.version);
     } else if (userAsked) {
       updateStatus.textContent = "You're on the latest version.";
       updateBtn.disabled = false;
@@ -1895,10 +1930,11 @@ async function runUpdateCheck(userAsked: boolean) {
 updateBtn.addEventListener("click", () => runUpdateCheck(true));
 
 // Initialize
-loadSettings();
 getVersion()
   .then((v) => {
     appVersion.textContent = v;
   })
   .catch(() => {});
-runUpdateCheck(false);
+// The startup check runs only once settings are in hand — the banner has to know which
+// version was already dismissed, and currentSettings is unset until the load resolves.
+loadSettings().finally(() => runUpdateCheck(false));

@@ -95,6 +95,50 @@ body {
   min-height: 0;
 }
 
+/* ── Update banner ──────────────────────────────────── */
+
+/* A flex sibling of #app-body, so showing it shrinks the app rather than covering it.
+   The right padding clears the fixed titlebar buttons, which float over this strip. */
+#update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 150px 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  animation: fadeIn 200ms ease;
+}
+
+#update-banner-text {
+  flex: 1;
+  color: var(--text);
+}
+
+#update-banner-action {
+  padding: 5px 14px;
+  font-size: 12px;
+}
+
+#update-banner-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+#update-banner-dismiss:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
 /* ── Sidebar ────────────────────────────────────────── */
 
 #sidebar {

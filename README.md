@@ -272,7 +272,11 @@ If nothing is typed, see [Troubleshooting](#troubleshooting).
 
 ## Updating
 
-From **0.1.2** onward Typr updates itself. On startup it quietly asks GitHub whether a newer release exists; if one does, **General → Updates** shows the new version and a **Download & install** button. Installing runs with a progress bar and no setup wizard — Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
+From **0.1.2** onward Typr updates itself. On startup it quietly asks GitHub whether a newer release exists; if one does, a banner appears across the top of the window — *"Typr 0.1.3 is available"* — with an **Update** button next to it. Installing runs with a progress bar and no setup wizard: Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
+
+Nothing is ever downloaded or installed without you clicking **Update**.
+
+**Closing the banner (✕) dismisses that version for good.** It will not reappear on later launches, no matter how many times you restart. When a *newer* version is released the banner returns, because it only stays quiet about the exact version you dismissed. A dismissed update is never lost — **General → Updates** still lists it and will still install it on demand.
 
 You can check whenever you like from **General → Updates**. A failed check on startup is silent by design (no network, or GitHub rate-limiting, is not something worth interrupting you for); press the button and it will tell you exactly what went wrong.
 
