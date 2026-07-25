@@ -13,6 +13,15 @@
   <body>
     <div id="app">
       <div id="titlebar" data-tauri-drag-region>
+        <!-- Lives inside the titlebar rather than above the content: that strip is already
+             empty and already accounted for by every section's top padding, so showing this
+             reflows nothing. As a child of the titlebar its buttons are also above the drag
+             region instead of buried under it. -->
+        <div id="update-banner" class="hidden">
+          <span id="update-banner-text"></span>
+          <button id="update-banner-action" type="button" class="btn-primary">Update</button>
+          <button id="update-banner-dismiss" type="button" title="Hide this until the next release">Later</button>
+        </div>
         <div class="titlebar-button" id="titlebar-minimize" title="Minimize">
           <svg width="12" height="12" viewBox="0 0 12 12"><rect fill="currentColor" x="1.5" y="6.5" width="9" height="1" /></svg>
         </div>
@@ -26,13 +35,6 @@
         <div class="titlebar-button" id="titlebar-close" title="Close">
           <svg width="12" height="12" viewBox="0 0 12 12"><path fill="none" stroke="currentColor" stroke-width="1.2" d="M2.5,2.5 l7,7 M9.5,2.5 l-7,7" /></svg>
         </div>
-      </div>
-      <!-- Sits above the sidebar/content split so it is visible from any tab. Its controls
-           are padded below the fixed titlebar, which would otherwise intercept the clicks. -->
-      <div id="update-banner" class="hidden">
-        <span id="update-banner-text"></span>
-        <button id="update-banner-action" type="button" class="btn-primary">Update</button>
-        <button id="update-banner-dismiss" type="button" title="Hide this until the next release">Later</button>
       </div>
       <div id="app-body">
       <aside id="sidebar">

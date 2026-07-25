@@ -97,29 +97,29 @@ body {
 
 /* ── Update banner ──────────────────────────────────── */
 
-/* A flex sibling of #app-body, so showing it shrinks the app rather than covering it.
-   #titlebar is fixed, full-width and z-index 9999, so anything drawn in the top 32px is
-   unclickable — it swallows the press and starts a window drag instead. The top padding
-   pushes the controls clear of it; the background still runs underneath, so the bar reads
-   as one strip with the window buttons floating on it. */
+/* A child of the fixed titlebar, which sits outside normal flow — so appearing and
+   disappearing never moves the sidebar or content by a pixel. margin-right:auto claims the
+   empty left side of the strip and leaves the window buttons at the far right. No background
+   of its own: it reads as part of the chrome rather than a bar bolted on top of the app. */
 #update-banner {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 40px 20px 12px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  margin-right: auto;
+  padding-left: 20px;
+  height: 32px;
   font-size: 13px;
   animation: fadeIn 200ms ease;
 }
 
+/* Deliberately not flex:1 — the strip should be only as wide as its own content so the
+   rest of the titlebar stays draggable. */
 #update-banner-text {
-  flex: 1;
   color: var(--text);
 }
 
 #update-banner-action {
-  padding: 5px 14px;
+  padding: 3px 12px;
   font-size: 12px;
 }
 
@@ -127,7 +127,7 @@ body {
    close button and the two are indistinguishable at a glance — dismissing the notice and
    quitting the app should not look like the same control. */
 #update-banner-dismiss {
-  padding: 5px 12px;
+  padding: 3px 10px;
   border: none;
   border-radius: 4px;
   background: transparent;
