@@ -98,12 +98,15 @@ body {
 /* ── Update banner ──────────────────────────────────── */
 
 /* A flex sibling of #app-body, so showing it shrinks the app rather than covering it.
-   The right padding clears the fixed titlebar buttons, which float over this strip. */
+   #titlebar is fixed, full-width and z-index 9999, so anything drawn in the top 32px is
+   unclickable — it swallows the press and starts a window drag instead. The top padding
+   pushes the controls clear of it; the background still runs underneath, so the bar reads
+   as one strip with the window buttons floating on it. */
 #update-banner {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 150px 10px 20px;
+  padding: 40px 20px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   font-size: 13px;
@@ -120,22 +123,21 @@ body {
   font-size: 12px;
 }
 
+/* Deliberately a word, not a second ✕. An ✕ here sits a few pixels from the window's own
+   close button and the two are indistinguishable at a glance — dismissing the notice and
+   quitting the app should not look like the same control. */
 #update-banner-dismiss {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
+  padding: 5px 12px;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
+  font-size: 12px;
   cursor: pointer;
 }
 
 #update-banner-dismiss:hover {
-  background: var(--border);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
