@@ -4,6 +4,29 @@ This changelog documents the major engineering milestones and features added dur
 
 ---
 
+## [v0.1.4] - 2026-08-24 — Centered Launch, Unified Dropdowns & AI Formatting Hardening
+
+### 🎯 1. Window Always Centered — Fresh Launch & Tray Restore
+* **True Center on Every Launch**: Fresh launches and re-shows from the system tray now call `window.center()` (`src-tauri/tauri.conf.json: center:true` + `src-tauri/src/main.rs`) so the 1160×720 window appears in the middle of the current monitor. Previously it drifted to the top-left.
+* **Second-Instance Focus**: Launching `Typr.exe` while hidden to tray (single-instance mutex `Local\TyprSingleInstanceMutex`) now finds the existing `"Typr"` HWND and restores/centers it (`FindWindowW` → `ShowWindow(SW_RESTORE)` → `SetWindowPos` at `(screen_w-1160)/2, (screen_h-720)/2` → `SetForegroundWindow`) instead of silently exiting.
+* **Background-Mode Safe**: Works whether `background_mode` is on (hide to tray) or off (exit on close).
+
+### 🎨 2. Unified Dark Dropdowns — No More Native Grey
+* **Custom Select Everywhere**: Replaced every native Windows `<select>` grey list (Mic, Whisper model, Parakeet model, AI model, `auto-context-override`, `app-rule-category`) with a dark themed panel that matches the existing running-apps picker (`src/style.css:.custom-select*` + `src/main.ts:enhanceSelect()`).
+* **Fixed Positioning & Keyboard**: Panel is `position:fixed` appended to `body` with flip-above logic, `MutationObserver` for dynamic mic list, `ArrowUp/Down`, `Enter`, `Home/End`, `Escape`, outside-click and `resize`/`scroll` auto-close, and `syncCustomSelectDisplay()` after every programmatic `value = ...`.
+
+### 🤖 3. AI Prompt Hardening — No More Phantom Quotes & Smart Layout
+* **Developer Mode Fixed**: `CONTEXT_DEVELOPER` no longer joins `"quick overlay button"` into `quickOverlayButton` or wraps it in `"..."`/`backticks`. Now `NEVER join`/`NEVER wrap` unless an explicit casing command (`"camel case ..."` etc.) or a path with separators (`"src slash main dot rs"`). Terse but detail-preserving (`keep every meaningful detail`).
+* **Intelligent Paragraphs & Bullets — Automatic, Not Explicit**: `CLEANUP_PROMPT`, `CONTEXT_PROFESSIONAL`, `CONTEXT_EMAIL`, `PROMPT_MODE_NATURAL` now break long/multi-topic dictation into 2–4 short paragraphs and auto-use `"- "` bullets for enumerations, without needing a spoken `"make it a list"` command. Single short thoughts stay plain prose.
+* **Anti-Quote Guard Everywhere**: All Auto prompts (`Messaging`, `Email`, `Professional`, `Developer`) carry `NEVER add/wrap quotation marks` and `NEVER join` invariants.
+* **Regression Tests**: 4 new `ai_postprocess` tests (`267` total `cargo test --lib` passing) assert the above invariants survive future edits.
+
+### 📝 4. Agent Reference & Reliability
+* **AGENTS.md**: New repo-root guide documenting the centered-launch invariant, custom-select invariant, and AI prompt invariants + check commands (`tsc --noEmit`, `vite build`, `cargo test --lib`).
+* **Builds Still Clean**: `tsc --noEmit` and `vite build` pass; `cargo test --lib` at 267.
+
+---
+
 ## [v0.1.0] - Recent Development & Polishing
 
 ### 🚀 1. Hardware-Accelerated Local Whisper Engine (GPU/CUDA Integration)
