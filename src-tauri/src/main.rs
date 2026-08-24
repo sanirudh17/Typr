@@ -131,6 +131,40 @@ fn acquire_single_instance() -> Result<SingleInstanceGuard, String> {
     Ok(SingleInstanceGuard)
 }
 
+/// When a second process hits the single-instance mutex, try to bring the
+/// already-running window to the front and center it, so a Start-menu /
+/// shortcut launch while the app is hidden to tray (background mode) still
+/// "opens" the window in the middle of the screen instead of silently
+/// exiting. Best-effort: failure is silently ignored and the process just
+/// exits as before.
+#[cfg(windows)]
+fn try_focus_existing_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetSystemMetrics, SetForegroundWindow, SetWindowPos, ShowWindow,
+        SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    unsafe {
+        let title: Vec<u16> = "Typr".encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd.is_null() {
+            return;
+        }
+        // Center on the primary monitor using the configured window size.
+        // 1160×720 is the default in tauri.conf.json; centering via the OS
+        // metrics keeps the second-launch behaviour consistent with the
+        // `center: true` / `window.center()` path in the main instance.
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let win_w = 1160;
+        let win_h = 720;
+        let x = ((screen_w - win_w) / 2).max(0);
+        let y = ((screen_h - win_h) / 2).max(0);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
 fn get_app_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -708,6 +742,8 @@ fn main() {
         Ok(guard) => guard,
         Err(message) => {
             eprintln!("[Typr] {}", message);
+            #[cfg(windows)]
+            try_focus_existing_window();
             return;
         }
     };
@@ -795,8 +831,16 @@ fn main() {
 
                 if launched_hidden() {
                     println!("[Typr] Launched hidden (auto-start); main window stays in tray");
-                } else if let Err(e) = window.show() {
-                    eprintln!("[Typr] Failed to show main window: {}", e);
+                } else {
+                    // Always launch centered on the current monitor, whether this is a fresh
+                    // process or the window is being re-shown from the tray. The config
+                    // `center: true` handles the very first show, but the explicit call
+                    // guarantees the same result after the window has been hidden to tray
+                    // (background mode) or when the OS restores a previous top-left position.
+                    let _ = window.center();
+                    if let Err(e) = window.show() {
+                        eprintln!("[Typr] Failed to show main window: {}", e);
+                    }
                 }
 
                 let app_handle = app.handle().clone();
@@ -846,6 +890,9 @@ fn main() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(w) = app.get_webview_window("main") {
+                            // Center every time the user re-opens from the tray so the
+                            // window never reappears where it was hidden (top-left drift).
+                            let _ = w.center();
                             let _ = w.unminimize();
                             let _ = w.show();
                             let _ = w.set_focus();
@@ -869,6 +916,7 @@ fn main() {
                     {
                         let app = tray.app_handle();
                         if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.center();
                             let _ = w.unminimize();
                             let _ = w.show();
                             let _ = w.set_focus();

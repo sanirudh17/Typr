@@ -20,7 +20,8 @@
         "minHeight": 500,
         "resizable": true,
         "decorations": false,
-        "visible": false
+        "visible": false,
+        "center": true
       }
     ],
     "macOSPrivateApi": true,

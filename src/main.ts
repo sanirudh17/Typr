@@ -357,6 +357,7 @@ async function loadSettings() {
     currentSettings.whisperModel = modelSelect.value;
     await invoke("save_settings", { settings: currentSettings });
   }
+  syncCustomSelectDisplay(modelSelect);
   await checkModelStatus();
 
   // Groq key — mirrored into both the Engine and AI tab inputs.
@@ -390,6 +391,8 @@ async function loadSettings() {
 
   // Auto context override + app rules
   autoContextOverride.value = currentSettings.autoContextOverride || "auto";
+  syncCustomSelectDisplay(autoContextOverride);
+  syncCustomSelectDisplay(appRuleCategory);
   await loadAppRules();
 }
 
@@ -404,6 +407,7 @@ async function populateMics() {
     micSelect.appendChild(option);
   });
   micSelect.value = previous;
+  syncCustomSelectDisplay(micSelect);
 }
 
 // Mirrors the dispatch arms in recorder.rs. An unrecognized value falls back to local so a
@@ -430,6 +434,7 @@ function setParakeetModel(variant: string) {
   const v = variant === "v2" ? "v2" : "v3";
   currentSettings.parakeetModel = v;
   parakeetModelSelect.value = v;
+  syncCustomSelectDisplay(parakeetModelSelect);
 }
 
 /// Reflect whether the selected variant is on disk, so the button says what it will do.
@@ -527,6 +532,7 @@ function setAiModel(model: string) {
   const m = AI_MODELS.includes(model) ? model : AI_MODEL_DEFAULT;
   currentSettings.aiModel = m;
   aiModelSelect.value = m;
+  syncCustomSelectDisplay(aiModelSelect);
 }
 
 function setAiProfile(profile: string) {
@@ -1803,6 +1809,233 @@ document.addEventListener("mousedown", (e) => {
     closePicker();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Custom selects — replaces every native <select> dropdown with a dark,
+// app-themed panel that matches the app-picker. The native element is kept
+// (display:none) as the source of truth so all existing change handlers keep
+// working; the custom trigger/panel merely mirrors its value and fires
+// `change` on selection.
+// ---------------------------------------------------------------------------
+function closeAllCustomSelects() {
+  document.querySelectorAll(".custom-select-panel").forEach((p) => p.classList.add("hidden"));
+  document.querySelectorAll(".custom-select").forEach((w) => w.classList.remove("open"));
+  document.querySelectorAll<HTMLButtonElement>(".custom-select-trigger").forEach((t) => t.setAttribute("aria-expanded", "false"));
+}
+
+function positionCustomPanel(trigger: HTMLElement, panel: HTMLElement) {
+  const rect = trigger.getBoundingClientRect();
+  const gap = 4;
+  const maxH = 240;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // Default below the trigger
+  let top = rect.bottom + gap;
+  let left = rect.left;
+  let width = rect.width;
+  // Clamp width if it would overflow viewport
+  if (left + width > vw - 8) left = Math.max(8, vw - width - 8);
+  // Flip above if not enough space below but more above
+  const spaceBelow = vh - rect.bottom - 8;
+  const spaceAbove = rect.top - 8;
+  const preferAbove = spaceBelow < 140 && spaceAbove > spaceBelow;
+  if (preferAbove) {
+    // Render above — estimate panel height; after layout it scrolls if still too tall
+    panel.style.maxHeight = Math.min(maxH, spaceAbove - gap) + "px";
+    // We need the panel's height; if hidden its scrollHeight is 0 so use maxH as fallback
+    const h = Math.min(maxH, panel.scrollHeight || maxH);
+    top = rect.top - h - gap;
+    if (top < 8) top = 8;
+  } else {
+    panel.style.maxHeight = Math.min(maxH, spaceBelow - gap) + "px";
+  }
+  panel.style.left = left + "px";
+  panel.style.top = top + "px";
+  panel.style.width = width + "px";
+}
+
+function syncCustomSelectDisplay(select: HTMLSelectElement) {
+  const wrapper = (select as unknown as { _customWrapper?: HTMLElement })._customWrapper;
+  if (!wrapper) return;
+  const valueSpan = wrapper.querySelector<HTMLElement>(".custom-select-value");
+  if (!valueSpan) return;
+  const opt = select.options[select.selectedIndex];
+  valueSpan.textContent = opt ? (opt.textContent?.trim() ?? "") : "";
+  // Update selected mark in panel if already rendered
+  const panel = (select as unknown as { _customPanel?: HTMLElement })._customPanel;
+  if (panel) {
+    Array.from(panel.children).forEach((el) => {
+      const v = (el as HTMLElement).dataset.value;
+      el.classList.toggle("selected", v === select.value);
+    });
+  }
+}
+
+function enhanceSelect(select: HTMLSelectElement) {
+  if ((select as unknown as { dataset: DOMStringMap }).dataset.customized) return;
+  (select as unknown as { dataset: DOMStringMap }).dataset.customized = "true";
+  const wrapper = document.createElement("div");
+  wrapper.className = "custom-select";
+  wrapper.dataset.selectId = select.id;
+  // Insert wrapper where the select was, then move the select inside (hidden)
+  select.parentNode!.insertBefore(wrapper, select);
+  wrapper.appendChild(select);
+  (select as unknown as { _customWrapper?: HTMLElement })._customWrapper = wrapper;
+  select.style.display = "none";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "custom-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const valueSpan = document.createElement("span");
+  valueSpan.className = "custom-select-value";
+  const chevron = document.createElement("span");
+  chevron.className = "custom-select-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.innerHTML = `<svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  trigger.append(valueSpan, chevron);
+  wrapper.appendChild(trigger);
+  const panel = document.createElement("div");
+  panel.className = "custom-select-panel hidden";
+  panel.setAttribute("role", "listbox");
+  if (select.id) panel.setAttribute("aria-labelledby", select.id);
+  document.body.appendChild(panel);
+  (select as unknown as { _customPanel?: HTMLElement })._customPanel = panel;
+  // Also keep refs on wrapper for positioning
+  (wrapper as unknown as { _panel?: HTMLElement; _trigger?: HTMLElement })._panel = panel;
+  (wrapper as unknown as { _panel?: HTMLElement; _trigger?: HTMLElement })._trigger = trigger;
+  const renderOptions = () => {
+    panel.innerHTML = "";
+    Array.from(select.options).forEach((opt) => {
+      const item = document.createElement("div");
+      item.className = "custom-select-option";
+      if (opt.value === select.value) item.classList.add("selected");
+      item.textContent = opt.textContent?.trim() ?? "";
+      item.dataset.value = opt.value;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", String(opt.value === select.value));
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (opt.value !== select.value) {
+          select.value = opt.value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          syncCustomSelectDisplay(select);
+        }
+        closeAllCustomSelects();
+        trigger.focus();
+      });
+      panel.appendChild(item);
+    });
+  };
+  (select as unknown as { _customRender?: () => void })._customRender = renderOptions;
+  const open = () => {
+    closeAllCustomSelects();
+    renderOptions();
+    // highlight selected
+    const selected = panel.querySelector<HTMLElement>(".selected");
+    if (selected) selected.classList.add("active");
+    positionCustomPanel(trigger, panel);
+    panel.classList.remove("hidden");
+    wrapper.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+    // ensure active is visible
+    panel.querySelector<HTMLElement>(".active")?.scrollIntoView({ block: "nearest" });
+  };
+  const close = () => {
+    panel.classList.add("hidden");
+    wrapper.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+    panel.querySelectorAll(".active").forEach((el) => el.classList.remove("active"));
+  };
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (panel.classList.contains("hidden")) open();
+    else close();
+  });
+  trigger.addEventListener("keydown", (e) => {
+    const options = Array.from(panel.children) as HTMLElement[];
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (panel.classList.contains("hidden")) {
+        open();
+        return;
+      }
+      let idx = options.findIndex((el) => el.classList.contains("active"));
+      options.forEach((el) => el.classList.remove("active"));
+      if (e.key === "ArrowDown") idx = idx < 0 ? 0 : (idx + 1) % options.length;
+      else idx = idx < 0 ? options.length - 1 : (idx - 1 + options.length) % options.length;
+      options[idx]?.classList.add("active");
+      options[idx]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" || e.key === " ") {
+      if (!panel.classList.contains("hidden")) {
+        e.preventDefault();
+        const active = panel.querySelector<HTMLElement>(".custom-select-option.active");
+        const target = active ?? (panel.querySelector<HTMLElement>(".custom-select-option.selected"));
+        if (target?.dataset.value !== undefined) {
+          select.value = target.dataset.value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        close();
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    } else if (e.key === "Escape") {
+      if (!panel.classList.contains("hidden")) {
+        e.preventDefault();
+        close();
+      }
+    } else if (e.key === "Home") {
+      if (!panel.classList.contains("hidden")) {
+        e.preventDefault();
+        options.forEach((el) => el.classList.remove("active"));
+        options[0]?.classList.add("active");
+        options[0]?.scrollIntoView({ block: "nearest" });
+      }
+    } else if (e.key === "End") {
+      if (!panel.classList.contains("hidden")) {
+        e.preventDefault();
+        options.forEach((el) => el.classList.remove("active"));
+        options[options.length - 1]?.classList.add("active");
+        options[options.length - 1]?.scrollIntoView({ block: "nearest" });
+      }
+    }
+  });
+  // Keep display in sync when value changes programmatically
+  select.addEventListener("change", () => syncCustomSelectDisplay(select));
+  // Observe dynamic option changes (microphone list)
+  const observer = new MutationObserver(() => {
+    renderOptions();
+    syncCustomSelectDisplay(select);
+  });
+  observer.observe(select, { childList: true, subtree: true, attributes: true });
+  renderOptions();
+  syncCustomSelectDisplay(select);
+}
+
+function initCustomSelects() {
+  document.querySelectorAll<HTMLSelectElement>("select").forEach((sel) => enhanceSelect(sel));
+}
+
+// Global close handlers for custom selects
+document.addEventListener("mousedown", (e) => {
+  const target = e.target as Node;
+  const isInside = (target as HTMLElement).closest?.(".custom-select, .custom-select-panel");
+  if (!isInside) closeAllCustomSelects();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeAllCustomSelects();
+});
+window.addEventListener("resize", closeAllCustomSelects);
+window.addEventListener("scroll", closeAllCustomSelects, true);
+
+// Initialise immediately (script is at end of body) and also on DOM ready for safety
+initCustomSelects();
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initCustomSelects);
+}
 
 // ---------------------------------------------------------------------------
 // In-app updates
