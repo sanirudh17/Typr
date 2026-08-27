@@ -4,6 +4,21 @@ This changelog documents the major engineering milestones and features added dur
 
 ---
 
+## [v0.1.5] - 2026-08-27 — Updater Etiquette: Once-Only Banner & Panel-Only Checks
+
+### 🔔 1. Update Banner Shown Exactly Once Per Release
+* **Single Launch Prompt**: The titlebar update banner ("Typr X is available." with **Update**/**Later**) now appears only on the check that discovers a new version at app launch (`src/main.ts:runUpdateCheck`). Once dismissed with **Later**, it never re-appears for that version — on restarts either, via the persisted `dismissedUpdateVersion` setting.
+* **Per-Version, Not Forever**: Dismissal is an equality check, so saying **Later** to 0.1.4 still allows the 0.1.5 banner through — silence only ever applies to the exact version refused.
+
+### ⚙️ 2. Settings Checks Answered In-Panel Only
+* **No Pop-Up From The Button**: Triggering **Check for updates** in General → Updates now clears any visible banner and reports its result solely as the panel's status line + **Download & install** button (`src/main.ts:runUpdateCheck`). A launch check that lands while the user is already viewing the Updates panel is likewise suppressed there instead of popping the titlebar banner.
+* **Race Eliminated**: A shared in-flight check (`checkForUpdateOnce`) means a button click during the still-running startup check joins the original request instead of firing a second concurrent GitHub query — the panel and banner can no longer disagree about what was found.
+
+### 🧹 3. Release Infrastructure
+* **Manifest Hygiene**: `latest.json` is written without a UTF-8 BOM after a byte-order mark slipped into the v0.1.4 manifest and broke the updater's JSON decode ("error decoding response body") until it was replaced; the release pipeline now keeps the manifest BOM-free.
+
+---
+
 ## [v0.1.4] - 2026-08-24 — Centered Launch, Unified Dropdowns & AI Formatting Hardening
 
 ### 1. Window Always Centered — Fresh Launch & Tray Restore
