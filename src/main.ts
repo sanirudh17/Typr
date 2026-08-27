@@ -2063,6 +2063,20 @@ const updateBannerDismiss = document.getElementById("update-banner-dismiss")!;
 /// without re-querying GitHub.
 let pendingUpdate: Update | null = null;
 
+/// Single shared in-flight check(). The startup check and a button click must never hit
+/// GitHub concurrently: a click that lands while the startup check is still running joins
+/// it, so both continuations see one answer and the panel never fights the banner.
+let updateCheckInFlight: Promise<Update | null> | null = null;
+
+function checkForUpdateOnce(): Promise<Update | null> {
+  if (!updateCheckInFlight) {
+    updateCheckInFlight = checkForUpdate().finally(() => {
+      updateCheckInFlight = null;
+    });
+  }
+  return updateCheckInFlight;
+}
+
 async function installUpdate(update: Update) {
   updateBanner.classList.add("hidden");
   updateBtn.disabled = true;
@@ -2106,6 +2120,10 @@ async function installUpdate(update: Update) {
 /// release that is pulled and re-cut keeps its identity.
 function showUpdateBanner(version: string) {
   if (version === (currentSettings?.dismissedUpdateVersion || "")) return;
+  // The Updates panel carries the same news as its status line and button; while the user
+  // is looking at it the banner would be a duplicate prompt. This also covers a launch
+  // check that lands after the user has already opened the panel.
+  if (document.getElementById("section-general")?.classList.contains("active")) return;
   updateBannerText.textContent = `Typr ${version} is available.`;
   updateBanner.classList.remove("hidden");
 }
@@ -2135,9 +2153,12 @@ async function runUpdateCheck(userAsked: boolean) {
   if (userAsked) {
     updateBtn.disabled = true;
     updateStatus.textContent = "Checking…";
+    // A check asked for from the panel is answered in the panel: clear any banner so the
+    // result shows as the button + status line only, never as a pop-up.
+    updateBanner.classList.add("hidden");
   }
   try {
-    const update = await checkForUpdate();
+    const update = await checkForUpdateOnce();
     if (update) {
       pendingUpdate = update;
       updateStatus.textContent = `Version ${update.version} is available.`;
