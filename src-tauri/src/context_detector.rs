@@ -297,7 +297,7 @@ fn is_browser(proc: &str) -> bool {
     )
 }
 
-/// True when a focused child-control window class belongs to a native terminal/console
+/// True when the focused child-control window class belongs to a native terminal/console
 /// host (a real command-line surface), so dictation into it should use Developer styling.
 /// Matches exact console classes and known terminal-emulator class families, and rejects
 /// ordinary editor/text/browser control classes (`Chrome_WidgetWin_1`, `Edit`, …). Pure.
@@ -315,6 +315,24 @@ pub fn is_native_terminal_class(class: &str) -> bool {
     // Prefix families: ConEmu classes its consoles "VirtualConsoleClass" / "ConEmu*".
     let lower = class.to_ascii_lowercase();
     lower.starts_with("conemu") || lower.starts_with("virtualconsoleclass")
+}
+
+/// True when the foreground process itself is a terminal emulator or console host, so
+/// Auto-profile dictation pastes raw instead of going through the LLM. Complements
+/// `is_native_terminal_class`, which cannot catch every terminal: UWP-hosted terminals
+/// (Windows Terminal) report a generic `Windows.UI.Input.InputSite.WindowClass` focus
+/// child, so the process name is the robust signal there. Deliberately excludes IDEs
+/// (`Code.exe` etc.) — their Developer context keeps LLM styling for commit messages and
+/// comments. Pure.
+pub fn is_terminal_process(process_name: &str) -> bool {
+    const TERMINALS: &[&str] = &[
+        "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe",
+        "conhost.exe", "alacritty.exe", "wezterm-gui.exe", "conemu64.exe", "hyper.exe",
+        "tabby.exe", "mintty.exe", "putty.exe", "kitty.exe", "ghostty.exe", "wsl.exe",
+        "bash.exe",
+    ];
+    let lower = process_name.to_ascii_lowercase();
+    TERMINALS.contains(&lower.as_str())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -459,6 +477,26 @@ pub fn list_running_apps() -> Vec<RunningApp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_terminal_process() {
+        // The process map's terminal entries plus the ones class detection misses.
+        assert!(is_terminal_process("WindowsTerminal.exe"));
+        assert!(is_terminal_process("cmd.exe"));
+        assert!(is_terminal_process("powershell.exe"));
+        assert!(is_terminal_process("pwsh.exe"));
+        assert!(is_terminal_process("wt.exe"));
+        assert!(is_terminal_process("alacritty.exe"));
+        assert!(is_terminal_process("wezterm-gui.exe"));
+        assert!(is_terminal_process("mintty.exe"));
+        // Case-insensitive.
+        assert!(is_terminal_process("WINDOWSTERMINAL.EXE"));
+        // IDEs and ordinary apps are not terminals.
+        assert!(!is_terminal_process("Code.exe"));
+        assert!(!is_terminal_process("notepad.exe"));
+        assert!(!is_terminal_process("comet.exe"));
+        assert!(!is_terminal_process(""));
+    }
 
     #[test]
     fn test_messaging_apps() {
