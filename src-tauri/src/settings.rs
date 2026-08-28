@@ -61,7 +61,7 @@ fn default_cloud_model() -> String {
 }
 
 fn default_ai_model() -> String {
-    "qwen/qwen3.6-27b".to_string()
+    "qwen/qwen3.8-27b".to_string()
 }
 
 fn default_ai_profile() -> String {
@@ -96,7 +96,7 @@ impl Default for Settings {
             parakeet_model: "v3".to_string(),
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
-            ai_model: "qwen/qwen3.6-27b".to_string(),
+            ai_model: "qwen/qwen3.8-27b".to_string(),
             ai_profile: "cleanup".to_string(),
             ai_prompt_format: "natural".to_string(),
             ai_tone: "default".to_string(),
@@ -291,7 +291,7 @@ mod tests {
     fn test_default_ai_settings() {
         let s = Settings::default();
         assert_eq!(s.ai_enabled, false);
-        assert_eq!(s.ai_model, "qwen/qwen3.6-27b");
+        assert_eq!(s.ai_model, "qwen/qwen3.8-27b");
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space","cloudModel":"accurate"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.ai_enabled, false);
-        assert_eq!(s.ai_model, "qwen/qwen3.6-27b");
+        assert_eq!(s.ai_model, "qwen/qwen3.8-27b");
     }
 
     #[test]
