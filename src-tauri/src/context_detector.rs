@@ -317,6 +317,23 @@ pub fn is_native_terminal_class(class: &str) -> bool {
     lower.starts_with("conemu") || lower.starts_with("virtualconsoleclass")
 }
 
+/// True when the foreground process itself is a terminal emulator or console host. Used to
+/// distinguish a terminal surface from an IDE inside the Developer context: a terminal gets
+/// the literal-transcription AI prompt, while an IDE keeps the general Developer restyling.
+/// Needed alongside `is_native_terminal_class` because UWP-hosted terminals (Windows
+/// Terminal) report a generic `Windows.UI.Input.InputSite.WindowClass` focus child, so the
+/// class signal misses them. Pure.
+pub fn is_terminal_process(process_name: &str) -> bool {
+    const TERMINALS: &[&str] = &[
+        "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe",
+        "conhost.exe", "alacritty.exe", "wezterm-gui.exe", "conemu64.exe", "hyper.exe",
+        "tabby.exe", "mintty.exe", "putty.exe", "kitty.exe", "ghostty.exe", "wsl.exe",
+        "bash.exe",
+    ];
+    let lower = process_name.to_ascii_lowercase();
+    TERMINALS.contains(&lower.as_str())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppRule {
     pub process_name: String,
