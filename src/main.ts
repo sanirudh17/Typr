@@ -525,7 +525,7 @@ function setAutostart(enabled: boolean) {
 
 // Mirrors resolve_model() in ai_postprocess.rs — keep the two allowlists in step, or the
 // dropdown silently coerces a valid choice back to the default.
-const AI_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+const AI_MODELS = ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
 const AI_MODEL_DEFAULT = "qwen/qwen3.8-27b";
 
 function setAiModel(model: string) {

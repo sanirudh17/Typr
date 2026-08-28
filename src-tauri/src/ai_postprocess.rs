@@ -51,8 +51,20 @@ const MODEL_QWEN: &str = "qwen/qwen3.8-27b";
 const MODEL_FAST: &str = "openai/gpt-oss-20b";
 const MODEL_QUALITY: &str = "openai/gpt-oss-120b";
 
+/// The previous Qwen generation (3.6). Still active on Groq, and kept selectable in the UI
+/// for users who prefer it — the dropdown offers both generations alongside the gpt-oss
+/// pair, with 3.8 as the default.
+const MODEL_QWEN_LEGACY: &str = "qwen/qwen3.6-27b";
+
 /// Used when the stored setting is unknown, empty, or a since-deprecated id.
 const MODEL_DEFAULT: &str = MODEL_QWEN;
+
+/// True for any Qwen-family model (current and legacy). Both share the same parameter
+/// regime: reasoning must be "none" (Qwen writes its chain-of-thought into the content at
+/// "default"), no completion-token headroom is needed, and the retry target is gpt-oss.
+fn is_qwen(resolved: &str) -> bool {
+    resolved == MODEL_QWEN || resolved == MODEL_QWEN_LEGACY
+}
 
 /// Reasoning effort for a resolved model id.
 ///
@@ -63,7 +75,7 @@ const MODEL_DEFAULT: &str = MODEL_QWEN;
 ///   into the content field with no separate `reasoning` field to strip it from. `none` is
 ///   therefore the only safe value — see `has_reasoning_leak`.
 fn reasoning_effort_for(resolved: &str) -> &'static str {
-    if resolved == MODEL_QWEN {
+    if is_qwen(resolved) {
         "none"
     } else {
         "medium"
@@ -81,7 +93,7 @@ fn reasoning_effort_for(resolved: &str) -> &'static str {
 /// ceiling only has to clear a long dictation. Both are kept modest because Groq counts the
 /// requested ceiling — not the tokens actually used — against the per-minute token limit.
 fn max_completion_tokens_for(resolved: &str) -> u32 {
-    if resolved == MODEL_QWEN {
+    if is_qwen(resolved) {
         2048
     } else {
         3072
@@ -116,10 +128,7 @@ fn ai_client() -> &'static reqwest::Client {
 pub fn resolve_model(model: &str) -> &'static str {
     match model {
         MODEL_QWEN => MODEL_QWEN,
-        // Qwen 3.6 was superseded by 3.8 on Groq; migrate a stored 3.6 id explicitly instead
-        // of letting it fall through the catch-all (same destination, but the intent is
-        // documented here rather than accidental).
-        "qwen/qwen3.6-27b" => MODEL_QWEN,
+        MODEL_QWEN_LEGACY => MODEL_QWEN_LEGACY,
         MODEL_QUALITY => MODEL_QUALITY,
         MODEL_FAST => MODEL_FAST,
         _ => MODEL_DEFAULT,
@@ -136,7 +145,7 @@ pub fn resolve_model(model: &str) -> &'static str {
 /// output and it cannot fail that way at all. Retrying gpt-oss on gpt-oss would merely reroll
 /// the same dice.
 fn fallback_model(resolved: &str) -> Option<&'static str> {
-    if resolved == MODEL_QWEN {
+    if is_qwen(resolved) {
         Some(MODEL_FAST)
     } else {
         Some(MODEL_QWEN)
@@ -517,22 +526,23 @@ mod tests {
     #[test]
     fn test_resolve_model_allowlist() {
         assert_eq!(resolve_model("qwen/qwen3.8-27b"), "qwen/qwen3.8-27b");
+        // The previous Qwen generation stays selectable, not coerced to 3.8.
+        assert_eq!(resolve_model("qwen/qwen3.6-27b"), "qwen/qwen3.6-27b");
         assert_eq!(resolve_model("openai/gpt-oss-20b"), "openai/gpt-oss-20b");
         assert_eq!(resolve_model("openai/gpt-oss-120b"), "openai/gpt-oss-120b");
         // Unknown / empty / deprecated ids fall back to the default.
         assert_eq!(resolve_model(""), "qwen/qwen3.8-27b");
-        // A stored pre-3.8 Qwen id migrates to the new default instead of reaching the API.
-        assert_eq!(resolve_model("qwen/qwen3.6-27b"), "qwen/qwen3.8-27b");
         // llama-3.x is decommissioned on Groq 2026-08-16; a stale setting must not reach the API.
         assert_eq!(resolve_model("llama-3.1-8b-instant"), "qwen/qwen3.8-27b");
         assert_eq!(resolve_model("llama-3.3-70b-versatile"), "qwen/qwen3.8-27b");
     }
 
     /// The two families accept disjoint scales — sending gpt-oss's "medium" to Qwen, or Qwen's
-    /// "none" to gpt-oss, is a 400 from the API. Pin the mapping.
+    /// "none" to gpt-oss, is a 400 from the API. Pin the mapping for both Qwen generations.
     #[test]
     fn test_reasoning_effort_matches_model_family() {
         assert_eq!(reasoning_effort_for("qwen/qwen3.8-27b"), "none");
+        assert_eq!(reasoning_effort_for("qwen/qwen3.6-27b"), "none");
         assert_eq!(reasoning_effort_for("openai/gpt-oss-20b"), "medium");
         assert_eq!(reasoning_effort_for("openai/gpt-oss-120b"), "medium");
     }
@@ -540,9 +550,11 @@ mod tests {
     /// gpt-oss shares this budget with its reasoning and needs headroom; Qwen does not.
     #[test]
     fn test_gpt_oss_gets_more_token_headroom_than_qwen() {
-        let qwen = max_completion_tokens_for("qwen/qwen3.8-27b");
-        assert!(max_completion_tokens_for("openai/gpt-oss-20b") > qwen);
-        assert!(max_completion_tokens_for("openai/gpt-oss-120b") > qwen);
+        for qwen in ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b"] {
+            let q = max_completion_tokens_for(qwen);
+            assert!(max_completion_tokens_for("openai/gpt-oss-20b") > q);
+            assert!(max_completion_tokens_for("openai/gpt-oss-120b") > q);
+        }
     }
 
     /// The retry must always cross families, so it cannot inherit the failure that just
@@ -551,10 +563,11 @@ mod tests {
     #[test]
     fn test_fallback_always_crosses_family() {
         assert_eq!(fallback_model("qwen/qwen3.8-27b"), Some("openai/gpt-oss-20b"));
+        assert_eq!(fallback_model("qwen/qwen3.6-27b"), Some("openai/gpt-oss-20b"));
         assert_eq!(fallback_model("openai/gpt-oss-20b"), Some("qwen/qwen3.8-27b"));
         assert_eq!(fallback_model("openai/gpt-oss-120b"), Some("qwen/qwen3.8-27b"));
         // And the retry target is never the model that just failed.
-        for m in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"] {
+        for m in ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"] {
             assert_ne!(fallback_model(m), Some(m));
         }
     }
