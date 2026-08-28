@@ -256,6 +256,10 @@ impl Recorder {
             // is not sentence-formatted. The command pass below does the real work.
             replaced.clone()
         } else if settings.ai_enabled {
+            // Set when the foreground surface is a terminal: even the AI *fallback* must be
+            // raw, never the prose-formatted deterministic cleanup — a command pasted with
+            // sentence capitalization/periods is a corrupted command.
+            let mut terminal_focus_once = false;
             let base_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
                 let focused_class = crate::context_detector::focused_child_class();
@@ -284,6 +288,7 @@ impl Recorder {
                         app_dir,
                         "terminal focus -> literal-transcription AI prompt",
                     );
+                    terminal_focus_once = true;
                     ai_postprocess::terminal_system_prompt()
                 } else {
                     ai_postprocess::context_system_prompt(&category)
@@ -340,14 +345,26 @@ impl Recorder {
                     crate::debug_log::log(
                         app_dir,
                         &format!(
-                            "AI skipped (exceeded {}ms budget) -> using deterministic cleanup",
-                            budget
+                            "AI skipped (exceeded {}ms budget){}",
+                            budget,
+                            if terminal_focus_once {
+                                " -> terminal focus: raw fallback"
+                            } else {
+                                " -> using deterministic cleanup"
+                            }
                         ),
                     );
                     None
                 }
             };
-            choose_final(llm, deterministic)
+            // Terminal surface: on any LLM miss (slow/offline/error/empty) paste the raw
+            // transcription rather than the prose-formatted cleanup. Everything else keeps
+            // the deterministic result.
+            if terminal_focus_once {
+                choose_final(llm, replaced.clone())
+            } else {
+                choose_final(llm, deterministic)
+            }
         } else {
             deterministic
         };
@@ -460,6 +477,26 @@ mod tests {
             "comet.exe"
         ));
         assert!(!is_terminal_focus(&wt_cat, ""));
+    }
+
+    #[test]
+    fn test_terminal_focus_fallback_is_raw_not_prose() {
+        use crate::context_detector::ForegroundApp;
+        let wt = ForegroundApp { process_name: "WindowsTerminal.exe".into(), window_title: String::new() };
+        let wt_cat = crate::context_detector::resolve_category(&wt, &[], "", "");
+        assert!(is_terminal_focus(&wt_cat, "WindowsTerminal.exe"));
+
+        // On an LLM miss the terminal chooses the raw dictation, not the prose-formatted
+        // cleanup — a command must never be sentence-capitalized or given a trailing period.
+        let raw = "git commit dash m fix login bug";
+        let prose = "Git commit dash m fix login bug.";
+        let on_miss = choose_final(None, raw.to_string());
+        assert_eq!(on_miss, raw);
+        assert_ne!(on_miss, prose);
+
+        // Non-terminal surfaces still fall back to the deterministic cleanup.
+        assert_eq!(choose_final(Some("cleaned".to_string()), String::new()), "cleaned");
+        assert_eq!(choose_final(None, prose.to_string()), prose);
     }
 
     #[test]
