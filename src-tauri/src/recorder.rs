@@ -256,7 +256,6 @@ impl Recorder {
             // is not sentence-formatted. The command pass below does the real work.
             replaced.clone()
         } else if settings.ai_enabled {
-            let mut terminal_raw = false;
             let base_prompt = if settings.ai_profile == "auto" {
                 let fg = crate::context_detector::ForegroundApp::detect();
                 let focused_class = crate::context_detector::focused_child_class();
@@ -276,28 +275,13 @@ impl Recorder {
                         fg.process_name, focused_class, category
                     ),
                 );
-                if bypasses_ai_for_terminal(&settings.ai_profile, &category, &fg.process_name) {
-                    // A terminal surface: paste the dictation raw. Any LLM restyle rewords
-                    // commands, flags, and paths, which is exactly what a terminal cannot
-                    // tolerate. The command pass below still applies voice commands.
-                    crate::debug_log::log(
-                        app_dir,
-                        "terminal focus -> raw transcription (skipping AI & prose cleanup)",
-                    );
-                    terminal_raw = true;
-                    ""
-                } else {
-                    ai_postprocess::context_system_prompt(&category)
-                }
+                ai_postprocess::context_system_prompt(&category)
             } else {
                 ai_postprocess::resolve_system_prompt(
                     &settings.ai_profile,
                     &settings.ai_prompt_format,
                 )
             };
-            if terminal_raw {
-                replaced.clone()
-            } else {
             // Base prompt + the never-refuse contract + the user's cross-profile style
             // modifiers (Tone / Formatting / Custom Instructions). The modifiers land last so an
             // explicit setting overrides the profile's built-in style, but they can never
@@ -352,7 +336,6 @@ impl Recorder {
                 }
             };
             choose_final(llm, deterministic)
-            }
         } else {
             deterministic
         };
@@ -402,21 +385,6 @@ fn choose_final(llm: Option<String>, fallback: String) -> String {
     }
 }
 
-/// True when this dictation should paste raw instead of going through the LLM: the Auto
-/// profile resolved the foreground app to Developer AND that process is a terminal. Any
-/// LLM restyle rewords commands, flags, and paths, and a terminal user's expectation is
-/// literal transcription — the same raw contract as the command-detection bypass. IDEs
-/// stay on the Developer LLM styling (commit messages, comments). Pure.
-fn bypasses_ai_for_terminal(
-    profile: &str,
-    category: &crate::context_detector::ContextCategory,
-    process_name: &str,
-) -> bool {
-    profile == "auto"
-        && *category == crate::context_detector::ContextCategory::Developer
-        && crate::context_detector::is_terminal_process(process_name)
-}
-
 /// Produce the effective settings for a dictation given the session's profile override.
 /// `Some(profile)` (a Secondary-hotkey session) forces AI on with that profile; `None`
 /// (Primary hotkey) leaves the live settings untouched. Pure so the override semantics are
@@ -449,37 +417,6 @@ mod tests {
         let effective = apply_session_override(&base, None);
         assert_eq!(effective.ai_enabled, false);
         assert_eq!(effective.ai_profile, "cleanup");
-    }
-
-    #[test]
-    fn test_terminal_focus_bypasses_ai_only_for_auto_developer() {
-        use crate::context_detector::ForegroundApp;
-        // Windows Terminal is UWP-hosted: its focused child class is a generic input-site
-        // window, so the process map is what resolves Developer. It must still bypass.
-        let wt = ForegroundApp { process_name: "WindowsTerminal.exe".into(), window_title: String::new() };
-        let wt_cat = crate::context_detector::resolve_category(&wt, &[], "", "");
-        assert_eq!(wt_cat, crate::context_detector::ContextCategory::Developer);
-        assert!(bypasses_ai_for_terminal("auto", &wt_cat, "WindowsTerminal.exe"));
-
-        // IDEs resolve Developer too but are NOT terminals: keep the LLM styling.
-        let code = crate::context_detector::resolve_category(
-            &ForegroundApp { process_name: "Code.exe".into(), window_title: String::new() },
-            &[], "", "",
-        );
-        assert_eq!(code, crate::context_detector::ContextCategory::Developer);
-        assert!(!bypasses_ai_for_terminal("auto", &code, "Code.exe"));
-
-        // Explicit profiles mean the user asked for AI — never bypass.
-        assert!(!bypasses_ai_for_terminal("cleanup", &wt_cat, "WindowsTerminal.exe"));
-        assert!(!bypasses_ai_for_terminal("prompt", &wt_cat, "WindowsTerminal.exe"));
-
-        // Non-terminal processes and non-Developer categories never bypass.
-        assert!(!bypasses_ai_for_terminal(
-            "auto",
-            &crate::context_detector::ContextCategory::General,
-            "comet.exe"
-        ));
-        assert!(!bypasses_ai_for_terminal("auto", &wt_cat, ""));
     }
 
     #[test]
