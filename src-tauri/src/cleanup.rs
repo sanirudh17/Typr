@@ -132,6 +132,69 @@ pub fn strip_filler_words(text: &str) -> String {
     kept.join(" ")
 }
 
+/// Remove consecutive repeated words and short repeated phrases deterministically.
+/// Always applied (even when AI is off) to fix Whisper/Parakeet stutters and
+/// chunk-join artefacts like "hello hello" or "fix the login fix the login".
+/// Keeps entities verbatim; checks 1-, 2-, and 3-word repeats with a small
+/// window so "the the" is collapsed but "the cat sat on the mat" is not.
+/// Pure; never touches punctuation beyond token boundaries.
+pub fn deduplicate_text(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() <= 1 {
+        return text.to_string();
+    }
+    let lowered: Vec<String> = tokens
+        .iter()
+        .map(|t| {
+            t.to_lowercase()
+                .trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`' | '.'))
+                .to_string()
+        })
+        .collect();
+    let is_entity = |tok: &str| {
+        let t = tok.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`'));
+        let tl = t.trim_end_matches(['.', '/']);
+        tl.contains('@') || tl.contains("://") || (tl.contains('/') && tl.contains('.'))
+    };
+    let mut kept: Vec<String> = Vec::new();
+    let mut kept_lower: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        // Check for 3-, 2-, then 1-word repeats: if the next 3 words equal the last 3 kept, skip them.
+        let mut skipped = false;
+        for n in (1..=3).rev() {
+            if i + n <= tokens.len() && kept.len() >= n {
+                // Don't dedupe if any token in the window is an entity (email/path) — those
+                // must survive verbatim, and repeating an email is not a stutter.
+                let window_tokens = &tokens[i..i + n];
+                let tail_tokens = &kept[kept.len() - n..];
+                if window_tokens.iter().any(|t| is_entity(t)) || tail_tokens.iter().any(|t| is_entity(t)) {
+                    continue;
+                }
+                let window_lower = &lowered[i..i + n];
+                let tail_lower = &kept_lower[kept_lower.len() - n..];
+                if window_lower == tail_lower {
+                    // Skip the repeated window; do not update kept, so consecutive repeats of
+                    // the same window (e.g., "hello hello hello") collapse to one.
+                    i += n;
+                    skipped = true;
+                    break;
+                }
+            }
+        }
+        if skipped {
+            continue;
+        }
+        kept.push(tokens[i].to_string());
+        kept_lower.push(lowered[i].clone());
+        i += 1;
+    }
+    kept.join(" ")
+}
+
 /// Whether the final token of `s` is an email or URL.
 fn last_token_is_verbatim(s: &str) -> bool {
     match s.split_whitespace().last() {

@@ -395,6 +395,14 @@ impl Recorder {
             deterministic
         };
 
+        // Deterministic de-duplication: collapse consecutive repeated words/phrases
+        // (1-3 word window) that Whisper/Parakeet and chunk joins sometimes emit even
+        // when AI post-processing is off or the AI kept the stutter. This fixes "words
+        // being repeated despite said only once" without touching non-consecutive repeats.
+        // Runs before voice commands so "hello hello" dedupes to one hello before any
+        // casing/layout pass. Always on — stutters are never intentional.
+        let final_text = crate::cleanup::deduplicate_text(&final_text);
+
         // Final deterministic pass: apply always-on voice commands (casing / layout / symbols).
         // Runs after cleanup and any AI pass so nothing downstream can undo it; identical
         // behavior whether AI is on or off.
