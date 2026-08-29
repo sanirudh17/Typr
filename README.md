@@ -191,7 +191,7 @@ Qwen is the default because it was both quickest and produced the best-structure
 ### Step 1 — Install the app
 
 1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
-2. Under **Assets**, download **`Typr_0.1.6_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+2. Under **Assets**, download **`Typr_0.1.7_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
 3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
 4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
@@ -336,8 +336,8 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.1.6_x64-setup.exe` (~278 MB)
-- `src-tauri/target/release/bundle/msi/Typr_0.1.6_x64_en-US.msi` (~436 MB)
+- `src-tauri/target/release/bundle/nsis/Typr_0.1.7_x64-setup.exe` (~278 MB)
+- `src-tauri/target/release/bundle/msi/Typr_0.1.7_x64_en-US.msi` (~436 MB)
 
 To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
 
@@ -360,13 +360,13 @@ whichever release should be handed out.
 
 ```json
 {
-  "version": "0.1.6",
+  "version": "0.1.7",
   "notes": "What changed",
   "pub_date": "2026-08-29T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.1.6/Typr_0.1.6_x64-setup.exe"
+      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.1.7/Typr_0.1.7_x64-setup.exe"
     }
   }
 }
