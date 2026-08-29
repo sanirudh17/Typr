@@ -70,6 +70,68 @@ fn token_is_verbatim(chars: &[char], i: usize) -> bool {
     token.contains(&'@') || token.windows(3).any(|w| w == [':', '/', '/'])
 }
 
+/// Strip filler words and stutters deterministically. Used as a safety net
+/// when AI cleanup is on but the LLM was skipped (voice-command bypass) or
+/// failed — especially for Developer/Terminal where "um git status" must not
+/// paste the "um". Keeps code identifiers, emails, URLs, and file paths
+/// verbatim, and collapses consecutive repeated words.
+pub fn strip_filler_words(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    const SINGLE_FILLER: &[&str] = &["um", "uh", "er", "ah", "hmm", "erm", "uhm"];
+    let raw_tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut kept: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut prev_kept_lower: Option<String> = None;
+
+    while i < raw_tokens.len() {
+        let tok = raw_tokens[i];
+        let lower = tok.to_lowercase();
+        let trimmed = lower.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`' | '.'));
+        let is_entity = {
+            let t = tok.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`'));
+            let tl = t.trim_end_matches(['.', '/']);
+            tl.contains('@') || tl.contains("://") || (tl.contains('/') && tl.contains('.'))
+        };
+        if is_entity {
+            let norm = trimmed.to_string();
+            let is_repeat = prev_kept_lower.as_deref() == Some(&norm) && !norm.is_empty();
+            if !is_repeat {
+                kept.push(tok.to_string());
+                prev_kept_lower = Some(norm);
+            }
+            i += 1;
+            continue;
+        }
+        // Two-word filler phrases: "you know", "i mean" (case-insensitive, punctuation-tolerant).
+        if i + 1 < raw_tokens.len() {
+            let next = raw_tokens[i + 1];
+            let next_trimmed = next.to_lowercase().trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`' | '.')).to_string();
+            let is_you_know = trimmed == "you" && next_trimmed == "know";
+            let is_i_mean = trimmed == "i" && next_trimmed == "mean";
+            if is_you_know || is_i_mean {
+                i += 2;
+                continue;
+            }
+        }
+        if SINGLE_FILLER.contains(&trimmed) {
+            i += 1;
+            continue;
+        }
+        let norm = trimmed.to_string();
+        let is_repeat = prev_kept_lower.as_deref() == Some(&norm) && !norm.is_empty();
+        if is_repeat {
+            i += 1;
+            continue;
+        }
+        kept.push(tok.to_string());
+        prev_kept_lower = Some(norm);
+        i += 1;
+    }
+    kept.join(" ")
+}
+
 /// Whether the final token of `s` is an email or URL.
 fn last_token_is_verbatim(s: &str) -> bool {
     match s.split_whitespace().last() {

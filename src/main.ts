@@ -29,6 +29,7 @@ interface Settings {
   autoContextOverride: string;
   appRules: AppRule[];
   dismissedUpdateVersion: string;
+  developerStripFiller: boolean;
 }
 
 interface AppRule {
@@ -129,6 +130,8 @@ const aiStyleBullets = document.getElementById("ai-style-bullets")!;
 const aiStyleParagraphs = document.getElementById("ai-style-paragraphs")!;
 const aiStyleRaw = document.getElementById("ai-style-raw")!;
 const aiCustomInstructions = document.getElementById("ai-custom-instructions") as HTMLTextAreaElement;
+const devStripFillerOn = document.getElementById("dev-strip-filler-on")!;
+const devStripFillerOff = document.getElementById("dev-strip-filler-off")!;
 const autoContextOverride = document.getElementById("auto-context-override") as HTMLSelectElement;
 const appRuleProcess = document.getElementById("app-rule-process") as HTMLInputElement;
 const appPickerPanel = document.getElementById("app-picker-panel") as HTMLDivElement;
@@ -388,6 +391,7 @@ async function loadSettings() {
   setAiTone(currentSettings.aiTone || "default");
   setAiFormat(currentSettings.aiFormat || "default");
   aiCustomInstructions.value = currentSettings.aiCustomInstructions || "";
+  setDeveloperStripFiller(currentSettings.developerStripFiller ?? true);
 
   // Auto context override + app rules
   autoContextOverride.value = currentSettings.autoContextOverride || "auto";
@@ -573,6 +577,12 @@ function setAiFormat(format: string) {
   aiStyleRaw.classList.toggle("active", f === "raw");
 }
 
+function setDeveloperStripFiller(strip: boolean) {
+  currentSettings.developerStripFiller = strip;
+  devStripFillerOn.classList.toggle("active", strip);
+  devStripFillerOff.classList.toggle("active", !strip);
+}
+
 // One-click presets set the Tone + Formatting toggles together (no separate backend).
 function applyPreset(tone: string, format: string) {
   setAiTone(tone);
@@ -748,6 +758,15 @@ aiStyleBullets.addEventListener("click", () => { setAiFormat("bullets"); saveSet
 aiStyleParagraphs.addEventListener("click", () => { setAiFormat("paragraphs"); saveSettings(); });
 aiStyleRaw.addEventListener("click", () => { setAiFormat("raw"); saveSettings(); });
 aiCustomInstructions.addEventListener("change", () => saveSettings());
+
+devStripFillerOn.addEventListener("click", () => {
+  setDeveloperStripFiller(true);
+  saveSettings();
+});
+devStripFillerOff.addEventListener("click", () => {
+  setDeveloperStripFiller(false);
+  saveSettings();
+});
 
 autoContextOverride.addEventListener("change", () => {
   currentSettings.autoContextOverride = autoContextOverride.value;

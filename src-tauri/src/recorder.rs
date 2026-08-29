@@ -238,6 +238,21 @@ impl Recorder {
 
         // Deterministic cleanup is the always-available fallback.
         let deterministic = cleanup_text(&replaced);
+        // Filler safety net: when AI is on and the user opted to strip filler in
+        // Developer/Terminal, ensure filler never survives a bypass or an LLM miss.
+        // The AI prompt already asks to strip filler; this is the deterministic
+        // guarantee for the fallback paths where the LLM is not in the loop.
+        let strip_filler = settings.ai_enabled && settings.developer_strip_filler;
+        let replaced_stripped = if strip_filler {
+            crate::cleanup::strip_filler_words(&replaced)
+        } else {
+            replaced.clone()
+        };
+        let deterministic_stripped = if strip_filler {
+            crate::cleanup::strip_filler_words(&deterministic)
+        } else {
+            deterministic.clone()
+        };
 
         // Command-bearing dictations (casing/layout/symbols) go straight to the deterministic
         // path: the LLM would otherwise reword or half-apply the command phrases before the
@@ -254,7 +269,9 @@ impl Recorder {
             // Command/code dictation: skip prose cleanup too (no forced capitalization or
             // trailing period) so literal input like "claude --dangerously-skip-permissions"
             // is not sentence-formatted. The command pass below does the real work.
-            replaced.clone()
+            // When strip_filler is on, use the filler-stripped raw so "um git status"
+            // does not keep the "um".
+            if strip_filler { replaced_stripped.clone() } else { replaced.clone() }
         } else if settings.ai_enabled {
             // Set when the foreground surface is a terminal: even the AI *fallback* must be
             // raw, never the prose-formatted deterministic cleanup — a command pasted with
@@ -359,12 +376,21 @@ impl Recorder {
             };
             // Terminal surface: on any LLM miss (slow/offline/error/empty) paste the raw
             // transcription rather than the prose-formatted cleanup. Everything else keeps
-            // the deterministic result.
-            if terminal_focus_once {
-                choose_final(llm, replaced.clone())
+            // the deterministic result. When strip_filler is on, the raw fallback is the
+            // filler-stripped version so filler never leaks.
+            let mut final_text_inner = if terminal_focus_once {
+                choose_final(llm, if strip_filler { replaced_stripped.clone() } else { replaced.clone() })
             } else {
-                choose_final(llm, deterministic)
+                choose_final(llm, if strip_filler { deterministic_stripped.clone() } else { deterministic.clone() })
+            };
+            // Safety net: if the LLM did return text but left filler in (model didn't obey),
+            // strip it deterministically when the user opted in. Applies to both terminal
+            // and IDE developer surfaces; the filler list is the unambiguous one (um/uh/etc.)
+            // so it never mangles code identifiers.
+            if strip_filler {
+                final_text_inner = crate::cleanup::strip_filler_words(&final_text_inner);
             }
+            final_text_inner
         } else {
             deterministic
         };

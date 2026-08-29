@@ -50,6 +50,11 @@ pub struct Settings {
     /// respects this — an explicit check from Settings always offers the update.
     #[serde(rename = "dismissedUpdateVersion", default)]
     pub dismissed_update_version: String,
+    /// Strip filler words (um/uh/er/you know/...) in Developer/Terminal
+    /// when AI cleanup is on. Exposed in AI → Advanced → Developer so the
+    /// user can keep them if preferred. Defaults to true (strip).
+    #[serde(rename = "developerStripFiller", default = "default_true")]
+    pub developer_strip_filler: bool,
 }
 
 fn default_parakeet_model() -> String {
@@ -84,6 +89,10 @@ fn default_auto_context_override() -> String {
     "auto".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -109,6 +118,7 @@ impl Default for Settings {
             app_rules: Vec::new(),
             auto_context_override: "auto".to_string(),
             dismissed_update_version: String::new(),
+            developer_strip_filler: true,
         }
     }
 }
