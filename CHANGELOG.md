@@ -4,6 +4,29 @@ This changelog documents the major engineering milestones and features added dur
 
 ---
 
+## [v0.1.6] - 2026-08-29 — Unified Developer, Punctuation-Aware Terminal & Filler Control
+
+### ✍️ 1. Developer Unification — Accurate, Not Terse
+* **One Common Developer:** `CONTEXT_DEVELOPER` is now accurate, not terse — keeps every meaningful detail, fixes spelling/caps/punct, but never condenses or deletes content to be shorter. The same accurate style is used for IDEs and for prose dictated inside a terminal. The old terse `Concise and direct...` that mis-interpreted `quick overlay button` and short-ened prose is gone. `Never join`/`Never wrap`/`Never prepend git` guards remain.
+* **Terminal Is Now Punctuation-Aware:** `CONTEXT_TERMINAL` (Windows Terminal/cmd/PowerShell) previously said `NEVER add a trailing period, NEVER capitalize` for everything, so prose like `ship the unification...` pasted as `ship the unification...` lowercased with no stops. Now: `if it looks like a command (git/npm/slash/flags) → preserved EXACTLY, dash→-, slash→/, NEVER caps/period; else if prose/sentences → normal caps + punctuation`. Fixes `lacks punctuation and full stops in everywhere and also capitalizations` in Windows Terminal and fixes the hallucination `I said the things in quotations only` → `git I said...` (added `NEVER prepend git/npm/cargo if not said` + quoted-text verbatim guard).
+* **No More Phantom `git` Prefix:** Both prompts now carry `NEVER prepend a command like "git"/"npm"/"cargo" if the user did not say it` with the `I said the things in quotations only must not become git...` example. Covers the `randomly added git commit in front` regress.
+
+### 🧹 2. Filler Always Stripped When AI Is On — Now Configurable
+* **Filler Never Leaks:** When `AI cleanup is on`, filler (`um/uh/er/ah/hmm`, `you know`/`I mean`, repeated words) is now stripped deterministically even if the LLM is bypassed (voice-command `dash`/`slash` paths) or fails/times out. Previously terminal fallback kept filler raw, so `um git status` pasted the `um`.
+* **Developer Toggle:** `Settings → AI → Advanced → Developer → Strip filler words` (`Keep`/`Strip`, default `Strip`) backed by `developerStripFiller` in `config.json` (`src-tauri/src/settings.rs`, `src-tauri/src/cleanup.rs:strip_filler_words`, `src-tauri/src/recorder.rs`). When off, the old raw fallback is kept.
+* **Terminal Detection Hardened:** `is_terminal_focus` now checks `is_terminal_process || is_native_terminal_class` (`src-tauri/src/recorder.rs`, `src-tauri/src/context_detector.rs:ConsoleWindowClass` etc.), so a `Herdr` multiplexer inside `WindowsTerminal.exe` (which shows only `Comet`/`Windows Terminal` in the running-apps picker) is still correctly `Developer + terminal focus`.
+
+### 🎨 3. UI Polish
+* **Model Labels:** `Qwen 3.6 27B` now reads `Legacy · Qwen 3.6 27B` like the other three options (`Recommended · Qwen 3.8 27B`, `Fast · gpt-oss-20b`, `Quality · gpt-oss-120b`) in `index.html` (`src/main.ts:AI_MODELS`).
+* **Dropdown At Top Of Page:** `positionCustomPanel` measured `panel.scrollHeight` while `hidden` as `0 → maxH 240`, so a 4-item panel flipped and clamped to `top: 8px` (the `dropdown at the top of the page` bug). Now it temporarily reveals the panel off-screen to measure the real `neededH` and flips only when `spaceBelow < neededH` (`src/main.ts`).
+* **Engine Warning Note:** `src/style.css:.settings-warning-note` was `color: var(--text-secondary)` on a `0.06` yellow wash with a `2px` left accent — barely visible and uneven. Now `color: var(--text)` on `0.10` wash with uniform `1px` border.
+
+### 🤖 4. Models
+* **Qwen 3.8 Default:** `qwen/qwen3.8-27b` is now the default AI model (`src-tauri/src/ai_postprocess.rs:resolve_model`, `src/main.ts:AI_MODEL_DEFAULT`), with `qwen/qwen3.6-27b` kept selectable; Groq `llama-3.x` decommissioned keys fall back to Qwen.
+* **Cloud Models:** `Fast (Turbo)` / `Accurate` still available via `openai/gpt-oss-20b` / `120b`.
+
+---
+
 ## [v0.1.5] - 2026-08-27 — Updater Etiquette: Once-Only Banner & Panel-Only Checks
 
 ### 🔔 1. Update Banner Shown Exactly Once Per Release
