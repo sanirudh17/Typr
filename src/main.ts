@@ -1835,15 +1835,35 @@ function positionCustomPanel(trigger: HTMLElement, panel: HTMLElement) {
   let width = rect.width;
   // Clamp width if it would overflow viewport
   if (left + width > vw - 8) left = Math.max(8, vw - width - 8);
-  // Flip above if not enough space below but more above
+  // Measure the panel's actual needed height. When hidden scrollHeight is 0, so we
+  // temporarily reveal it off-screen to get a real measurement; otherwise we
+  // overestimate at maxH, push the flipped panel to the top of the viewport
+  // (the "dropdown at the top of the page" bug) and flip more aggressively
+  // than needed.
+  let neededH = panel.scrollHeight;
+  if (panel.classList.contains("hidden") || neededH === 0) {
+    const prevDisplay = panel.style.display;
+    const prevVisibility = panel.style.visibility;
+    panel.style.visibility = "hidden";
+    panel.style.display = "flex";
+    panel.classList.remove("hidden");
+    neededH = panel.scrollHeight;
+    panel.classList.add("hidden");
+    panel.style.display = prevDisplay;
+    panel.style.visibility = prevVisibility;
+    if (!neededH) {
+      const count = panel.children.length;
+      neededH = Math.min(maxH, count * 32 + 8);
+      if (!neededH) neededH = 140;
+    }
+  }
+  neededH = Math.min(neededH, maxH);
   const spaceBelow = vh - rect.bottom - 8;
   const spaceAbove = rect.top - 8;
-  const preferAbove = spaceBelow < 140 && spaceAbove > spaceBelow;
+  const preferAbove = spaceBelow < neededH && spaceAbove > spaceBelow;
   if (preferAbove) {
-    // Render above — estimate panel height; after layout it scrolls if still too tall
     panel.style.maxHeight = Math.min(maxH, spaceAbove - gap) + "px";
-    // We need the panel's height; if hidden its scrollHeight is 0 so use maxH as fallback
-    const h = Math.min(maxH, panel.scrollHeight || maxH);
+    const h = Math.min(neededH, spaceAbove - gap);
     top = rect.top - h - gap;
     if (top < 8) top = 8;
   } else {

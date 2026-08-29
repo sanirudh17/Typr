@@ -279,7 +279,7 @@ impl Recorder {
                         fg.process_name, focused_class, category
                     ),
                 );
-                if is_terminal_focus(&category, &fg.process_name) {
+                if is_terminal_focus(&category, &fg.process_name, &focused_class) {
                     // A real terminal surface within the Developer context: the dictation is
                     // usually a command to run, so the pass must return the literal text to
                     // type (spoken symbols converted, filler stripped) instead of the general
@@ -406,16 +406,18 @@ impl Recorder {
 }
 
 /// True when the foreground surface is a terminal inside the Developer context: the Auto
-/// profile resolved Developer AND the process is a terminal emulator. Such dictation gets
-/// the literal-transcription AI prompt (commands typed back verbatim, spoken symbols
-/// converted) instead of the general Developer restyle, which condenses commands into
-/// commit-message prose — the misinterpretation this guard exists for. Pure.
+/// profile resolved Developer AND the surface is a terminal (by process or by focused
+/// child window class). Such dictation gets the literal-transcription AI prompt (commands
+/// typed back verbatim, spoken symbols converted) instead of the general Developer
+/// restyle. Pure.
 fn is_terminal_focus(
     category: &crate::context_detector::ContextCategory,
     process_name: &str,
+    focused_class: &str,
 ) -> bool {
     *category == crate::context_detector::ContextCategory::Developer
-        && crate::context_detector::is_terminal_process(process_name)
+        && (crate::context_detector::is_terminal_process(process_name)
+            || crate::context_detector::is_native_terminal_class(focused_class))
 }
 
 /// Pick the final text to paste: the LLM output when it produced non-empty text, else the
@@ -458,7 +460,10 @@ mod tests {
         let wt = ForegroundApp { process_name: "WindowsTerminal.exe".into(), window_title: String::new() };
         let wt_cat = crate::context_detector::resolve_category(&wt, &[], "", "");
         assert_eq!(wt_cat, crate::context_detector::ContextCategory::Developer);
-        assert!(is_terminal_focus(&wt_cat, "WindowsTerminal.exe"));
+        assert!(is_terminal_focus(&wt_cat, "WindowsTerminal.exe", ""));
+        // Native console class alone (generic host) is also a terminal surface.
+        let con_cat = crate::context_detector::resolve_category(&wt, &[], "ConsoleWindowClass", "");
+        assert!(is_terminal_focus(&con_cat, "randomhost.exe", "ConsoleWindowClass"));
         // The AI pass stays on: the terminal gets its own literal-transcription prompt.
         assert_eq!(ai_postprocess::terminal_system_prompt(), ai_postprocess::terminal_system_prompt());
         assert_ne!(ai_postprocess::terminal_system_prompt(), ai_postprocess::context_system_prompt(&wt_cat));
@@ -469,14 +474,16 @@ mod tests {
             &[], "", "",
         );
         assert_eq!(code, crate::context_detector::ContextCategory::Developer);
-        assert!(!is_terminal_focus(&code, "Code.exe"));
+        assert!(!is_terminal_focus(&code, "Code.exe", ""));
+        assert!(!is_terminal_focus(&code, "Code.exe", "Chrome_WidgetWin_1"));
 
         // Non-terminal processes and non-Developer categories never take the terminal prompt.
         assert!(!is_terminal_focus(
             &crate::context_detector::ContextCategory::General,
-            "comet.exe"
+            "comet.exe",
+            ""
         ));
-        assert!(!is_terminal_focus(&wt_cat, ""));
+        assert!(!is_terminal_focus(&wt_cat, "", ""));
     }
 
     #[test]
@@ -484,7 +491,7 @@ mod tests {
         use crate::context_detector::ForegroundApp;
         let wt = ForegroundApp { process_name: "WindowsTerminal.exe".into(), window_title: String::new() };
         let wt_cat = crate::context_detector::resolve_category(&wt, &[], "", "");
-        assert!(is_terminal_focus(&wt_cat, "WindowsTerminal.exe"));
+        assert!(is_terminal_focus(&wt_cat, "WindowsTerminal.exe", ""));
 
         // On an LLM miss the terminal chooses the raw dictation, not the prose-formatted
         // cleanup — a command must never be sentence-capitalized or given a trailing period.
