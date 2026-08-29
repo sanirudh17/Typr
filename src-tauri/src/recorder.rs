@@ -242,7 +242,8 @@ impl Recorder {
         // Developer/Terminal, ensure filler never survives a bypass or an LLM miss.
         // The AI prompt already asks to strip filler; this is the deterministic
         // guarantee for the fallback paths where the LLM is not in the loop.
-        let strip_filler = settings.ai_enabled && settings.developer_strip_filler;
+        // Always strip filler when AI is on — the former Developer toggle has been removed per user request; filler is never intentional when AI cleanup is enabled.
+        let strip_filler = settings.ai_enabled;
         let replaced_stripped = if strip_filler {
             crate::cleanup::strip_filler_words(&replaced)
         } else {
