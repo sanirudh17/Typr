@@ -22,7 +22,7 @@ $sig = (Get-Content $sigPath -Raw).Trim()
 
 $json = @{
     version   = $Version
-    notes     = (Get-Content $NotesFile -Raw).Trim()
+    notes     = [IO.File]::ReadAllText((Resolve-Path $NotesFile).Path, [Text.UTF8Encoding]::new($false)).Trim()
     pub_date  = ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
     platforms = @{
         'windows-x86_64' = @{
