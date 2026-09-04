@@ -726,6 +726,63 @@ async fn download_model(
     Ok(())
 }
 
+/// Write Mode press one: stash the selection and open the mic. Blocking clipboard
+/// work runs on a blocking thread so the hotkey loop never stalls; failures toast.
+async fn begin_write_mode_async(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let (recorder, settings) = (state.recorder.clone(), state.settings.lock().unwrap().clone());
+    let handle = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        typr_lib::write_mode::begin_write_mode(&handle, &recorder, &settings)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Write Mode failed to start: {}", e)));
+    if let Err(e) = result {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "write-mode-result",
+            typr_lib::write_mode::WriteModeResult { ok: false, message: e },
+        );
+    }
+}
+
+/// Write Mode press two / PTT release: transcribe the instruction and rewrite.
+async fn finish_write_mode_async(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let (recorder, settings, app_dir, bias) = (
+        state.recorder.clone(),
+        state.settings.lock().unwrap().clone(),
+        state.app_dir.clone(),
+        state.dictionary.lock().unwrap().get_bias_prompt(),
+    );
+    let result =
+        typr_lib::write_mode::finish_write_mode(app, &recorder, &settings, &app_dir, &bias).await;
+    if let Err(e) = result {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "write-mode-result",
+            typr_lib::write_mode::WriteModeResult { ok: false, message: e },
+        );
+    }
+}
+
+/// A normal stop must never consume a Write Mode recording: finishing belongs to
+/// the Write Mode hotkey, which toasts guidance instead of silently swallowing it.
+fn guard_write_session(app: &tauri::AppHandle, state: &AppState) -> bool {
+    if state.recorder.has_write_session() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "write-mode-result",
+            typr_lib::write_mode::WriteModeResult {
+                ok: false,
+                message: "Finish Write Mode first — press the Write Mode hotkey again.".to_string(),
+            },
+        );
+        return true;
+    }
+    false
+}
+
 /// The AI profile override this recording should carry, based on which hotkey started it.
 /// Secondary → force the configured profile; Primary → none. The value travels into
 /// `start_recording` and is consumed by the matching `stop_and_transcribe`, so it is scoped
@@ -803,6 +860,9 @@ async fn do_toggle_recording(
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
+            if guard_write_session(app, state) {
+                return Err("Write Mode session in progress".to_string());
+            }
             let settings = state.settings.lock().unwrap().clone();
             let result = state
                 .recorder
@@ -1127,31 +1187,48 @@ fn main() {
             let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {
                 while let Some(hotkey_event) = hotkey_rx.recv().await {
-                    // Write Mode is a single-press action on the current selection, not a
-                    // recording — it must not enter the toggle/PTT state machine, and it
-                    // must not run while a dictation owns the mic/clipboard.
+                    // Write Mode dictates the change: press stashes the selection and
+                    // opens the mic; a second press (toggle) or release (push-to-talk)
+                    // stops, transcribes the instruction, and rewrites the selection.
+                    // It never enters the toggle/PTT dictation machine below, and a
+                    // press during a normal dictation is ignored — never hijacked.
                     if hotkey_event.source == HotkeySource::WriteMode {
-                        if hotkey_event.state == ShortcutState::Pressed {
-                            let state = rx_handle.state::<AppState>();
-                            if state.recorder.get_state() != RecordingState::Ready {
-                                eprintln!("[Typr] Write Mode ignored: recorder busy");
-                            } else {
-                                let handle = rx_handle.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    let state = handle.state::<AppState>();
-                                    let settings = state.settings.lock().unwrap().clone();
-                                    let app_dir = state.app_dir.clone();
-                                    match typr_lib::write_mode::run_write_mode(&handle, &settings, &app_dir).await {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            use tauri::Emitter;
-                                            let _ = handle.emit(
-                                                "write-mode-result",
-                                                typr_lib::write_mode::WriteModeResult { ok: false, message: e },
-                                            );
-                                        }
+                        let state = rx_handle.state::<AppState>();
+                        let mode = state.settings.lock().unwrap().recording_mode.clone();
+                        let recording = state.recorder.get_state() == RecordingState::Recording;
+                        let writing = state.recorder.has_write_session();
+                        match hotkey_event.state {
+                            ShortcutState::Pressed => {
+                                if mode == "push-to-talk" {
+                                    // Hold to dictate the change.
+                                    if !recording && !writing {
+                                        let handle = rx_handle.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            begin_write_mode_async(&handle).await;
+                                        });
                                     }
-                                });
+                                } else if !recording && !writing {
+                                    // Toggle press one: stash + record.
+                                    let handle = rx_handle.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        begin_write_mode_async(&handle).await;
+                                    });
+                                } else if recording && writing {
+                                    // Toggle press two: stop + rewrite.
+                                    let handle = rx_handle.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        finish_write_mode_async(&handle).await;
+                                    });
+                                }
+                            }
+                            ShortcutState::Released => {
+                                // Push-to-talk release finishes an active write session.
+                                if mode == "push-to-talk" && recording && writing {
+                                    let handle = rx_handle.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        finish_write_mode_async(&handle).await;
+                                    });
+                                }
                             }
                         }
                         continue;
@@ -1189,6 +1266,9 @@ fn main() {
                         ShortcutState::Released => {
                             if mode == "push-to-talk" {
                                 let current = state.recorder.get_state();
+                                if guard_write_session(&rx_handle, state.inner()) {
+                                    continue;
+                                }
                                 if current == RecordingState::Recording {
                                     let settings = state.settings.lock().unwrap().clone();
                                     match state.recorder.stop_and_transcribe(

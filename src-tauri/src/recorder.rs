@@ -45,6 +45,10 @@ pub struct Recorder {
     // taken when it stops, so it lives and dies with one session and can never leak forward
     // to the next dictation the way a shared slot could.
     session_override: Arc<Mutex<Option<String>>>,
+    // Write Mode's stashed selection, same session discipline: set when a write
+    // session starts recording, taken when it stops. While set, the recording
+    // belongs to Write Mode — the normal stop path must not touch it.
+    write_session: Arc<Mutex<Option<String>>>,
 }
 
 impl Recorder {
@@ -53,6 +57,7 @@ impl Recorder {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
+            write_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -190,23 +195,8 @@ impl Recorder {
             dict.get_bias_prompt()
         };
 
-        let transcribe_result = match settings.engine.as_str() {
-            "local" => {
-                let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
-                transcribe_local::transcribe_local(app, &model_path, &temp_path, &prompt).await
-            }
-            "cloud" => {
-                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt, &settings.cloud_model).await
-            }
-            "parakeet" => {
-                let model_dir = app_dir
-                    .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
-                // No prompt: transducer models have no equivalent of Whisper's prompt window,
-                // so the dictionary bias the other two engines receive has nowhere to go here.
-                transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
-            }
-            _ => Err(format!("Unknown engine: {}", settings.engine)),
-        };
+        let transcribe_result =
+            transcribe_audio(app, settings, app_dir, &temp_path, &prompt).await;
 
         // Cleanup temp file
         let _ = std::fs::remove_file(&temp_path);
@@ -438,6 +428,85 @@ impl Recorder {
         update_overlay(app, &state, show);
     }
 
+    /// True while a Write Mode session owns the current recording.
+    pub fn has_write_session(&self) -> bool {
+        self.write_session.lock().unwrap().is_some()
+    }
+
+    /// Start recording a Write Mode session: stash the selection this session will
+    /// rewrite and open the mic exactly like a dictation (same overlay, same pill).
+    pub fn start_write_session(
+        &self,
+        app: &AppHandle,
+        mic_name: &str,
+        selected: String,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        if *state != RecordingState::Ready {
+            return Err("Already recording or transcribing".to_string());
+        }
+        *state = RecordingState::Recording;
+        *self.write_session.lock().unwrap() = Some(selected);
+        *self.session_override.lock().unwrap() = None;
+        let _ = app.emit("recording-state", RecordingState::Recording);
+        update_overlay(app, &RecordingState::Recording, true);
+
+        let mut recorder = self.audio_recorder.lock().unwrap();
+        match recorder.start(mic_name) {
+            Ok(info) => {
+                if info.fell_back || info.changed {
+                    let _ = app.emit("mic-changed", serde_json::json!({
+                        "device": info.active_device,
+                        "fellBack": info.fell_back,
+                    }));
+                }
+            }
+            Err(e) => {
+                *state = RecordingState::Ready;
+                *self.write_session.lock().unwrap() = None;
+                let _ = app.emit("recording-state", RecordingState::Ready);
+                update_overlay(app, &RecordingState::Ready, false);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop a Write Mode recording and save its audio, taking the stashed
+    /// selection with it. Returns (wav path, duration secs, selected text).
+    pub fn stop_write_audio(
+        &self,
+        app: &AppHandle,
+        app_dir: &PathBuf,
+    ) -> Result<(PathBuf, f32, String), String> {
+        let selected = {
+            let mut state = self.state.lock().unwrap();
+            if *state != RecordingState::Recording {
+                return Err("Not currently recording".to_string());
+            }
+            let Some(selected) = self.write_session.lock().unwrap().take() else {
+                return Err("Not a Write Mode recording".to_string());
+            };
+            *state = RecordingState::Transcribing;
+            let _ = app.emit("recording-state", RecordingState::Transcribing);
+            update_overlay(app, &RecordingState::Transcribing, true);
+            selected
+        };
+
+        let write_path = app_dir.join("temp_write_recording.wav");
+        let save_result = {
+            let mut recorder = self.audio_recorder.lock().unwrap();
+            recorder.stop_and_save(&write_path)
+        };
+        match save_result {
+            Ok((_, duration)) => Ok((write_path, duration, selected)),
+            Err(e) => {
+                self.reset_ready(app);
+                Err(e)
+            }
+        }
+    }
+
 
     /// Reset the recorder to Ready and clear the processing overlay. Called once the
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
@@ -447,6 +516,34 @@ impl Recorder {
         *state = RecordingState::Ready;
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
+    }
+}
+
+/// Transcribe one wav file with the configured engine. Shared by the dictation
+/// path and Write Mode so both hear through identical settings and models.
+pub async fn transcribe_audio(
+    app: &AppHandle,
+    settings: &Settings,
+    app_dir: &PathBuf,
+    wav_path: &PathBuf,
+    prompt: &str,
+) -> Result<String, String> {
+    match settings.engine.as_str() {
+        "local" => {
+            let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
+            transcribe_local::transcribe_local(app, &model_path, wav_path, prompt).await
+        }
+        "cloud" => {
+            transcribe_groq::transcribe_groq(&settings.groq_api_key, wav_path, prompt, &settings.cloud_model).await
+        }
+        "parakeet" => {
+            let model_dir = app_dir
+                .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+            // No prompt: transducer models have no equivalent of Whisper's prompt window,
+            // so the dictionary bias the other two engines receive has nowhere to go here.
+            transcribe_parakeet::transcribe_parakeet(&model_dir, wav_path).await
+        }
+        _ => Err(format!("Unknown engine: {}", settings.engine)),
     }
 }
 

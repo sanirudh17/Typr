@@ -1,16 +1,22 @@
-//! Write Mode: rewrite the user's current text selection in place.
+//! Write Mode: dictate the change, keep the selection.
 //!
-//! Triggered by the dedicated Write Mode hotkey — never by recording. The flow:
-//! 1. Read the selection with the clipboard dance (stash clipboard → Ctrl+C →
-//!    read → restore), which behaves exactly like the user pressing Ctrl+C.
-//! 2. Rewrite it with the dedicated WRITE_MODE prompt (an AI feature: without
-//!    AI enabled and a key there is nothing to rewrite with, so that is an
-//!    error, not a silent no-op).
-//! 3. Paste over the selection, which is still active, so the rewrite replaces it.
+//! Select text in any app, press the Write Mode hotkey, dictate what to do with
+//! it ("make this formal", "fix the spelling", "turn this into bullets"), press
+//! the hotkey again (or release it in Push to Talk) — the overlay records and
+//! transcribes exactly like a dictation, then the AI applies the spoken
+//! instruction to the selection and the result replaces it.
 //!
-//! Errors never paste: overwriting a selection with a mangled fallback would
-//! destroy the user's text, and only the host app's undo could save it. Undo
-//! itself is the host app's own Ctrl+Z — nothing custom, documented in Commands.
+//! Safety rules:
+//! - Errors never paste: a failed transcription or rewrite leaves the selection
+//!   untouched and toasts why. The only exception is a moved selection (see below).
+//! - The selection is re-captured before pasting and compared to the stashed
+//!   original. If it moved, pasting would land the rewrite in the wrong place —
+//!   so the rewrite goes on the clipboard instead, with a toast saying so.
+//!   Either way nothing the user wrote is ever lost.
+//! - Dictionary replacements fix speech mis-hearings — the *instruction* is
+//!   transcribed with the dictionary bias like any dictation, but the *selection*
+//!   goes to the model verbatim so code and identifiers survive.
+//! - Undo is the host app's own Ctrl+Z — nothing custom, documented in Commands.
 
 use std::time::Duration;
 use tauri::Emitter;
@@ -19,7 +25,7 @@ use crate::ai_postprocess;
 use crate::paste::paste_text;
 use crate::settings::Settings;
 
-/// Reported to the main window when a rewrite finishes, so it can toast the outcome.
+/// Reported to the main window when Write Mode acts, so it can toast the outcome.
 #[derive(Clone, serde::Serialize)]
 pub struct WriteModeResult {
     pub ok: bool,
@@ -35,7 +41,7 @@ pub struct WriteModeResult {
 /// were the selection — polling for the post-clear arrival cannot misread.
 /// A non-text clipboard cannot be stashed through arboard's text API — in that
 /// case the selection is left on the clipboard (exactly where a manual Ctrl+C
-/// would have put it) and the rewrite still proceeds.
+/// would have put it) and the flow still proceeds.
 pub fn capture_selection() -> Result<String, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     // Best-effort stash: a non-text clipboard (image, files) simply has no stash.
@@ -107,42 +113,75 @@ fn send_copy() -> Result<(), String> {
     }
 }
 
-/// Run one Write Mode pass: capture → rewrite → replace. Returns the rewritten
-/// text on success. Shows the processing spinner around the AI call and reports
-/// the outcome on the write-mode-result event for the main window to toast.
-pub async fn run_write_mode(
-    app: &tauri::AppHandle,
-    settings: &Settings,
-    app_dir: &std::path::Path,
-) -> Result<String, String> {
-    // Dictionary replacements fix speech mis-hearings — applying them to text the
-    // user wrote themselves could corrupt code and identifiers, so the selection
-    // goes to the model verbatim.
+/// The model input for one rewrite: the stashed selection plus the transcribed
+/// instruction, in fixed labeled blocks so the two can never bleed together.
+pub fn write_mode_user_content(selected: &str, instruction: &str) -> String {
+    format!(
+        "Selected text:\n<<<{}>>>\n\nSpoken instruction:\n<<<{}>>>",
+        selected, instruction
+    )
+}
 
+/// Press one: validate, stash the selection, open the mic. The overlay shows the
+/// normal recording pill — dictating the change works exactly like dictating.
+/// AI prerequisites are checked BEFORE recording so a press without AI
+/// configured toasts guidance instead of recording into a dead end.
+pub fn begin_write_mode(
+    app: &tauri::AppHandle,
+    recorder: &crate::recorder::Recorder,
+    settings: &Settings,
+) -> Result<(), String> {
     if !settings.ai_enabled {
         return Err("Write Mode needs AI cleanup — turn it on in Settings → AI first.".to_string());
     }
     if settings.groq_api_key.trim().is_empty() {
         return Err("Write Mode needs a Groq API key — add one in Settings → Engine or AI.".to_string());
     }
-
     let selected = capture_selection()?;
-    crate::recorder::Recorder::set_overlay_processing(app, true);
+    recorder.start_write_session(app, &settings.microphone, selected)?;
+    Ok(())
+}
 
+/// Press two (or Push to Talk release): stop, transcribe the instruction, apply
+/// it to the stashed selection, and replace the selection with the result.
+/// Reports success on the write-mode-result event; every failure mode toasts
+/// and leaves the user's text untouched — except a moved selection, where the
+/// rewrite is parked on the clipboard (pasting blind would land it wrong).
+pub async fn finish_write_mode(
+    app: &tauri::AppHandle,
+    recorder: &crate::recorder::Recorder,
+    settings: &Settings,
+    app_dir: &std::path::Path,
+    bias_prompt: &str,
+) -> Result<String, String> {
+    let (wav_path, _duration, selected) = recorder.stop_write_audio(app, &app_dir.to_path_buf())?;
+    // The instruction transcribes like any dictation — dictionary bias included.
+    let transcribed =
+        crate::recorder::transcribe_audio(app, settings, &app_dir.to_path_buf(), &wav_path, bias_prompt).await;
+    let _ = std::fs::remove_file(&wav_path);
+    let instruction = transcribed
+        .map_err(|e| format!("Did not catch that ({}). Your text was left untouched.", e))?;
+    if instruction.trim().is_empty() {
+        crate::recorder::Recorder::set_overlay_processing(app, false);
+        return Err("Did not catch that — dictate the change again. Your text was left untouched.".to_string());
+    }
+
+    crate::recorder::Recorder::set_overlay_processing(app, true);
     let system_prompt = ai_postprocess::build_system_prompt(
         ai_postprocess::write_mode_system_prompt(),
         &settings.ai_tone,
         &settings.ai_format,
         &settings.ai_custom_instructions,
     );
-    // Rewrite output scales with the selection, which can be paragraphs — use the
-    // generous prompt budget, not the short cleanup one.
+    // Output scales with the selection, which can be paragraphs — the generous
+    // prompt budget, not the short cleanup one.
     let budget = ai_postprocess::budget_ms("prompt");
+    let user_content = write_mode_user_content(&selected, &instruction);
     let rewritten = match tokio::time::timeout(
         Duration::from_millis(budget),
         ai_postprocess::postprocess_with_fallback(
             &settings.groq_api_key,
-            &selected,
+            &user_content,
             &settings.ai_model,
             &system_prompt,
         ),
@@ -150,7 +189,7 @@ pub async fn run_write_mode(
     .await
     {
         Ok(Ok((clean, used_model))) => {
-            // Metadata only: timing/model/size, never the selected text itself.
+            // Metadata only: timing/model/size, never the text itself.
             crate::debug_log::log(
                 app_dir,
                 &format!("Write Mode ok model={} chars={}", used_model, clean.len()),
@@ -174,15 +213,48 @@ pub async fn run_write_mode(
         crate::recorder::Recorder::set_overlay_processing(app, false);
         return Err("The rewrite came back empty. Your text was left untouched.".to_string());
     }
-
-    // The selection is still active, so pasting replaces it. From here a failure
-    // still reports — but the clipboard already holds the rewrite, so nothing is lost.
-    paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
     crate::recorder::Recorder::set_overlay_processing(app, false);
-    let _ = app.emit(
-        "write-mode-result",
-        WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
-    );
-    Ok(rewritten)
+
+    // The selection may have moved while dictating. Re-capture and compare: only
+    // paste when it is still the text we stashed, so the rewrite replaces the
+    // right thing. Otherwise park it on the clipboard — nothing is lost.
+    match capture_selection() {
+        Ok(now) if now == selected => {
+            paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
+            let _ = app.emit(
+                "write-mode-result",
+                WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
+            );
+            Ok(rewritten)
+        }
+        _ => {
+            let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+            clipboard.set_text(&rewritten).map_err(|e| e.to_string())?;
+            let _ = app.emit(
+                "write-mode-result",
+                WriteModeResult {
+                    ok: true,
+                    message: "Selection moved — rewrite copied to the clipboard, paste it where you want it.".to_string(),
+                },
+            );
+            Ok(rewritten)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_user_content_keeps_blocks_labeled_and_separate() {
+        let u = write_mode_user_content("hello wrold", "fix the spelling");
+        assert!(u.contains("Selected text:"));
+        assert!(u.contains("Spoken instruction:"));
+        assert!(u.contains("hello wrold"));
+        assert!(u.contains("fix the spelling"));
+        // Selection first: the material precedes the direction.
+        assert!(u.find("hello wrold") < u.find("fix the spelling"));
+    }
 }
 
