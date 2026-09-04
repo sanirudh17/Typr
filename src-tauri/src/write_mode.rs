@@ -228,16 +228,55 @@ pub async fn finish_write_mode(
         recorder.complete_write_session(app);
         return Err("The rewrite came back empty. Your text was left untouched.".to_string());
     }
-    recorder.complete_write_session(app);
+    crate::recorder::Recorder::set_overlay_processing(app, false);
 
-    // The selection was captured moments ago and is still active, so pasting
-    // replaces exactly it.
-    paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
-    let _ = app.emit(
-        "write-mode-result",
-        WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
-    );
-    Ok(rewritten)
+    // The AI call took seconds, and the user may have clicked away since the
+    // capture — collapsing the selection. Pasting then would INSERT at the
+    // cursor instead of replacing (duplicating text on every run), so
+    // re-capture and compare first: paste only on match, otherwise park the
+    // rewrite on the clipboard where nothing is lost and nothing is doubled.
+    match capture_selection() {
+        Ok(now) if now == selected => {
+            paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
+            let _ = app.emit(
+                "write-mode-result",
+                WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
+            );
+            Ok(rewritten)
+        }
+        Ok(_) => {
+            eprintln!("[Typr] Write Mode: selection changed mid-flight — parking rewrite on clipboard");
+            park_on_clipboard(&rewritten)?;
+            let _ = app.emit(
+                "write-mode-result",
+                WriteModeResult {
+                    ok: true,
+                    message: "Selection changed — rewrite copied to the clipboard, paste it where you want it.".to_string(),
+                },
+            );
+            Ok(rewritten)
+        }
+        Err(_) => {
+            eprintln!("[Typr] Write Mode: selection lost before paste — parking rewrite on clipboard");
+            park_on_clipboard(&rewritten)?;
+            let _ = app.emit(
+                "write-mode-result",
+                WriteModeResult {
+                    ok: true,
+                    message: "Selection was lost — rewrite copied to the clipboard, paste it where you want it.".to_string(),
+                },
+            );
+            Ok(rewritten)
+        }
+    }
+}
+
+/// Park text on the clipboard when pasting would land it wrong. Infallible from
+/// the caller's view only in that a clipboard failure is reported, never silent.
+fn park_on_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

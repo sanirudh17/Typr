@@ -76,6 +76,10 @@ fn register_hotkey(
 fn restore_all_hotkeys(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     let primary = state.settings.lock().unwrap().hotkey.clone();
     let res = register_hotkey(app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+    if let Err(e) = res.as_ref() {
+        // Loud: a failed restore is exactly how shortcuts end up dead.
+        eprintln!("[Typr] CRITICAL: primary hotkey re-arm failed ({}). Shortcuts may be dead until restart.", e);
+    }
     register_secondary_if_set(app, state);
     register_write_if_set(app, state);
     res
@@ -741,6 +745,9 @@ async fn begin_write_mode_async(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let (recorder, settings) = (state.recorder.clone(), state.settings.lock().unwrap().clone());
     let result = typr_lib::write_mode::begin_write_mode(app, &recorder, &settings);
+    if let Err(e) = result.as_ref() {
+        eprintln!("[Typr] Write Mode begin failed: {}", e);
+    }
     if let Err(e) = result {
         use tauri::Emitter;
         let _ = app.emit(
@@ -762,6 +769,9 @@ async fn finish_write_mode_async(app: &tauri::AppHandle) {
     );
     let result =
         typr_lib::write_mode::finish_write_mode(app, &recorder, &settings, &app_dir, &bias).await;
+    if let Err(e) = result.as_ref() {
+        eprintln!("[Typr] Write Mode finish failed: {}", e);
+    }
     if let Err(e) = result {
         use tauri::Emitter;
         let _ = app.emit(
@@ -775,6 +785,7 @@ async fn finish_write_mode_async(app: &tauri::AppHandle) {
 /// the Write Mode hotkey, which toasts guidance instead of silently swallowing it.
 fn guard_write_session(app: &tauri::AppHandle, state: &AppState) -> bool {
     if state.recorder.has_write_session() {
+        eprintln!("[Typr] Normal stop refused: Write Mode session in progress");
         use tauri::Emitter;
         let _ = app.emit(
             "write-mode-result",
@@ -1230,6 +1241,8 @@ fn main() {
                                         // Press two: arm; the release does the work.
                                         None => state.recorder.arm_write_finish(),
                                     }
+                                } else if mode != "push-to-talk" {
+                                    eprintln!("[Typr] WriteMode press ignored: state={:?} writing={} (mid-dictation or finishing — press is not hijacking it)", current, writing);
                                 }
                             }
                             ShortcutState::Released => {
