@@ -168,7 +168,7 @@ pub async fn finish_write_mode(
     let instruction = transcribed
         .map_err(|e| format!("Did not catch that ({}). Your text was left untouched.", e))?;
     if instruction.trim().is_empty() {
-        crate::recorder::Recorder::set_overlay_processing(app, false);
+        recorder.complete_write_session(app);
         return Err("Did not catch that — dictate the change again. Your text was left untouched.".to_string());
     }
 
@@ -177,7 +177,7 @@ pub async fn finish_write_mode(
     // keystrokes into the target app). Whatever is selected at this moment is
     // what the user wants rewritten.
     let selected = capture_selection().map_err(|e| {
-        crate::recorder::Recorder::set_overlay_processing(app, false);
+        recorder.complete_write_session(app);
         e
     })?;
 
@@ -212,11 +212,11 @@ pub async fn finish_write_mode(
             clean
         }
         Ok(Err(e)) => {
-            crate::recorder::Recorder::set_overlay_processing(app, false);
+            recorder.complete_write_session(app);
             return Err(format!("Rewrite failed ({}). Your text was left untouched.", e));
         }
         Err(_) => {
-            crate::recorder::Recorder::set_overlay_processing(app, false);
+            recorder.complete_write_session(app);
             return Err(format!(
                 "Rewrite timed out after {}s. Your text was left untouched.",
                 budget / 1000
@@ -225,10 +225,10 @@ pub async fn finish_write_mode(
     };
 
     if rewritten.trim().is_empty() {
-        crate::recorder::Recorder::set_overlay_processing(app, false);
+        recorder.complete_write_session(app);
         return Err("The rewrite came back empty. Your text was left untouched.".to_string());
     }
-    crate::recorder::Recorder::set_overlay_processing(app, false);
+    recorder.complete_write_session(app);
 
     // The selection was captured moments ago and is still active, so pasting
     // replaces exactly it.

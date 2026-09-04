@@ -425,9 +425,21 @@ impl Recorder {
         Ok(final_text)
     }
 
+    /// Mark a Write Mode session fully done: the REAL state back to Ready. This
+    /// is what reset_ready does for dictations — the cosmetic pair below (event +
+    /// overlay) is not enough, or the mutex stays Transcribing forever and every
+    /// later hotkey press is refused while the UI misleadingly says Ready.
+    pub fn complete_write_session(&self, app: &AppHandle) {
+        *self.state.lock().unwrap() = RecordingState::Ready;
+        let _ = app.emit("recording-state", RecordingState::Ready);
+        update_overlay(app, &RecordingState::Ready, false);
+    }
+
     /// Show or clear the processing spinner outside a dictation — Write Mode reuses
-    /// it around its AI call. Pairs the overlay eval with the recording-state event
-    /// so the main-window status and the pill never disagree.
+    /// it around its AI call. COSMETIC ONLY: pairs the overlay eval with the
+    /// recording-state event but never moves the state mutex. Any flow that moved
+    /// the mutex (e.g. stop_write_audio) must close with complete_write_session
+    /// (or reset_ready), never with this.
     pub fn set_overlay_processing(app: &AppHandle, show: bool) {
         let state = if show { RecordingState::Transcribing } else { RecordingState::Ready };
         let _ = app.emit("recording-state", state.clone());
