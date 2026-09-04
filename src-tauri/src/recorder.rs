@@ -45,10 +45,15 @@ pub struct Recorder {
     // taken when it stops, so it lives and dies with one session and can never leak forward
     // to the next dictation the way a shared slot could.
     session_override: Arc<Mutex<Option<String>>>,
-    // Write Mode's stashed selection, same session discipline: set when a write
-    // session starts recording, taken when it stops. While set, the recording
-    // belongs to Write Mode — the normal stop path must not touch it.
-    write_session: Arc<Mutex<Option<String>>>,
+    // Write Mode ownership marker, same session discipline as the profile
+    // override: set when a write session starts recording, taken when it
+    // finishes. While set, the recording belongs to Write Mode — the normal
+    // stop path must not touch it. The selection itself is captured at finish
+    // time (post key-release), never here.
+    write_active: Arc<Mutex<bool>>,
+    // When press-two armed the finish (toggle mode). The release then runs the
+    // atomic stop+finish; a much later press means the release was lost.
+    write_finish_armed_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Recorder {
@@ -57,7 +62,8 @@ impl Recorder {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
-            write_session: Arc::new(Mutex::new(None)),
+            write_active: Arc::new(Mutex::new(false)),
+            write_finish_armed_at: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -430,23 +436,53 @@ impl Recorder {
 
     /// True while a Write Mode session owns the current recording.
     pub fn has_write_session(&self) -> bool {
-        self.write_session.lock().unwrap().is_some()
+        *self.write_active.lock().unwrap()
     }
 
-    /// Start recording a Write Mode session: stash the selection this session will
-    /// rewrite and open the mic exactly like a dictation (same overlay, same pill).
-    pub fn start_write_session(
-        &self,
-        app: &AppHandle,
-        mic_name: &str,
-        selected: String,
-    ) -> Result<(), String> {
+    /// Atomically claim the session for finishing. Only one finisher proceeds;
+    /// a duplicate press/release goes quiet instead of transcribing twice.
+    pub fn take_write_session(&self) -> bool {
+        let mut active = self.write_active.lock().unwrap();
+        if *active {
+            *active = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Arm the finish (toggle press two). Cleared on begin and on finish.
+    pub fn arm_write_finish(&self) {
+        *self.write_finish_armed_at.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// Milliseconds since the finish was armed, if it is. A press moments after
+    /// arming is an impatient double-tap whose real release is imminent (stay
+    /// quiet); a press much later means the release was lost — finish now.
+    pub fn write_finish_armed_ms_ago(&self) -> Option<u128> {
+        self.write_finish_armed_at
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed().as_millis())
+    }
+
+    /// Clear a stale arm without touching the session itself.
+    pub fn clear_write_finish_arm(&self) {
+        *self.write_finish_armed_at.lock().unwrap() = None;
+    }
+
+    /// Start recording a Write Mode session: mark ownership and open the mic
+    /// exactly like a dictation (same overlay, same pill). Deliberately touches
+    /// nothing clipboard-related, so it is safe the instant the hotkey is
+    /// pressed — even with the combo's modifiers still physically held.
+    pub fn start_write_session(&self, app: &AppHandle, mic_name: &str) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if *state != RecordingState::Ready {
             return Err("Already recording or transcribing".to_string());
         }
         *state = RecordingState::Recording;
-        *self.write_session.lock().unwrap() = Some(selected);
+        *self.write_active.lock().unwrap() = true;
+        *self.write_finish_armed_at.lock().unwrap() = None;
         *self.session_override.lock().unwrap() = None;
         let _ = app.emit("recording-state", RecordingState::Recording);
         update_overlay(app, &RecordingState::Recording, true);
@@ -463,7 +499,7 @@ impl Recorder {
             }
             Err(e) => {
                 *state = RecordingState::Ready;
-                *self.write_session.lock().unwrap() = None;
+                *self.write_active.lock().unwrap() = false;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
@@ -472,26 +508,24 @@ impl Recorder {
         Ok(())
     }
 
-    /// Stop a Write Mode recording and save its audio, taking the stashed
-    /// selection with it. Returns (wav path, duration secs, selected text).
+    /// Stop a Write Mode recording and save its audio. Ownership is claimed
+    /// separately via take_write_session, so a duplicate finisher goes quiet
+    /// instead of double-transcribing. A failed save clears a stuck session so
+    /// normal dictation is never blocked behind it.
     pub fn stop_write_audio(
         &self,
         app: &AppHandle,
         app_dir: &PathBuf,
-    ) -> Result<(PathBuf, f32, String), String> {
-        let selected = {
+    ) -> Result<(PathBuf, f32), String> {
+        {
             let mut state = self.state.lock().unwrap();
             if *state != RecordingState::Recording {
                 return Err("Not currently recording".to_string());
             }
-            let Some(selected) = self.write_session.lock().unwrap().take() else {
-                return Err("Not a Write Mode recording".to_string());
-            };
             *state = RecordingState::Transcribing;
             let _ = app.emit("recording-state", RecordingState::Transcribing);
             update_overlay(app, &RecordingState::Transcribing, true);
-            selected
-        };
+        }
 
         let write_path = app_dir.join("temp_write_recording.wav");
         let save_result = {
@@ -499,8 +533,9 @@ impl Recorder {
             recorder.stop_and_save(&write_path)
         };
         match save_result {
-            Ok((_, duration)) => Ok((write_path, duration, selected)),
+            Ok((_, duration)) => Ok((write_path, duration)),
             Err(e) => {
+                *self.write_active.lock().unwrap() = false;
                 self.reset_ready(app);
                 Err(e)
             }

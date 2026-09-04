@@ -6,13 +6,16 @@
 //! transcribes exactly like a dictation, then the AI applies the spoken
 //! instruction to the selection and the result replaces it.
 //!
+//! Timing is the whole design: opening the mic touches nothing clipboard-
+//! related, so the overlay pops the instant the hotkey is pressed. All
+//! clipboard work (capture, paste) waits until after key release — running
+//! the Ctrl+C dance while the hotkey's modifiers are still held injects
+//! stray keystrokes into the target app. The selection is therefore captured
+//! at finish time, and pasting replaces exactly what was just captured.
+//!
 //! Safety rules:
-//! - Errors never paste: a failed transcription or rewrite leaves the selection
-//!   untouched and toasts why. The only exception is a moved selection (see below).
-//! - The selection is re-captured before pasting and compared to the stashed
-//!   original. If it moved, pasting would land the rewrite in the wrong place —
-//!   so the rewrite goes on the clipboard instead, with a toast saying so.
-//!   Either way nothing the user wrote is ever lost.
+//! - Errors never paste: a failed transcription, capture, or rewrite leaves
+//!   the selection untouched and toasts why.
 //! - Dictionary replacements fix speech mis-hearings — the *instruction* is
 //!   transcribed with the dictionary bias like any dictation, but the *selection*
 //!   goes to the model verbatim so code and identifiers survive.
@@ -122,10 +125,10 @@ pub fn write_mode_user_content(selected: &str, instruction: &str) -> String {
     )
 }
 
-/// Press one: validate, stash the selection, open the mic. The overlay shows the
-/// normal recording pill — dictating the change works exactly like dictating.
-/// AI prerequisites are checked BEFORE recording so a press without AI
-/// configured toasts guidance instead of recording into a dead end.
+/// Press one: validate, open the mic. The overlay pops instantly because this
+/// touches nothing clipboard-related — safe the moment the hotkey is pressed,
+/// even with the combo's modifiers still physically held. The selection is
+/// captured at finish time instead (see below), once the keys are released.
 pub fn begin_write_mode(
     app: &tauri::AppHandle,
     recorder: &crate::recorder::Recorder,
@@ -137,16 +140,15 @@ pub fn begin_write_mode(
     if settings.groq_api_key.trim().is_empty() {
         return Err("Write Mode needs a Groq API key — add one in Settings → Engine or AI.".to_string());
     }
-    let selected = capture_selection()?;
-    recorder.start_write_session(app, &settings.microphone, selected)?;
+    recorder.start_write_session(app, &settings.microphone)?;
     Ok(())
 }
 
-/// Press two (or Push to Talk release): stop, transcribe the instruction, apply
-/// it to the stashed selection, and replace the selection with the result.
-/// Reports success on the write-mode-result event; every failure mode toasts
-/// and leaves the user's text untouched — except a moved selection, where the
-/// rewrite is parked on the clipboard (pasting blind would land it wrong).
+/// Finish: stop the audio, transcribe the instruction, capture the selection
+/// fresh (keys are released by now), apply, paste. Claiming the session first
+/// makes a duplicate finisher go quiet instead of transcribing twice.
+/// Reports success on the write-mode-result event; every failure toasts and
+/// leaves the user's text untouched.
 pub async fn finish_write_mode(
     app: &tauri::AppHandle,
     recorder: &crate::recorder::Recorder,
@@ -154,7 +156,11 @@ pub async fn finish_write_mode(
     app_dir: &std::path::Path,
     bias_prompt: &str,
 ) -> Result<String, String> {
-    let (wav_path, _duration, selected) = recorder.stop_write_audio(app, &app_dir.to_path_buf())?;
+    if !recorder.take_write_session() {
+        return Ok(String::new());
+    }
+    recorder.clear_write_finish_arm();
+    let (wav_path, _duration) = recorder.stop_write_audio(app, &app_dir.to_path_buf())?;
     // The instruction transcribes like any dictation — dictionary bias included.
     let transcribed =
         crate::recorder::transcribe_audio(app, settings, &app_dir.to_path_buf(), &wav_path, bias_prompt).await;
@@ -165,6 +171,15 @@ pub async fn finish_write_mode(
         crate::recorder::Recorder::set_overlay_processing(app, false);
         return Err("Did not catch that — dictate the change again. Your text was left untouched.".to_string());
     }
+
+    // Captured now — not at press time — so the Ctrl+C dance never collides
+    // with the hotkey's own held modifiers (that collision injected stray
+    // keystrokes into the target app). Whatever is selected at this moment is
+    // what the user wants rewritten.
+    let selected = capture_selection().map_err(|e| {
+        crate::recorder::Recorder::set_overlay_processing(app, false);
+        e
+    })?;
 
     crate::recorder::Recorder::set_overlay_processing(app, true);
     let system_prompt = ai_postprocess::build_system_prompt(
@@ -215,31 +230,14 @@ pub async fn finish_write_mode(
     }
     crate::recorder::Recorder::set_overlay_processing(app, false);
 
-    // The selection may have moved while dictating. Re-capture and compare: only
-    // paste when it is still the text we stashed, so the rewrite replaces the
-    // right thing. Otherwise park it on the clipboard — nothing is lost.
-    match capture_selection() {
-        Ok(now) if now == selected => {
-            paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
-            let _ = app.emit(
-                "write-mode-result",
-                WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
-            );
-            Ok(rewritten)
-        }
-        _ => {
-            let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-            clipboard.set_text(&rewritten).map_err(|e| e.to_string())?;
-            let _ = app.emit(
-                "write-mode-result",
-                WriteModeResult {
-                    ok: true,
-                    message: "Selection moved — rewrite copied to the clipboard, paste it where you want it.".to_string(),
-                },
-            );
-            Ok(rewritten)
-        }
-    }
+    // The selection was captured moments ago and is still active, so pasting
+    // replaces exactly it.
+    paste_text(&rewritten).map_err(|e| format!("Rewrite ready but paste failed: {}", e))?;
+    let _ = app.emit(
+        "write-mode-result",
+        WriteModeResult { ok: true, message: format!("Rewrote {} characters.", rewritten.chars().count()) },
+    );
+    Ok(rewritten)
 }
 
 #[cfg(test)]

@@ -735,17 +735,12 @@ async fn download_model(
     Ok(())
 }
 
-/// Write Mode press one: stash the selection and open the mic. Blocking clipboard
-/// work runs on a blocking thread so the hotkey loop never stalls; failures toast.
+/// Write Mode mic-open: fast and clipboard-free, so the overlay pops the
+/// instant the hotkey is pressed. Failures toast.
 async fn begin_write_mode_async(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let (recorder, settings) = (state.recorder.clone(), state.settings.lock().unwrap().clone());
-    let handle = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        typr_lib::write_mode::begin_write_mode(&handle, &recorder, &settings)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Write Mode failed to start: {}", e)));
+    let result = typr_lib::write_mode::begin_write_mode(app, &recorder, &settings);
     if let Err(e) = result {
         use tauri::Emitter;
         let _ = app.emit(
@@ -755,7 +750,8 @@ async fn begin_write_mode_async(app: &tauri::AppHandle) {
     }
 }
 
-/// Write Mode press two / PTT release: transcribe the instruction and rewrite.
+/// Release (or recovery press): transcribe the instruction and rewrite. The
+/// session claim inside makes a duplicate go quiet instead of doubling.
 async fn finish_write_mode_async(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let (recorder, settings, app_dir, bias) = (
@@ -1196,43 +1192,54 @@ fn main() {
             let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {
                 while let Some(hotkey_event) = hotkey_rx.recv().await {
-                    // Write Mode dictates the change: press stashes the selection and
-                    // opens the mic; a second press (toggle) or release (push-to-talk)
-                    // stops, transcribes the instruction, and rewrites the selection.
-                    // It never enters the toggle/PTT dictation machine below, and a
-                    // press during a normal dictation is ignored — never hijacked.
+                    // Write Mode dictates the change. The mic opens on press (instant
+                    // overlay, no clipboard involved) and everything clipboard-
+                    // related waits for key release — synthesizing Ctrl+C while the
+                    // hotkey's modifiers are still held injects stray keystrokes.
+                    // Toggle: press one records, press two arms, release finishes
+                    // (atomic stop+rewrite). Push to Talk: hold records, release
+                    // finishes. A press mid-dictation is ignored, never hijacked.
                     if hotkey_event.source == HotkeySource::WriteMode {
                         let state = rx_handle.state::<AppState>();
                         let mode = state.settings.lock().unwrap().recording_mode.clone();
-                        let recording = state.recorder.get_state() == RecordingState::Recording;
+                        let current = state.recorder.get_state();
                         let writing = state.recorder.has_write_session();
                         match hotkey_event.state {
                             ShortcutState::Pressed => {
-                                if mode == "push-to-talk" {
-                                    // Hold to dictate the change.
-                                    if !recording && !writing {
-                                        let handle = rx_handle.clone();
-                                        tauri::async_runtime::spawn(async move {
-                                            begin_write_mode_async(&handle).await;
-                                        });
-                                    }
-                                } else if !recording && !writing {
-                                    // Toggle press one: stash + record.
+                                if current == RecordingState::Ready && !writing {
+                                    // Press one (toggle) / hold-start (PTT): mic only.
                                     let handle = rx_handle.clone();
                                     tauri::async_runtime::spawn(async move {
                                         begin_write_mode_async(&handle).await;
                                     });
-                                } else if recording && writing {
-                                    // Toggle press two: stop + rewrite.
-                                    let handle = rx_handle.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        finish_write_mode_async(&handle).await;
-                                    });
+                                } else if current == RecordingState::Recording
+                                    && writing
+                                    && mode != "push-to-talk"
+                                {
+                                    match state.recorder.write_finish_armed_ms_ago() {
+                                        // Fresh press after arming: impatient double-tap,
+                                        // its release will finish properly.
+                                        Some(ms) if ms <= 600 => {}
+                                        // Armed long ago: the release was lost — finish now.
+                                        Some(_) => {
+                                            let handle = rx_handle.clone();
+                                            tauri::async_runtime::spawn(async move {
+                                                finish_write_mode_async(&handle).await;
+                                            });
+                                        }
+                                        // Press two: arm; the release does the work.
+                                        None => state.recorder.arm_write_finish(),
+                                    }
                                 }
                             }
                             ShortcutState::Released => {
-                                // Push-to-talk release finishes an active write session.
-                                if mode == "push-to-talk" && recording && writing {
+                                // PTT release, or toggle press-two's release: keys are
+                                // up, safe for capture and paste. Duplicate releases
+                                // go quiet via the session claim inside.
+                                if writing
+                                    && (current == RecordingState::Recording
+                                        || current == RecordingState::Transcribing)
+                                {
                                     let handle = rx_handle.clone();
                                     tauri::async_runtime::spawn(async move {
                                         finish_write_mode_async(&handle).await;
