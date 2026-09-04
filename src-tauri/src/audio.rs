@@ -605,6 +605,49 @@ mod tests {
         assert_eq!(mono_out.len(), 16000 * 2);
     }
 
+    /// A preview tick must be near-free next to the transcription it triggers:
+    /// snapshot + 16 kHz downmix + wav write for a full minute of audio has to
+    /// stay far under the 2s tick interval even in unoptimized debug builds
+    /// (release is ~30x faster still). Otherwise ticks would steal CPU from the
+    /// very engines they feed.
+    #[test]
+    fn test_preview_snapshot_is_cheap() {
+        let mut rec = AudioRecorder::new();
+        rec.source_sample_rate = 48000;
+        rec.source_channels = 1;
+        *rec.samples.lock().unwrap() =
+            (0..48000 * 60).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
+        let start = std::time::Instant::now();
+        let (mono, duration) = rec.snapshot_preview().expect("minute of tone snapshots");
+        assert!((duration - 60.0).abs() < 0.01);
+        let dir = std::env::temp_dir().join("typr_test_preview_tick");
+        let _ = std::fs::create_dir_all(&dir);
+        write_wav_16k_mono(&dir.join("tick.wav"), &mono).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(start.elapsed().as_millis() < 1500, "tick prep took {:?}", start.elapsed());
+    }
+
+    /// Silence must never reach an engine: quiet stretches cost nothing but the
+    /// sleep between ticks — no CPU transcription, no cloud API call.
+    #[test]
+    fn test_preview_snapshot_skips_silence() {
+        let mut rec = AudioRecorder::new();
+        rec.source_sample_rate = 48000;
+        rec.source_channels = 1;
+        *rec.samples.lock().unwrap() = vec![0.0001; 48000 * 10];
+        assert!(rec.snapshot_preview().is_none());
+    }
+
+    /// Fragments shorter than a breath would only transcribe as junk — skip them.
+    #[test]
+    fn test_preview_snapshot_skips_short_audio() {
+        let mut rec = AudioRecorder::new();
+        rec.source_sample_rate = 48000;
+        rec.source_channels = 1;
+        *rec.samples.lock().unwrap() = vec![0.5; 48000 * 1];
+        assert!(rec.snapshot_preview().is_none());
+    }
+
     #[test]
     fn test_smooth_band() {
         // Rising toward a higher target uses the fast attack coefficient.

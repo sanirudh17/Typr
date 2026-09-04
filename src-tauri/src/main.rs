@@ -734,6 +734,10 @@ fn profile_override_for(state: &AppState, source: HotkeySource) -> Option<String
     match source {
         HotkeySource::Secondary => Some(state.settings.lock().unwrap().secondary_profile.clone()),
         HotkeySource::Primary => None,
+        // Unreachable: the hotkey loop routes WriteMode to the rewrite flow before
+        // the record path. Covered explicitly (not `_`) so a future source is a
+        // compile error here, not a silent wrong-profile bug.
+        HotkeySource::WriteMode => None,
     }
 }
 
@@ -793,9 +797,13 @@ fn maybe_spawn_preview(app: &tauri::AppHandle, state: &AppState) {
     if !settings.live_preview {
         return;
     }
+    let bias_prompt = state.dictionary.lock().unwrap().get_bias_prompt();
     let cfg = typr_lib::recorder::PreviewConfig {
         engine: settings.engine.clone(),
         app_dir: state.app_dir.clone(),
+        groq_api_key: settings.groq_api_key.clone(),
+        cloud_model: settings.cloud_model.clone(),
+        bias_prompt,
         whisper_model_path: state
             .app_dir
             .join(transcribe_local::model_filename(&settings.whisper_model)),

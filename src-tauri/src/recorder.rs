@@ -471,6 +471,13 @@ pub struct PreviewConfig {
     pub app_dir: PathBuf,
     pub whisper_model_path: PathBuf,
     pub parakeet_model_dir: PathBuf,
+    pub groq_api_key: String,
+    pub cloud_model: String,
+    /// Dictionary bias prompt, captured at record-start. Cloud is the only tick
+    /// path whose API accepts one — local Whisper ignores it, Parakeet has no
+    /// prompt window — but passing it keeps cloud partials as accurate as the
+    /// final pass on proper nouns and vocabulary hints.
+    pub bias_prompt: String,
 }
 
 /// Interval between preview ticks. Local small models answer in well under this for
@@ -507,10 +514,17 @@ fn set_preview_width(app: &AppHandle, wide: bool) {
 
 /// Run Live Preview ticks until the recording stops. Display-only: partials never
 /// touch history or paste — the stop path still runs the full transcription.
-/// Cloud has no tick path (a preview would cost an API call every 2s), so the loop
-/// exits immediately there and the spinner covers the recording as before.
+/// Every tick re-transcribes from the start of the recording, so each partial
+/// supersedes the last with more context: early guesses self-correct as more
+/// audio arrives, which is what keeps the preview as accurate as the engine allows.
+/// Cloud ticks cost one API call per tick on the user's own key — acceptable because
+/// the whole loop is opt-in behind the Live Preview toggle, and Groq answers short
+/// clips fast enough to feel instant.
 pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig) {
-    if cfg.engine != "local" && cfg.engine != "parakeet" {
+    if cfg.engine != "local" && cfg.engine != "parakeet" && cfg.engine != "cloud" {
+        return;
+    }
+    if cfg.engine == "cloud" && cfg.groq_api_key.trim().is_empty() {
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -527,8 +541,10 @@ pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig
             // tick instead of overlapping transcriptions.
             let text = if cfg.engine == "local" {
                 crate::transcribe_local::transcribe_local(&app, &cfg.whisper_model_path, &tick_path, "").await
-            } else {
+            } else if cfg.engine == "parakeet" {
                 crate::transcribe_parakeet::transcribe_parakeet(&cfg.parakeet_model_dir, &tick_path).await
+            } else {
+                crate::transcribe_groq::transcribe_groq(&cfg.groq_api_key, &tick_path, &cfg.bias_prompt, &cfg.cloud_model).await
             };
             let _ = std::fs::remove_file(&tick_path);
             match text {
