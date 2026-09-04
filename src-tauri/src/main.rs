@@ -819,6 +819,39 @@ fn main() {
             // Handle window close to properly exit the app
             let main_window = app.get_webview_window("main");
             if let Some(window) = main_window {
+                // Paint the native window surface in the active theme BEFORE first
+                // show. The webview needs ~a second for its first paint; until then
+                // the OS surface is all there is, and a dark default there is the
+                // cold-start "dark flash" on light setups — no in-page script can
+                // cover it because no page exists yet. Mirrors resolveTheme() in
+                // main.ts and the pre-paint head script: stored setting wins, the
+                // OS only resolves "system". Set once here; every later show
+                // (tray re-show included) inherits it.
+                {
+                    let theme = app
+                        .state::<AppState>()
+                        .settings
+                        .lock()
+                        .unwrap()
+                        .theme
+                        .clone();
+                    let light = match theme.as_str() {
+                        "light" => true,
+                        "dark" => false,
+                        // Detection failure (or Default) falls back to light,
+                        // matching the Windows factory default.
+                        _ => !matches!(dark_light::detect(), Ok(dark_light::Mode::Dark)),
+                    };
+                    // Must match style.css --bg per theme exactly.
+                    let bg = if light {
+                        tauri::window::Color(0xee, 0xf0, 0xf3, 255)
+                    } else {
+                        tauri::window::Color(0x09, 0x09, 0x0b, 255)
+                    };
+                    if let Err(e) = window.set_background_color(Some(bg)) {
+                        eprintln!("[Typr] Failed to seed window background: {}", e);
+                    }
+                }
                 #[cfg(not(windows))]
                 match Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     Ok(icon) => {
