@@ -5,11 +5,15 @@
     <script>
       // Paint the saved theme before first paint. The authoritative value lives
       // in settings and only resolves seconds later in loadSettings(), which
-      // used to flash dark on light launches — this cached copy (rewritten on
-      // every change) resolves the same way so first paint is already correct.
+      // used to flash dark on light launches. First choice is the Rust-injected
+      // boot payload (always the stored setting, immune to stale caches and
+      // origin changes), then the cached copy rewritten on every theme change,
+      // then live system resolution — so first paint is already correct.
       try {
-        var t = localStorage.getItem("typr-theme") || "system";
-        var light = t === "light" || (t !== "dark" && matchMedia("(prefers-color-scheme: light)").matches);
+        var boot = window.__TYPR_BOOT__ || null;
+        var t = (boot && boot.theme) || localStorage.getItem("typr-theme") || "system";
+        if (t !== "light" && t !== "dark" && t !== "system") t = "system";
+        var light = t === "light" || (t === "system" && matchMedia("(prefers-color-scheme: light)").matches);
         document.documentElement.dataset.theme = light ? "light" : "dark";
       } catch (e) {}
     </script>

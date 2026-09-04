@@ -7,7 +7,12 @@ This file is for future coding agents (and humans) working on Typr. It captures 
 **Requirement:** Fresh launch *and* re-show from tray/background must appear in the middle of the screen. No top-left drift.
 
 **Implementation (do not remove):**
-- `src-tauri/tauri.conf.json` → `windows[0].center = true`
+- `src-tauri/src/main.rs` setup builds the `main` window dynamically via
+  `WebviewWindowBuilder` (1160×720, min 700×500, frameless, `center()`,
+  `visible(false)` + explicit show) — NOT a static `tauri.conf.json` entry,
+  so the native `background_color` and the `__TYPR_BOOT__` init script can be
+  seeded per-launch from settings (this is what kills the cold-start theme
+  flash; a post-hoc `set_background_color` races first show and loses)
 - `src-tauri/src/main.rs` → explicit `window.center()` before `window.show()` in:
   1. `setup` fresh launch (non-`--hidden` path)
   2. tray `on_menu_event("show")`

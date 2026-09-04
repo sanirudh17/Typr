@@ -11,19 +11,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Typr",
-        "width": 1160,
-        "height": 720,
-        "minWidth": 700,
-        "minHeight": 500,
-        "resizable": true,
-        "decorations": false,
-        "visible": false,
-        "center": true
-      }
-    ],
+    "windows": [],
     "macOSPrivateApi": true,
     "security": {
       "csp": null

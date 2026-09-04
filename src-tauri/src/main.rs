@@ -816,98 +816,114 @@ fn main() {
             remove_app_rule,
         ])
         .setup(move |app| {
-            // Handle window close to properly exit the app
-            let main_window = app.get_webview_window("main");
-            if let Some(window) = main_window {
-                // Paint the native window surface in the active theme BEFORE first
-                // show. The webview needs ~a second for its first paint; until then
-                // the OS surface is all there is, and a dark default there is the
-                // cold-start "dark flash" on light setups — no in-page script can
-                // cover it because no page exists yet. Mirrors resolveTheme() in
-                // main.ts and the pre-paint head script: stored setting wins, the
-                // OS only resolves "system". Set once here; every later show
-                // (tray re-show included) inherits it.
-                {
-                    let theme = app
-                        .state::<AppState>()
-                        .settings
-                        .lock()
-                        .unwrap()
-                        .theme
-                        .clone();
-                    let light = match theme.as_str() {
-                        "light" => true,
-                        "dark" => false,
-                        // Detection failure (or Default) falls back to light,
-                        // matching the Windows factory default.
-                        _ => !matches!(dark_light::detect(), Ok(dark_light::Mode::Dark)),
-                    };
-                    // Must match style.css --bg per theme exactly.
-                    let bg = if light {
-                        tauri::window::Color(0xee, 0xf0, 0xf3, 255)
+            // Build the main window here, not in tauri.conf: only the builder can
+            // carry a per-launch native background and a Rust-truth init script.
+            // A post-hoc set_background_color races first show and loses, leaving
+            // a black native surface for the webview's first second — the
+            // cold-start flash no in-page script can cover (no page exists yet).
+            // The persisted theme seeds both: bg paints the OS surface instantly,
+            // __TYPR_BOOT__ beats every page script (see index.html head).
+            let theme_pref = app
+                .state::<AppState>()
+                .settings
+                .lock()
+                .unwrap()
+                .theme
+                .clone();
+            let light = match theme_pref.as_str() {
+                "light" => true,
+                "dark" => false,
+                // Detection failure falls back to light (Windows factory default).
+                _ => !matches!(dark_light::detect(), Ok(dark_light::Mode::Dark)),
+            };
+            // Must match style.css --bg per theme exactly.
+            let bg = if light {
+                tauri::window::Color(0xee, 0xf0, 0xf3, 255)
+            } else {
+                tauri::window::Color(0x09, 0x09, 0x0b, 255)
+            };
+            // Never interpolate the raw setting: a hand-edited config could break
+            // out of the string. Only the three known values pass through.
+            let theme_init = match theme_pref.as_str() {
+                "light" | "dark" | "system" => theme_pref.as_str(),
+                _ => "system",
+            };
+            let init_script =
+                format!(r#"window.__TYPR_BOOT__ = {{ theme: "{}" }};"#, theme_init);
+            match WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("Typr")
+                .inner_size(1160.0, 720.0)
+                .min_inner_size(700.0, 500.0)
+                .decorations(false)
+                .transparent(false)
+                .resizable(true)
+                .center()
+                .visible(false)
+                .initialization_script(&init_script)
+                .background_color(bg)
+                .build()
+            {
+                Ok(window) => {
+                    #[cfg(not(windows))]
+                    match Image::from_bytes(include_bytes!("../icons/icon.png")) {
+                        Ok(icon) => {
+                            if let Err(e) = window.set_icon(icon) {
+                                eprintln!("[Typr] Failed to set main window icon: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("[Typr] Failed to load main window icon: {}", e),
+                    }
+
+                    if launched_hidden() {
+                        println!("[Typr] Launched hidden (auto-start); main window stays in tray");
                     } else {
-                        tauri::window::Color(0x09, 0x09, 0x0b, 255)
-                    };
-                    if let Err(e) = window.set_background_color(Some(bg)) {
-                        eprintln!("[Typr] Failed to seed window background: {}", e);
-                    }
-                }
-                #[cfg(not(windows))]
-                match Image::from_bytes(include_bytes!("../icons/icon.png")) {
-                    Ok(icon) => {
-                        if let Err(e) = window.set_icon(icon) {
-                            eprintln!("[Typr] Failed to set main window icon: {}", e);
+                        // Always launch centered on the current monitor, whether this is a fresh
+                        // process or the window is being re-shown from the tray. The builder
+                        // .center() handles the very first show, but the explicit call
+                        // guarantees the same result after the window has been hidden to tray
+                        // (background mode) or when the OS restores a previous top-left position.
+                        let _ = window.center();
+                        if let Err(e) = window.show() {
+                            eprintln!("[Typr] Failed to show main window: {}", e);
                         }
                     }
-                    Err(e) => eprintln!("[Typr] Failed to load main window icon: {}", e),
-                }
 
-                if launched_hidden() {
-                    println!("[Typr] Launched hidden (auto-start); main window stays in tray");
-                } else {
-                    // Always launch centered on the current monitor, whether this is a fresh
-                    // process or the window is being re-shown from the tray. The config
-                    // `center: true` handles the very first show, but the explicit call
-                    // guarantees the same result after the window has been hidden to tray
-                    // (background mode) or when the OS restores a previous top-left position.
-                    let _ = window.center();
-                    if let Err(e) = window.show() {
-                        eprintln!("[Typr] Failed to show main window: {}", e);
-                    }
-                }
-
-                let app_handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let background = app_handle
-                            .state::<AppState>()
-                            .settings
-                            .lock()
-                            .unwrap()
-                            .background_mode;
-                        if background {
-                            // Hide to tray, keep running so the hotkey still works.
-                            api.prevent_close();
-                            if let Some(w) = app_handle.get_webview_window("main") {
-                                let _ = w.hide();
+                    let app_handle = app.handle().clone();
+                    window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            let background = app_handle
+                                .state::<AppState>()
+                                .settings
+                                .lock()
+                                .unwrap()
+                                .background_mode;
+                            if background {
+                                // Hide to tray, keep running so the hotkey still works.
+                                api.prevent_close();
+                                if let Some(w) = app_handle.get_webview_window("main") {
+                                    let _ = w.hide();
+                                }
+                                if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
+                                    let _ = app_handle
+                                        .notification()
+                                        .builder()
+                                        .title("Typr is still running")
+                                        .body("Right-click the tray icon to quit.")
+                                        .show();
+                                }
+                            } else {
+                                println!("[Typr] Main window close requested, exiting app");
+                                tauri::async_runtime::block_on(async {
+                                    typr_lib::whisper_server::stop_server().await;
+                                });
+                                std::process::exit(0);
                             }
-                            if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
-                                let _ = app_handle
-                                    .notification()
-                                    .builder()
-                                    .title("Typr is still running")
-                                    .body("Right-click the tray icon to quit.")
-                                    .show();
-                            }
-                        } else {
-                            println!("[Typr] Main window close requested, exiting app");
-                            tauri::async_runtime::block_on(async {
-                                typr_lib::whisper_server::stop_server().await;
-                            });
-                            std::process::exit(0);
                         }
-                    }
-                });
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[Typr] CRITICAL: main window failed to build ({}). Continuing tray-only.", e);
+                }
             }
 
             // System tray — the only true exit lives here, so it is always created.
