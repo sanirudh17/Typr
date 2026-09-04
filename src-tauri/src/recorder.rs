@@ -496,22 +496,6 @@ fn push_preview_text(app: &AppHandle, text: &str) {
     }
 }
 
-/// Widen the overlay while previewing so a partial sentence fits, restoring after.
-/// The pill is built for ~30 characters; a preview needs roughly a full clause.
-/// Best-effort throughout — a resize failure must never disturb the recording.
-fn set_preview_width(app: &AppHandle, wide: bool) {
-    use tauri::Manager;
-    let Some(overlay) = app.get_webview_window("overlay") else { return };
-    let (w, h) = if wide { (480.0, 120.0) } else { (300.0, 120.0) };
-    let scale = overlay.scale_factor().unwrap_or(1.0);
-    // Keep the pill centered: shift left by half the width delta.
-    if let Ok(pos) = overlay.outer_position() {
-        let x = pos.x as f64 / scale - (w - 300.0) / 2.0;
-        let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y: pos.y as f64 / scale }));
-    }
-    let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
-}
-
 /// Run Live Preview ticks until the recording stops. Display-only: partials never
 /// touch history or paste — the stop path still runs the full transcription.
 /// Every tick re-transcribes from the start of the recording, so each partial
@@ -528,7 +512,6 @@ pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig
         return;
     }
     tauri::async_runtime::spawn(async move {
-        set_preview_width(&app, true);
         loop {
             tokio::time::sleep(PREVIEW_TICK).await;
             if recorder.get_state() != RecordingState::Recording {
@@ -558,7 +541,6 @@ pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig
             }
         }
         push_preview_text(&app, "");
-        set_preview_width(&app, false);
     });
 }
 

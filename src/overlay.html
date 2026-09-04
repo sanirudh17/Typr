@@ -77,6 +77,21 @@
       .pill.previewing .preview {
         display: block;
       }
+      /* Live anchor: a small pulsing dot so the preview text reads as its own
+         live element rather than merging into the pill chrome. */
+      .live-dot {
+        display: none;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #7b8aed;
+        margin-right: 8px;
+        flex-shrink: 0;
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+      .pill.previewing .live-dot {
+        display: block;
+      }
       html[data-theme="light"] .preview {
         color: rgba(20, 24, 33, 0.85);
       }
@@ -122,6 +137,7 @@
         <div class="wave-bar"></div>
       </div>
       <div class="spinner" id="spinner" style="display: none;"></div>
+      <div class="live-dot" id="live-dot"></div>
       <div class="preview" id="preview"></div>
     </div>
     <script type="module">
@@ -285,6 +301,9 @@
         }
 
         pill.className = "pill";
+        // Drop any stale preview with the state change so the next recording
+        // never flashes the previous dictation's last partial.
+        preview.textContent = "";
 
         if (state === "recording") {
           pill.classList.add("recording");

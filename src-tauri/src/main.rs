@@ -1037,16 +1037,22 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Create the overlay window (floating pill, bottom center, always on top)
+            // Create the overlay window (floating pill, bottom center, always on top).
+            // Sized at full Live Preview width (480) from the start and centered once:
+            // the window is transparent and click-through, so the invisible margin
+            // costs nothing — and because nothing ever moves or resizes it at
+            // runtime, it cannot drift off-center (the old widen/restore dance
+            // stranded it 90px left on every preview cycle). The pill itself stays
+            // content-sized and centered by the overlay page's flex layout.
             let monitor = app.primary_monitor().ok().flatten();
             let (x, y) = if let Some(m) = monitor {
                 let size = m.size();
                 let scale = m.scale_factor();
                 let logical_w = size.width as f64 / scale;
                 let logical_h = size.height as f64 / scale;
-                ((logical_w - 300.0) as i32 / 2, (logical_h - 160.0) as i32)
+                ((logical_w - 480.0) as i32 / 2, (logical_h - 160.0) as i32)
             } else {
-                (810, 950)
+                (720, 950)
             };
 
             let overlay = WebviewWindowBuilder::new(
@@ -1055,7 +1061,7 @@ fn main() {
                 WebviewUrl::App("src/overlay.html".into()),
             )
             .title("")
-            .inner_size(300.0, 120.0)
+            .inner_size(480.0, 120.0)
             .position(x as f64, y as f64)
             .resizable(false)
             .decorations(false)
