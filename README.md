@@ -360,13 +360,13 @@ whichever release should be handed out.
 
 ```json
 {
-  "version": "0.1.7",
+  "version": "0.1.8",
   "notes": "What changed",
-  "pub_date": "2026-08-29T00:00:00Z",
+  "pub_date": "2026-09-04T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.1.7/Typr_0.1.7_x64-setup.exe"
+      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.1.8/Typr_0.1.8_x64-setup.exe"
     }
   }
 }
