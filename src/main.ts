@@ -26,6 +26,7 @@ interface Settings {
   autostart: boolean;
   theme: string;
   hotkeySecondary: string;
+  hotkeyWrite: string;
   secondaryProfile: string;
   autoContextOverride: string;
   appRules: AppRule[];
@@ -159,6 +160,10 @@ const hotkey2Display = document.getElementById("hotkey2-display") as HTMLElement
 const hotkey2ChangeBtn = document.getElementById("hotkey2-change-btn") as HTMLButtonElement;
 const hotkey2ClearBtn = document.getElementById("hotkey2-clear-btn") as HTMLButtonElement;
 const hotkey2Status = document.getElementById("hotkey2-status") as HTMLElement;
+const hotkey3Display = document.getElementById("hotkey3-display") as HTMLElement;
+const hotkey3ChangeBtn = document.getElementById("hotkey3-change-btn") as HTMLButtonElement;
+const hotkey3ClearBtn = document.getElementById("hotkey3-clear-btn") as HTMLButtonElement;
+const hotkey3Status = document.getElementById("hotkey3-status") as HTMLElement;
 const secondaryProfileCleanup = document.getElementById("secondary-profile-cleanup") as HTMLButtonElement;
 const secondaryProfilePrompt = document.getElementById("secondary-profile-prompt") as HTMLButtonElement;
 const secondaryProfileAuto = document.getElementById("secondary-profile-auto") as HTMLButtonElement;
@@ -379,6 +384,7 @@ async function loadSettings() {
   hotkeyDisplay.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
   renderSecondaryHotkey();
   renderSecondaryProfile();
+  renderWriteHotkey();
 
   // Startup & background
   setBackgroundMode(currentSettings.backgroundMode);
@@ -1061,6 +1067,12 @@ hotkeyResetBtn.addEventListener("click", async () => {
 });
 
 // --- Secondary (AI) hotkey --------------------------------------------------
+function renderWriteHotkey(): void {
+  const v = currentSettings.hotkeyWrite;
+  hotkey3Display.textContent = v ? v.replace("CmdOrCtrl", "Cmd") : "Not set";
+  hotkey3ClearBtn.disabled = !v;
+}
+
 function renderSecondaryHotkey(): void {
   const v = currentSettings.hotkeySecondary;
   hotkey2Display.textContent = v ? v.replace("CmdOrCtrl", "Cmd") : "Not set";
@@ -1116,6 +1128,42 @@ function wireSecondaryProfile(btn: HTMLButtonElement, profile: string): void {
     }
   });
 }
+const writeCapture = createHotkeyCapture({
+  display: hotkey3Display,
+  status: hotkey3Status,
+  changeBtn: hotkey3ChangeBtn,
+  setCommand: "set_write_hotkey",
+  getCurrent: () => currentSettings.hotkeyWrite || "",
+  onSet: (accepted) => {
+    currentSettings.hotkeyWrite = accepted;
+    renderWriteHotkey();
+  },
+  // Unset renders "Not set" rather than an empty box (used on cancel/idle).
+  onCurrentRender: renderWriteHotkey,
+});
+
+hotkey3ChangeBtn.addEventListener("click", () => {
+  if (writeCapture.isCapturing()) writeCapture.cancel();
+  else writeCapture.start();
+});
+
+hotkey3ClearBtn.addEventListener("click", async () => {
+  if (writeCapture.isCapturing()) writeCapture.cancel();
+  try {
+    await invoke("clear_write_hotkey");
+    currentSettings.hotkeyWrite = "";
+    renderWriteHotkey();
+    hotkey3Status.textContent = "Write Mode hotkey cleared.";
+  } catch (err) {
+    hotkey3Status.textContent = String(err);
+  }
+});
+
+// The backend runs the rewrite off the record path and reports back here.
+listen<{ ok: boolean; message: string }>("write-mode-result", (event) => {
+  showToast(event.payload.message);
+});
+
 wireSecondaryProfile(secondaryProfileCleanup, "cleanup");
 wireSecondaryProfile(secondaryProfilePrompt, "prompt");
 wireSecondaryProfile(secondaryProfileAuto, "auto");

@@ -18,6 +18,7 @@ pub mod commands;
 pub mod hotkey;
 pub mod vocab_correct;
 pub mod email_assemble;
+pub mod write_mode;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

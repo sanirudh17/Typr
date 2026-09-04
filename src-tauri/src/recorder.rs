@@ -429,6 +429,15 @@ impl Recorder {
         Ok(final_text)
     }
 
+    /// Show or clear the processing spinner outside a dictation — Write Mode reuses
+    /// it around its AI call. Pairs the overlay eval with the recording-state event
+    /// so the main-window status and the pill never disagree.
+    pub fn set_overlay_processing(app: &AppHandle, show: bool) {
+        let state = if show { RecordingState::Transcribing } else { RecordingState::Ready };
+        let _ = app.emit("recording-state", state.clone());
+        update_overlay(app, &state, show);
+    }
+
     /// Reset the recorder to Ready and clear the processing overlay. Called once the
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
     /// only after the AI cleanup pass rather than ~1-2s before the paste lands.

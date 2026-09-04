@@ -41,6 +41,10 @@ pub struct Settings {
     pub autostart: bool,
     #[serde(rename = "hotkeySecondary", default)]
     pub hotkey_secondary: String,
+    /// Write Mode hotkey: rewrites the current selection in place. Empty by
+    /// default — opt-in, so it can never surprise or conflict out of the box.
+    #[serde(rename = "hotkeyWrite", default)]
+    pub hotkey_write: String,
     #[serde(rename = "secondaryProfile", default = "default_secondary_profile")]
     pub secondary_profile: String,
     #[serde(rename = "appRules", default)]
@@ -124,6 +128,7 @@ impl Default for Settings {
             background_mode: false,
             autostart: false,
             hotkey_secondary: String::new(),
+            hotkey_write: String::new(),
             secondary_profile: "prompt".to_string(),
             app_rules: Vec::new(),
             auto_context_override: "auto".to_string(),
@@ -410,6 +415,27 @@ mod tests {
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir).cloud_model, "fast");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_hotkey_defaults_unset() {
+        // Opt-in: a fresh config must not claim any accelerator.
+        let s = Settings::default();
+        assert_eq!(s.hotkey_write, "");
+        // And a config written before Write Mode existed still loads.
+        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.hotkey_write, "");
+    }
+
+    #[test]
+    fn test_write_hotkey_roundtrips() {
+        let mut s = Settings::default();
+        s.hotkey_write = "CmdOrCtrl+Alt+W".to_string();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"hotkeyWrite\":"));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.hotkey_write, "CmdOrCtrl+Alt+W");
     }
 
     #[test]

@@ -590,6 +590,18 @@
               <div class="cmd-row"><span class="cmd-say">&ldquo;milk, eggs and bread make it a list&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">bulleted list</code></div>
             </div>
           </div>
+
+          <div class="cmd-group">
+            <h3 class="cmd-group-title">Write Mode (selected text, not dictation)</h3>
+            <p class="settings-note" style="margin-bottom: 10px;">Select text in any app and press your Write Mode hotkey (Recording &rarr; Hotkeys). The AI rewrite replaces the selection; <strong>Ctrl+Z</strong> undoes it. Needs AI cleanup on with a Groq key, and honours your Tone / Formatting / Custom instructions.</p>
+            <div class="cmd-list">
+              <div class="cmd-row"><span class="cmd-say">Select text, press Write Mode hotkey</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">selection rewritten in place</code></div>
+              <div class="cmd-row"><span class="cmd-say">Nothing selected</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice; your text is untouched</code></div>
+              <div class="cmd-row"><span class="cmd-say">AI off or key missing</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice asking to enable it</code></div>
+              <div class="cmd-row"><span class="cmd-say">Rewrite fails or times out</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice; your text is untouched</code></div>
+              <div class="cmd-row"><span class="cmd-say">Ctrl+Z right after a rewrite</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">restores your original text</code></div>
+            </div>
+          </div>
         </section>
 
         <section id="section-recording" class="content-section">
@@ -644,6 +656,18 @@
                 <kbd id="hotkey2-display">Not set</kbd>
                 <button id="hotkey2-change-btn" class="toggle-btn">Change</button>
                 <button id="hotkey2-clear-btn" class="toggle-btn">Clear</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Write Mode hotkey (optional)</span>
+                <span class="label-hint">Rewrites your selected text in place with AI. Select text in any app, press it, and the rewrite replaces the selection.</span>
+              </div>
+              <div class="setting-control hotkey-control">
+                <span id="hotkey3-status" class="hotkey-status"></span>
+                <kbd id="hotkey3-display">Not set</kbd>
+                <button id="hotkey3-change-btn" class="toggle-btn">Change</button>
+                <button id="hotkey3-clear-btn" class="toggle-btn">Clear</button>
               </div>
             </div>
             <div class="setting-row setting-child">

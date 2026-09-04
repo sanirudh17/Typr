@@ -35,11 +35,13 @@ fn launched_hidden() -> bool {
 }
 
 /// Which configured hotkey fired. `Secondary` routes the dictation through the
-/// configured AI profile for that one session.
+/// configured AI profile for that one session. `WriteMode` never records — it
+/// rewrites the user's current text selection in place.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HotkeySource {
     Primary,
     Secondary,
+    WriteMode,
 }
 
 /// A global-shortcut press/release tagged with the hotkey it came from.
@@ -64,6 +66,17 @@ fn register_hotkey(
             let _ = tx.try_send(HotkeyEvent { source, state: event.state });
         })
         .map_err(|e| e.to_string())
+}
+
+/// Best-effort registration of the Write Mode hotkey when one is configured.
+fn register_write_if_set(app: &tauri::AppHandle, state: &AppState) {
+    let write = state.settings.lock().unwrap().hotkey_write.clone();
+    if !write.is_empty() {
+        match register_hotkey(app, &write, HotkeySource::WriteMode, &state.hotkey_tx) {
+            Ok(_) => println!("[Typr] Write Mode hotkey registered: {}", write),
+            Err(e) => eprintln!("[Typr] Write Mode hotkey unavailable ({}): {}", write, e),
+        }
+    }
 }
 
 /// Best-effort registration of the secondary hotkey when one is configured.
@@ -354,6 +367,7 @@ fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), S
     let hotkey = state.settings.lock().unwrap().hotkey.clone();
     let res = register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx);
     register_secondary_if_set(&app, &state);
+    register_write_if_set(&app, &state);
     res
 }
 
@@ -416,6 +430,71 @@ fn clear_secondary_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Resu
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings;
     println!("[Typr] Secondary hotkey cleared");
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_write_hotkey(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    accelerator: String,
+) -> Result<String, String> {
+    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+
+    let (primary, secondary, old_write) = {
+        let s = state.settings.lock().unwrap();
+        (s.hotkey.clone(), s.hotkey_secondary.clone(), s.hotkey_write.clone())
+    };
+    if accelerator == primary || (!secondary.is_empty() && accelerator == secondary) {
+        // Restore whatever was suspended for capture before returning.
+        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+        register_secondary_if_set(&app, &state);
+        register_write_if_set(&app, &state);
+        return Err("That is already in use by another Typr hotkey - pick a different combo.".to_string());
+    }
+
+    if !old_write.is_empty() {
+        let _ = app.global_shortcut().unregister(old_write.as_str());
+    }
+    match register_hotkey(&app, &accelerator, HotkeySource::WriteMode, &state.hotkey_tx) {
+        Ok(_) => {
+            let mut settings = state.settings.lock().unwrap().clone();
+            settings.hotkey_write = accelerator.clone();
+            settings.save(&state.app_dir)?;
+            *state.settings.lock().unwrap() = settings;
+            // Capture suspended everything - re-arm the other two.
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            register_secondary_if_set(&app, &state);
+            println!("[Typr] Write Mode hotkey set to {}", accelerator);
+            Ok(accelerator)
+        }
+        Err(e) => {
+            // Restore prior state: old write (if any) + secondary + primary.
+            if !old_write.is_empty() {
+                let _ = register_hotkey(&app, &old_write, HotkeySource::WriteMode, &state.hotkey_tx);
+            }
+            register_secondary_if_set(&app, &state);
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            eprintln!("[Typr] Write Mode rebind to {} failed: {}", accelerator, e);
+            Err(format!(
+                "That combo is unavailable - it may be in use by Windows or another app. ({})",
+                accelerator
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+fn clear_write_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    let old = state.settings.lock().unwrap().hotkey_write.clone();
+    if !old.is_empty() {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.hotkey_write = String::new();
+    settings.save(&state.app_dir)?;
+    *state.settings.lock().unwrap() = settings;
+    println!("[Typr] Write Mode hotkey cleared");
     Ok(())
 }
 
@@ -797,6 +876,8 @@ fn main() {
             resume_hotkeys,
             set_secondary_hotkey,
             clear_secondary_hotkey,
+            set_write_hotkey,
+            clear_write_hotkey,
             set_secondary_profile,
             get_history,
             delete_transcription,
@@ -1042,6 +1123,35 @@ fn main() {
             let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {
                 while let Some(hotkey_event) = hotkey_rx.recv().await {
+                    // Write Mode is a single-press action on the current selection, not a
+                    // recording — it must not enter the toggle/PTT state machine, and it
+                    // must not run while a dictation owns the mic/clipboard.
+                    if hotkey_event.source == HotkeySource::WriteMode {
+                        if hotkey_event.state == ShortcutState::Pressed {
+                            let state = rx_handle.state::<AppState>();
+                            if state.recorder.get_state() != RecordingState::Ready {
+                                eprintln!("[Typr] Write Mode ignored: recorder busy");
+                            } else {
+                                let handle = rx_handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let state = handle.state::<AppState>();
+                                    let settings = state.settings.lock().unwrap().clone();
+                                    let app_dir = state.app_dir.clone();
+                                    match typr_lib::write_mode::run_write_mode(&handle, &settings, &app_dir).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            use tauri::Emitter;
+                                            let _ = handle.emit(
+                                                "write-mode-result",
+                                                typr_lib::write_mode::WriteModeResult { ok: false, message: e },
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     let state = rx_handle.state::<AppState>();
                     let mode = state.settings.lock().unwrap().recording_mode.clone();
                     match hotkey_event.state {
@@ -1127,6 +1237,7 @@ fn main() {
             }
 
             register_secondary_if_set(&handle, app.state::<AppState>().inner());
+            register_write_if_set(&handle, app.state::<AppState>().inner());
 
             Ok(())
         })
