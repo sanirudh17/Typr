@@ -590,19 +590,6 @@
               <div class="cmd-row"><span class="cmd-say">&ldquo;milk, eggs and bread make it a list&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">bulleted list</code></div>
             </div>
           </div>
-
-          <div class="cmd-group">
-            <h3 class="cmd-group-title">Write Mode (dictate the change)</h3>
-            <p class="settings-note" style="margin-bottom: 10px;">Select text in any app and press your Write Mode hotkey (Recording &rarr; Hotkeys) — the overlay opens. Dictate what to do with the selection (&ldquo;make this formal&rdquo;, &ldquo;fix the spelling&rdquo;, &ldquo;turn this into bullets&rdquo;), then press the hotkey again (or release it in Push to Talk). The rewrite replaces the selection; <strong>Ctrl+Z</strong> undoes it. Needs AI cleanup on with a Groq key, and honours your Tone / Formatting / Custom instructions.</p>
-            <div class="cmd-list">
-              <div class="cmd-row"><span class="cmd-say">Select text, press Write Mode hotkey, dictate, press again</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">selection rewritten per instruction</code></div>
-              <div class="cmd-row"><span class="cmd-say">Nothing selected</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice; nothing records</code></div>
-              <div class="cmd-row"><span class="cmd-say">Instruction not caught</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice; your text is untouched</code></div>
-              <div class="cmd-row"><span class="cmd-say">Rewrite fails or times out</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">a notice; your text is untouched</code></div>
-              <div class="cmd-row"><span class="cmd-say">Selection moved while dictating</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">rewrite copied to clipboard instead</code></div>
-              <div class="cmd-row"><span class="cmd-say">Ctrl+Z right after a rewrite</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">restores your original text</code></div>
-            </div>
-          </div>
         </section>
 
         <section id="section-recording" class="content-section">
@@ -670,18 +657,6 @@
                   <button id="secondary-profile-prompt" class="toggle-btn">Prompt</button>
                   <button id="secondary-profile-auto" class="toggle-btn">Auto</button>
                 </div>
-              </div>
-            </div>
-            <div class="setting-row">
-              <div class="setting-label">
-                <span class="label-text">Write Mode hotkey (optional)</span>
-                <span class="label-hint">Dictate the change for selected text. Select text, press to start dictating, press again to apply the rewrite.</span>
-              </div>
-              <div class="setting-control hotkey-control">
-                <span id="hotkey3-status" class="hotkey-status"></span>
-                <kbd id="hotkey3-display">Not set</kbd>
-                <button id="hotkey3-change-btn" class="toggle-btn">Change</button>
-                <button id="hotkey3-clear-btn" class="toggle-btn">Clear</button>
               </div>
             </div>
             </div>

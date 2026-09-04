@@ -35,13 +35,11 @@ fn launched_hidden() -> bool {
 }
 
 /// Which configured hotkey fired. `Secondary` routes the dictation through the
-/// configured AI profile for that one session. `WriteMode` never records — it
-/// rewrites the user's current text selection in place.
+/// configured AI profile for that one session.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HotkeySource {
     Primary,
     Secondary,
-    WriteMode,
 }
 
 /// A global-shortcut press/release tagged with the hotkey it came from.
@@ -66,34 +64,6 @@ fn register_hotkey(
             let _ = tx.try_send(HotkeyEvent { source, state: event.state });
         })
         .map_err(|e| e.to_string())
-}
-
-/// Re-arm every configured hotkey from stored settings. Capture suspends all of
-/// them, so EVERY exit of every set_* command — success, validation error,
-/// collision, OS rejection — must end here (or in resume_hotkeys, which calls
-/// this). Missing one exit strands dead shortcuts until the app restarts.
-/// Returns the primary arm's result; the other two stay best-effort by design.
-fn restore_all_hotkeys(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let primary = state.settings.lock().unwrap().hotkey.clone();
-    let res = register_hotkey(app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-    if let Err(e) = res.as_ref() {
-        // Loud: a failed restore is exactly how shortcuts end up dead.
-        eprintln!("[Typr] CRITICAL: primary hotkey re-arm failed ({}). Shortcuts may be dead until restart.", e);
-    }
-    register_secondary_if_set(app, state);
-    register_write_if_set(app, state);
-    res
-}
-
-/// Best-effort registration of the Write Mode hotkey when one is configured.
-fn register_write_if_set(app: &tauri::AppHandle, state: &AppState) {
-    let write = state.settings.lock().unwrap().hotkey_write.clone();
-    if !write.is_empty() {
-        match register_hotkey(app, &write, HotkeySource::WriteMode, &state.hotkey_tx) {
-            Ok(_) => println!("[Typr] Write Mode hotkey registered: {}", write),
-            Err(e) => eprintln!("[Typr] Write Mode hotkey unavailable ({}): {}", write, e),
-        }
-    }
 }
 
 /// Best-effort registration of the secondary hotkey when one is configured.
@@ -329,12 +299,8 @@ async fn set_hotkey(
     state: State<'_, AppState>,
     accelerator: String,
 ) -> Result<String, String> {
-    // 1. Validate the shape before touching the OS registration. Capture already
-    // suspended everything, so even this early exit must restore first.
-    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
-        let _ = restore_all_hotkeys(&app, &state);
-        return Err(e);
-    }
+    // 1. Validate the shape before touching the OS registration.
+    typr_lib::hotkey::validate_accelerator(&accelerator)?;
 
     let old = state.settings.lock().unwrap().hotkey.clone();
 
@@ -353,14 +319,14 @@ async fn set_hotkey(
                 *state.settings.lock().unwrap() = settings;
                 println!("[Typr] Hotkey rebound to {}", accelerator);
             }
-            // Capture suspended everything — re-arm the other two as well.
-            let _ = restore_all_hotkeys(&app, &state);
+            // Capture suspended everything — re-arm the secondary too.
+            register_secondary_if_set(&app, &state);
             Ok(accelerator)
         }
         Err(e) => {
-            // 4. Best-effort restore so we never end with no hotkey. Settings still
-            // hold `old`, so restoring from settings re-arms exactly that.
-            let _ = restore_all_hotkeys(&app, &state);
+            // 4. Best-effort restore so we never end with no hotkey.
+            let _ = register_hotkey(&app, &old, HotkeySource::Primary, &state.hotkey_tx);
+            register_secondary_if_set(&app, &state);
             eprintln!("[Typr] Rebind to {} failed ({}); kept {}", accelerator, e, old);
             Err(format!(
                 "`{}` is unavailable — it may be in use by Windows or another app.",
@@ -381,10 +347,14 @@ fn suspend_hotkeys(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Re-register the saved hotkeys after a capture is cancelled without a
-/// successful rebind — all three rows, since capture suspends all shortcuts.
+/// successful rebind — both the primary and (if set) the secondary, since
+/// capture suspends all global shortcuts.
 #[tauri::command]
 fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    restore_all_hotkeys(&app, &state)
+    let hotkey = state.settings.lock().unwrap().hotkey.clone();
+    let res = register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx);
+    register_secondary_if_set(&app, &state);
+    res
 }
 
 #[tauri::command]
@@ -393,11 +363,7 @@ async fn set_secondary_hotkey(
     state: State<'_, AppState>,
     accelerator: String,
 ) -> Result<String, String> {
-    // Suspended everything for capture — restore even on this early exit.
-    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
-        let _ = restore_all_hotkeys(&app, &state);
-        return Err(e);
-    }
+    typr_lib::hotkey::validate_accelerator(&accelerator)?;
 
     let (primary, old_secondary) = {
         let s = state.settings.lock().unwrap();
@@ -405,7 +371,8 @@ async fn set_secondary_hotkey(
     };
     if accelerator == primary {
         // Restore whatever was suspended for capture before returning.
-        let _ = restore_all_hotkeys(&app, &state);
+        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+        register_secondary_if_set(&app, &state);
         return Err("That's already your main hotkey — pick a different combo.".to_string());
     }
 
@@ -418,14 +385,17 @@ async fn set_secondary_hotkey(
             settings.hotkey_secondary = accelerator.clone();
             settings.save(&state.app_dir)?;
             *state.settings.lock().unwrap() = settings;
-            // Capture suspended everything — re-arm all three, not just primary.
-            let _ = restore_all_hotkeys(&app, &state);
+            // Capture suspended everything — re-arm the primary.
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
             println!("[Typr] Secondary hotkey set to {}", accelerator);
             Ok(accelerator)
         }
         Err(e) => {
-            // Restore prior state from settings (still holding the old combo).
-            let _ = restore_all_hotkeys(&app, &state);
+            // Restore prior state: old secondary (if any) + primary.
+            if !old_secondary.is_empty() {
+                let _ = register_hotkey(&app, &old_secondary, HotkeySource::Secondary, &state.hotkey_tx);
+            }
+            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
             eprintln!("[Typr] Secondary rebind to {} failed: {}", accelerator, e);
             Err(format!(
                 "`{}` is unavailable — it may be in use by Windows or another app.",
@@ -446,68 +416,6 @@ fn clear_secondary_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Resu
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings;
     println!("[Typr] Secondary hotkey cleared");
-    Ok(())
-}
-
-#[tauri::command]
-async fn set_write_hotkey(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    accelerator: String,
-) -> Result<String, String> {
-    // Suspended everything for capture — restore even on this early exit.
-    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
-        let _ = restore_all_hotkeys(&app, &state);
-        return Err(e);
-    }
-
-    let (primary, secondary, old_write) = {
-        let s = state.settings.lock().unwrap();
-        (s.hotkey.clone(), s.hotkey_secondary.clone(), s.hotkey_write.clone())
-    };
-    if accelerator == primary || (!secondary.is_empty() && accelerator == secondary) {
-        // Restore whatever was suspended for capture before returning.
-        let _ = restore_all_hotkeys(&app, &state);
-        return Err("That is already in use by another Typr hotkey - pick a different combo.".to_string());
-    }
-
-    if !old_write.is_empty() {
-        let _ = app.global_shortcut().unregister(old_write.as_str());
-    }
-    match register_hotkey(&app, &accelerator, HotkeySource::WriteMode, &state.hotkey_tx) {
-        Ok(_) => {
-            let mut settings = state.settings.lock().unwrap().clone();
-            settings.hotkey_write = accelerator.clone();
-            settings.save(&state.app_dir)?;
-            *state.settings.lock().unwrap() = settings;
-            // Capture suspended everything - re-arm all three.
-            let _ = restore_all_hotkeys(&app, &state);
-            println!("[Typr] Write Mode hotkey set to {}", accelerator);
-            Ok(accelerator)
-        }
-        Err(e) => {
-            // Restore prior state from settings (still holding the old combo).
-            let _ = restore_all_hotkeys(&app, &state);
-            eprintln!("[Typr] Write Mode rebind to {} failed: {}", accelerator, e);
-            Err(format!(
-                "That combo is unavailable - it may be in use by Windows or another app. ({})",
-                accelerator
-            ))
-        }
-    }
-}
-
-#[tauri::command]
-fn clear_write_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    let old = state.settings.lock().unwrap().hotkey_write.clone();
-    if !old.is_empty() {
-        let _ = app.global_shortcut().unregister(old.as_str());
-    }
-    let mut settings = state.settings.lock().unwrap().clone();
-    settings.hotkey_write = String::new();
-    settings.save(&state.app_dir)?;
-    *state.settings.lock().unwrap() = settings;
-    println!("[Typr] Write Mode hotkey cleared");
     Ok(())
 }
 
@@ -739,66 +647,6 @@ async fn download_model(
     Ok(())
 }
 
-/// Write Mode mic-open: fast and clipboard-free, so the overlay pops the
-/// instant the hotkey is pressed. Failures toast.
-async fn begin_write_mode_async(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    let (recorder, settings) = (state.recorder.clone(), state.settings.lock().unwrap().clone());
-    let result = typr_lib::write_mode::begin_write_mode(app, &recorder, &settings);
-    if let Err(e) = result.as_ref() {
-        eprintln!("[Typr] Write Mode begin failed: {}", e);
-    }
-    if let Err(e) = result {
-        use tauri::Emitter;
-        let _ = app.emit(
-            "write-mode-result",
-            typr_lib::write_mode::WriteModeResult { ok: false, message: e },
-        );
-    }
-}
-
-/// Release (or recovery press): transcribe the instruction and rewrite. The
-/// session claim inside makes a duplicate go quiet instead of doubling.
-async fn finish_write_mode_async(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    let (recorder, settings, app_dir, bias) = (
-        state.recorder.clone(),
-        state.settings.lock().unwrap().clone(),
-        state.app_dir.clone(),
-        state.dictionary.lock().unwrap().get_bias_prompt(),
-    );
-    let result =
-        typr_lib::write_mode::finish_write_mode(app, &recorder, &settings, &app_dir, &bias).await;
-    if let Err(e) = result.as_ref() {
-        eprintln!("[Typr] Write Mode finish failed: {}", e);
-    }
-    if let Err(e) = result {
-        use tauri::Emitter;
-        let _ = app.emit(
-            "write-mode-result",
-            typr_lib::write_mode::WriteModeResult { ok: false, message: e },
-        );
-    }
-}
-
-/// A normal stop must never consume a Write Mode recording: finishing belongs to
-/// the Write Mode hotkey, which toasts guidance instead of silently swallowing it.
-fn guard_write_session(app: &tauri::AppHandle, state: &AppState) -> bool {
-    if state.recorder.has_write_session() {
-        eprintln!("[Typr] Normal stop refused: Write Mode session in progress");
-        use tauri::Emitter;
-        let _ = app.emit(
-            "write-mode-result",
-            typr_lib::write_mode::WriteModeResult {
-                ok: false,
-                message: "Finish Write Mode first — press the Write Mode hotkey again.".to_string(),
-            },
-        );
-        return true;
-    }
-    false
-}
-
 /// The AI profile override this recording should carry, based on which hotkey started it.
 /// Secondary → force the configured profile; Primary → none. The value travels into
 /// `start_recording` and is consumed by the matching `stop_and_transcribe`, so it is scoped
@@ -807,10 +655,6 @@ fn profile_override_for(state: &AppState, source: HotkeySource) -> Option<String
     match source {
         HotkeySource::Secondary => Some(state.settings.lock().unwrap().secondary_profile.clone()),
         HotkeySource::Primary => None,
-        // Unreachable: the hotkey loop routes WriteMode to the rewrite flow before
-        // the record path. Covered explicitly (not `_`) so a future source is a
-        // compile error here, not a silent wrong-profile bug.
-        HotkeySource::WriteMode => None,
     }
 }
 
@@ -876,9 +720,6 @@ async fn do_toggle_recording(
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
-            if guard_write_session(app, state) {
-                return Err("Write Mode session in progress".to_string());
-            }
             let settings = state.settings.lock().unwrap().clone();
             let result = state
                 .recorder
@@ -956,8 +797,6 @@ fn main() {
             resume_hotkeys,
             set_secondary_hotkey,
             clear_secondary_hotkey,
-            set_write_hotkey,
-            clear_write_hotkey,
             set_secondary_profile,
             get_history,
             delete_transcription,
@@ -1203,65 +1042,6 @@ fn main() {
             let mut hotkey_rx = hotkey_rx;
             tauri::async_runtime::spawn(async move {
                 while let Some(hotkey_event) = hotkey_rx.recv().await {
-                    // Write Mode dictates the change. The mic opens on press (instant
-                    // overlay, no clipboard involved) and everything clipboard-
-                    // related waits for key release — synthesizing Ctrl+C while the
-                    // hotkey's modifiers are still held injects stray keystrokes.
-                    // Toggle: press one records, press two arms, release finishes
-                    // (atomic stop+rewrite). Push to Talk: hold records, release
-                    // finishes. A press mid-dictation is ignored, never hijacked.
-                    if hotkey_event.source == HotkeySource::WriteMode {
-                        let state = rx_handle.state::<AppState>();
-                        let mode = state.settings.lock().unwrap().recording_mode.clone();
-                        let current = state.recorder.get_state();
-                        let writing = state.recorder.has_write_session();
-                        match hotkey_event.state {
-                            ShortcutState::Pressed => {
-                                if current == RecordingState::Ready && !writing {
-                                    // Press one (toggle) / hold-start (PTT): mic only.
-                                    let handle = rx_handle.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        begin_write_mode_async(&handle).await;
-                                    });
-                                } else if current == RecordingState::Recording
-                                    && writing
-                                    && mode != "push-to-talk"
-                                {
-                                    match state.recorder.write_finish_armed_ms_ago() {
-                                        // Fresh press after arming: impatient double-tap,
-                                        // its release will finish properly.
-                                        Some(ms) if ms <= 600 => {}
-                                        // Armed long ago: the release was lost — finish now.
-                                        Some(_) => {
-                                            let handle = rx_handle.clone();
-                                            tauri::async_runtime::spawn(async move {
-                                                finish_write_mode_async(&handle).await;
-                                            });
-                                        }
-                                        // Press two: arm; the release does the work.
-                                        None => state.recorder.arm_write_finish(),
-                                    }
-                                } else if mode != "push-to-talk" {
-                                    eprintln!("[Typr] WriteMode press ignored: state={:?} writing={} (mid-dictation or finishing — press is not hijacking it)", current, writing);
-                                }
-                            }
-                            ShortcutState::Released => {
-                                // PTT release, or toggle press-two's release: keys are
-                                // up, safe for capture and paste. Duplicate releases
-                                // go quiet via the session claim inside.
-                                if writing
-                                    && (current == RecordingState::Recording
-                                        || current == RecordingState::Transcribing)
-                                {
-                                    let handle = rx_handle.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        finish_write_mode_async(&handle).await;
-                                    });
-                                }
-                            }
-                        }
-                        continue;
-                    }
                     let state = rx_handle.state::<AppState>();
                     let mode = state.settings.lock().unwrap().recording_mode.clone();
                     match hotkey_event.state {
@@ -1282,9 +1062,7 @@ fn main() {
                                         prewarm_local(&rx_handle);
                                         let mic = state.settings.lock().unwrap().microphone.clone();
                                         match state.recorder.start_recording(&rx_handle, &mic, session_override) {
-                                            Ok(_) => {
-                                                println!("[Typr] Recording started");
-                                            }
+                                            Ok(_) => println!("[Typr] Recording started"),
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),
                                         }
                                     }
@@ -1295,9 +1073,6 @@ fn main() {
                         ShortcutState::Released => {
                             if mode == "push-to-talk" {
                                 let current = state.recorder.get_state();
-                                if guard_write_session(&rx_handle, state.inner()) {
-                                    continue;
-                                }
                                 if current == RecordingState::Recording {
                                     let settings = state.settings.lock().unwrap().clone();
                                     match state.recorder.stop_and_transcribe(
@@ -1352,7 +1127,6 @@ fn main() {
             }
 
             register_secondary_if_set(&handle, app.state::<AppState>().inner());
-            register_write_if_set(&handle, app.state::<AppState>().inner());
 
             Ok(())
         })

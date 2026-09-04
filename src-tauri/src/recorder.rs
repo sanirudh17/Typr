@@ -45,15 +45,6 @@ pub struct Recorder {
     // taken when it stops, so it lives and dies with one session and can never leak forward
     // to the next dictation the way a shared slot could.
     session_override: Arc<Mutex<Option<String>>>,
-    // Write Mode ownership marker, same session discipline as the profile
-    // override: set when a write session starts recording, taken when it
-    // finishes. While set, the recording belongs to Write Mode — the normal
-    // stop path must not touch it. The selection itself is captured at finish
-    // time (post key-release), never here.
-    write_active: Arc<Mutex<bool>>,
-    // When press-two armed the finish (toggle mode). The release then runs the
-    // atomic stop+finish; a much later press means the release was lost.
-    write_finish_armed_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Recorder {
@@ -62,8 +53,6 @@ impl Recorder {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
-            write_active: Arc::new(Mutex::new(false)),
-            write_finish_armed_at: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -201,8 +190,23 @@ impl Recorder {
             dict.get_bias_prompt()
         };
 
-        let transcribe_result =
-            transcribe_audio(app, settings, app_dir, &temp_path, &prompt).await;
+        let transcribe_result = match settings.engine.as_str() {
+            "local" => {
+                let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
+                transcribe_local::transcribe_local(app, &model_path, &temp_path, &prompt).await
+            }
+            "cloud" => {
+                transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt, &settings.cloud_model).await
+            }
+            "parakeet" => {
+                let model_dir = app_dir
+                    .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+                // No prompt: transducer models have no equivalent of Whisper's prompt window,
+                // so the dictionary bias the other two engines receive has nowhere to go here.
+                transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
+            }
+            _ => Err(format!("Unknown engine: {}", settings.engine)),
+        };
 
         // Cleanup temp file
         let _ = std::fs::remove_file(&temp_path);
@@ -425,136 +429,6 @@ impl Recorder {
         Ok(final_text)
     }
 
-    /// Mark a Write Mode session fully done: the REAL state back to Ready. This
-    /// is what reset_ready does for dictations — the cosmetic pair below (event +
-    /// overlay) is not enough, or the mutex stays Transcribing forever and every
-    /// later hotkey press is refused while the UI misleadingly says Ready.
-    pub fn complete_write_session(&self, app: &AppHandle) {
-        *self.state.lock().unwrap() = RecordingState::Ready;
-        let _ = app.emit("recording-state", RecordingState::Ready);
-        update_overlay(app, &RecordingState::Ready, false);
-    }
-
-    /// Show or clear the processing spinner outside a dictation — Write Mode reuses
-    /// it around its AI call. COSMETIC ONLY: pairs the overlay eval with the
-    /// recording-state event but never moves the state mutex. Any flow that moved
-    /// the mutex (e.g. stop_write_audio) must close with complete_write_session
-    /// (or reset_ready), never with this.
-    pub fn set_overlay_processing(app: &AppHandle, show: bool) {
-        let state = if show { RecordingState::Transcribing } else { RecordingState::Ready };
-        let _ = app.emit("recording-state", state.clone());
-        update_overlay(app, &state, show);
-    }
-
-    /// True while a Write Mode session owns the current recording.
-    pub fn has_write_session(&self) -> bool {
-        *self.write_active.lock().unwrap()
-    }
-
-    /// Atomically claim the session for finishing. Only one finisher proceeds;
-    /// a duplicate press/release goes quiet instead of transcribing twice.
-    pub fn take_write_session(&self) -> bool {
-        let mut active = self.write_active.lock().unwrap();
-        if *active {
-            *active = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Arm the finish (toggle press two). Cleared on begin and on finish.
-    pub fn arm_write_finish(&self) {
-        *self.write_finish_armed_at.lock().unwrap() = Some(Instant::now());
-    }
-
-    /// Milliseconds since the finish was armed, if it is. A press moments after
-    /// arming is an impatient double-tap whose real release is imminent (stay
-    /// quiet); a press much later means the release was lost — finish now.
-    pub fn write_finish_armed_ms_ago(&self) -> Option<u128> {
-        self.write_finish_armed_at
-            .lock()
-            .unwrap()
-            .map(|t| t.elapsed().as_millis())
-    }
-
-    /// Clear a stale arm without touching the session itself.
-    pub fn clear_write_finish_arm(&self) {
-        *self.write_finish_armed_at.lock().unwrap() = None;
-    }
-
-    /// Start recording a Write Mode session: mark ownership and open the mic
-    /// exactly like a dictation (same overlay, same pill). Deliberately touches
-    /// nothing clipboard-related, so it is safe the instant the hotkey is
-    /// pressed — even with the combo's modifiers still physically held.
-    pub fn start_write_session(&self, app: &AppHandle, mic_name: &str) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-        if *state != RecordingState::Ready {
-            return Err("Already recording or transcribing".to_string());
-        }
-        *state = RecordingState::Recording;
-        *self.write_active.lock().unwrap() = true;
-        *self.write_finish_armed_at.lock().unwrap() = None;
-        *self.session_override.lock().unwrap() = None;
-        let _ = app.emit("recording-state", RecordingState::Recording);
-        update_overlay(app, &RecordingState::Recording, true);
-
-        let mut recorder = self.audio_recorder.lock().unwrap();
-        match recorder.start(mic_name) {
-            Ok(info) => {
-                if info.fell_back || info.changed {
-                    let _ = app.emit("mic-changed", serde_json::json!({
-                        "device": info.active_device,
-                        "fellBack": info.fell_back,
-                    }));
-                }
-            }
-            Err(e) => {
-                *state = RecordingState::Ready;
-                *self.write_active.lock().unwrap() = false;
-                let _ = app.emit("recording-state", RecordingState::Ready);
-                update_overlay(app, &RecordingState::Ready, false);
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
-    /// Stop a Write Mode recording and save its audio. Ownership is claimed
-    /// separately via take_write_session, so a duplicate finisher goes quiet
-    /// instead of double-transcribing. A failed save clears a stuck session so
-    /// normal dictation is never blocked behind it.
-    pub fn stop_write_audio(
-        &self,
-        app: &AppHandle,
-        app_dir: &PathBuf,
-    ) -> Result<(PathBuf, f32), String> {
-        {
-            let mut state = self.state.lock().unwrap();
-            if *state != RecordingState::Recording {
-                return Err("Not currently recording".to_string());
-            }
-            *state = RecordingState::Transcribing;
-            let _ = app.emit("recording-state", RecordingState::Transcribing);
-            update_overlay(app, &RecordingState::Transcribing, true);
-        }
-
-        let write_path = app_dir.join("temp_write_recording.wav");
-        let save_result = {
-            let mut recorder = self.audio_recorder.lock().unwrap();
-            recorder.stop_and_save(&write_path)
-        };
-        match save_result {
-            Ok((_, duration)) => Ok((write_path, duration)),
-            Err(e) => {
-                *self.write_active.lock().unwrap() = false;
-                self.reset_ready(app);
-                Err(e)
-            }
-        }
-    }
-
-
     /// Reset the recorder to Ready and clear the processing overlay. Called once the
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
     /// only after the AI cleanup pass rather than ~1-2s before the paste lands.
@@ -563,34 +437,6 @@ impl Recorder {
         *state = RecordingState::Ready;
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
-    }
-}
-
-/// Transcribe one wav file with the configured engine. Shared by the dictation
-/// path and Write Mode so both hear through identical settings and models.
-pub async fn transcribe_audio(
-    app: &AppHandle,
-    settings: &Settings,
-    app_dir: &PathBuf,
-    wav_path: &PathBuf,
-    prompt: &str,
-) -> Result<String, String> {
-    match settings.engine.as_str() {
-        "local" => {
-            let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
-            transcribe_local::transcribe_local(app, &model_path, wav_path, prompt).await
-        }
-        "cloud" => {
-            transcribe_groq::transcribe_groq(&settings.groq_api_key, wav_path, prompt, &settings.cloud_model).await
-        }
-        "parakeet" => {
-            let model_dir = app_dir
-                .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
-            // No prompt: transducer models have no equivalent of Whisper's prompt window,
-            // so the dictionary bias the other two engines receive has nowhere to go here.
-            transcribe_parakeet::transcribe_parakeet(&model_dir, wav_path).await
-        }
-        _ => Err(format!("Unknown engine: {}", settings.engine)),
     }
 }
 
