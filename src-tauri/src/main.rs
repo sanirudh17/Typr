@@ -784,6 +784,28 @@ fn prewarm_local(app: &tauri::AppHandle) {
     });
 }
 
+/// Fire-and-forget Live Preview ticks for this recording. Gated on the setting;
+/// the loop itself exits immediately for cloud (no per-tick API cost), so only
+/// local engines ever tick. Model locations are snapshotted now so a mid-recording
+/// settings change cannot retarget the running loop.
+fn maybe_spawn_preview(app: &tauri::AppHandle, state: &AppState) {
+    let settings = state.settings.lock().unwrap().clone();
+    if !settings.live_preview {
+        return;
+    }
+    let cfg = typr_lib::recorder::PreviewConfig {
+        engine: settings.engine.clone(),
+        app_dir: state.app_dir.clone(),
+        whisper_model_path: state
+            .app_dir
+            .join(transcribe_local::model_filename(&settings.whisper_model)),
+        parakeet_model_dir: state.app_dir.join(
+            typr_lib::transcribe_parakeet::model_dir_name(&settings.parakeet_model),
+        ),
+    };
+    typr_lib::recorder::spawn_preview_loop(app.clone(), state.recorder.clone(), cfg);
+}
+
 async fn do_toggle_recording(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -796,6 +818,7 @@ async fn do_toggle_recording(
             prewarm_local(app);
             let mic = state.settings.lock().unwrap().microphone.clone();
             state.recorder.start_recording(app, &mic, session_override)?;
+            maybe_spawn_preview(app, state);
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
@@ -1172,7 +1195,10 @@ fn main() {
                                         prewarm_local(&rx_handle);
                                         let mic = state.settings.lock().unwrap().microphone.clone();
                                         match state.recorder.start_recording(&rx_handle, &mic, session_override) {
-                                            Ok(_) => println!("[Typr] Recording started"),
+                                            Ok(_) => {
+                                                println!("[Typr] Recording started");
+                                                maybe_spawn_preview(&rx_handle, state.inner());
+                                            }
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),
                                         }
                                     }

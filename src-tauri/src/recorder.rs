@@ -438,6 +438,19 @@ impl Recorder {
         update_overlay(app, &state, show);
     }
 
+    /// Snapshot the in-progress audio to a temp wav for one Live Preview tick.
+    /// None when there is nothing worth transcribing yet (too short / silent).
+    pub fn write_preview_tick(&self, app_dir: &PathBuf) -> Option<PathBuf> {
+        let recorder = self.audio_recorder.lock().unwrap();
+        let (mono16k, _) = recorder.snapshot_preview()?;
+        drop(recorder);
+        let path = app_dir.join("preview_tick.wav");
+        if crate::audio::write_wav_16k_mono(&path, &mono16k).is_err() {
+            return None;
+        }
+        Some(path)
+    }
+
     /// Reset the recorder to Ready and clear the processing overlay. Called once the
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
     /// only after the AI cleanup pass rather than ~1-2s before the paste lands.
@@ -447,6 +460,90 @@ impl Recorder {
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
     }
+}
+
+/// What a Live Preview loop needs: the engine pick and the already-resolved model
+/// locations, snapshotted at record-start so a mid-dictation settings change cannot
+/// retarget a running loop.
+#[derive(Clone)]
+pub struct PreviewConfig {
+    pub engine: String,
+    pub app_dir: PathBuf,
+    pub whisper_model_path: PathBuf,
+    pub parakeet_model_dir: PathBuf,
+}
+
+/// Interval between preview ticks. Local small models answer in well under this for
+/// a few seconds of audio; slower models simply trail — ticks serialize, so a slow
+/// engine delays the next tick instead of piling transcriptions on top of each other.
+const PREVIEW_TICK: Duration = Duration::from_millis(2000);
+
+/// Push one line of preview text into the overlay pill. Empty clears it.
+fn push_preview_text(app: &AppHandle, text: &str) {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        // JSON-encoding the text is the escaping: dictation can contain quotes,
+        // backslashes, and newlines, none of which may break out of the eval.
+        let arg = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!("if (window.__setPreviewText) window.__setPreviewText({});", arg);
+        let _ = overlay.eval(&js);
+    }
+}
+
+/// Widen the overlay while previewing so a partial sentence fits, restoring after.
+/// The pill is built for ~30 characters; a preview needs roughly a full clause.
+/// Best-effort throughout — a resize failure must never disturb the recording.
+fn set_preview_width(app: &AppHandle, wide: bool) {
+    use tauri::Manager;
+    let Some(overlay) = app.get_webview_window("overlay") else { return };
+    let (w, h) = if wide { (480.0, 120.0) } else { (300.0, 120.0) };
+    let scale = overlay.scale_factor().unwrap_or(1.0);
+    // Keep the pill centered: shift left by half the width delta.
+    if let Ok(pos) = overlay.outer_position() {
+        let x = pos.x as f64 / scale - (w - 300.0) / 2.0;
+        let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y: pos.y as f64 / scale }));
+    }
+    let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
+}
+
+/// Run Live Preview ticks until the recording stops. Display-only: partials never
+/// touch history or paste — the stop path still runs the full transcription.
+/// Cloud has no tick path (a preview would cost an API call every 2s), so the loop
+/// exits immediately there and the spinner covers the recording as before.
+pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig) {
+    if cfg.engine != "local" && cfg.engine != "parakeet" {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        set_preview_width(&app, true);
+        loop {
+            tokio::time::sleep(PREVIEW_TICK).await;
+            if recorder.get_state() != RecordingState::Recording {
+                break;
+            }
+            let Some(tick_path) = recorder.write_preview_tick(&cfg.app_dir) else {
+                continue;
+            };
+            // Ticks serialize: awaiting here means a slow engine delays the next
+            // tick instead of overlapping transcriptions.
+            let text = if cfg.engine == "local" {
+                crate::transcribe_local::transcribe_local(&app, &cfg.whisper_model_path, &tick_path, "").await
+            } else {
+                crate::transcribe_parakeet::transcribe_parakeet(&cfg.parakeet_model_dir, &tick_path).await
+            };
+            let _ = std::fs::remove_file(&tick_path);
+            match text {
+                Ok(t) => {
+                    let t = crate::transcribe_local::normalize_transcript(&t);
+                    if !t.trim().is_empty() {
+                        push_preview_text(&app, &t);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        push_preview_text(&app, "");
+        set_preview_width(&app, false);
+    });
 }
 
 /// True when the foreground surface is a terminal inside the Developer context: the Auto

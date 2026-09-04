@@ -62,6 +62,24 @@
         transition: none; /* Crucial: remove CSS transition to prevent conflicts with JS requestAnimationFrame! */
       }
 
+      /* Live Preview: one scrolling line of partial transcript. Hidden unless the
+         backend pushes text; replaces the waveform while showing (the bars would
+         fight the words for the same few pixels). */
+      .preview {
+        display: none;
+        max-width: 400px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 12.5px;
+        color: rgba(255, 255, 255, 0.9);
+      }
+      .pill.previewing .preview {
+        display: block;
+      }
+      html[data-theme="light"] .preview {
+        color: rgba(20, 24, 33, 0.85);
+      }
       .spinner {
         width: 14px;
         height: 14px;
@@ -104,6 +122,7 @@
         <div class="wave-bar"></div>
       </div>
       <div class="spinner" id="spinner" style="display: none;"></div>
+      <div class="preview" id="preview"></div>
     </div>
     <script type="module">
       import { invoke } from "@tauri-apps/api/core";
@@ -130,6 +149,22 @@
 
       const pill = document.getElementById("pill");
       const waveform = document.getElementById("waveform");
+      const preview = document.getElementById("preview");
+
+      // Live Preview ticks from the backend. Display-only: showing a partial
+      // never affects the final transcription. Clearing restores the waveform,
+      // but only when still recording — never steal the processing spinner.
+      window.__setPreviewText = function(text) {
+        const t = (text || "").trim();
+        preview.textContent = t;
+        const on = t.length > 0;
+        pill.classList.toggle("previewing", on);
+        if (on) {
+          waveform.style.display = "none";
+        } else if (pill.classList.contains("recording")) {
+          waveform.style.display = "flex";
+        }
+      };
       const spinner = document.getElementById("spinner");
       const bars = waveform.querySelectorAll(".wave-bar");
 

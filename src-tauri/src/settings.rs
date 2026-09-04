@@ -45,6 +45,11 @@ pub struct Settings {
     /// default — opt-in, so it can never surprise or conflict out of the box.
     #[serde(rename = "hotkeyWrite", default)]
     pub hotkey_write: String,
+    /// Live Preview: stream partial transcripts into the recording pill while
+    /// dictating (local engines only). Off by default — noisier overlay, and
+    /// larger Whisper models trail real-time by a few seconds.
+    #[serde(rename = "livePreview", default)]
+    pub live_preview: bool,
     #[serde(rename = "secondaryProfile", default = "default_secondary_profile")]
     pub secondary_profile: String,
     #[serde(rename = "appRules", default)]
@@ -129,6 +134,7 @@ impl Default for Settings {
             autostart: false,
             hotkey_secondary: String::new(),
             hotkey_write: String::new(),
+            live_preview: false,
             secondary_profile: "prompt".to_string(),
             app_rules: Vec::new(),
             auto_context_override: "auto".to_string(),
@@ -436,6 +442,25 @@ mod tests {
         assert!(json.contains("\"hotkeyWrite\":"));
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.hotkey_write, "CmdOrCtrl+Alt+W");
+    }
+
+    #[test]
+    fn test_live_preview_defaults_off() {
+        // Opt-in: fresh and legacy configs must not start ticking engines.
+        assert!(!Settings::default().live_preview);
+        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.live_preview);
+    }
+
+    #[test]
+    fn test_live_preview_roundtrips() {
+        let mut s = Settings::default();
+        s.live_preview = true;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"livePreview\":true"));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.live_preview);
     }
 
     #[test]
