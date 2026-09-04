@@ -68,6 +68,19 @@ fn register_hotkey(
         .map_err(|e| e.to_string())
 }
 
+/// Re-arm every configured hotkey from stored settings. Capture suspends all of
+/// them, so EVERY exit of every set_* command — success, validation error,
+/// collision, OS rejection — must end here (or in resume_hotkeys, which calls
+/// this). Missing one exit strands dead shortcuts until the app restarts.
+/// Returns the primary arm's result; the other two stay best-effort by design.
+fn restore_all_hotkeys(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let primary = state.settings.lock().unwrap().hotkey.clone();
+    let res = register_hotkey(app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+    register_secondary_if_set(app, state);
+    register_write_if_set(app, state);
+    res
+}
+
 /// Best-effort registration of the Write Mode hotkey when one is configured.
 fn register_write_if_set(app: &tauri::AppHandle, state: &AppState) {
     let write = state.settings.lock().unwrap().hotkey_write.clone();
@@ -312,8 +325,12 @@ async fn set_hotkey(
     state: State<'_, AppState>,
     accelerator: String,
 ) -> Result<String, String> {
-    // 1. Validate the shape before touching the OS registration.
-    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+    // 1. Validate the shape before touching the OS registration. Capture already
+    // suspended everything, so even this early exit must restore first.
+    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
+        let _ = restore_all_hotkeys(&app, &state);
+        return Err(e);
+    }
 
     let old = state.settings.lock().unwrap().hotkey.clone();
 
@@ -332,14 +349,14 @@ async fn set_hotkey(
                 *state.settings.lock().unwrap() = settings;
                 println!("[Typr] Hotkey rebound to {}", accelerator);
             }
-            // Capture suspended everything — re-arm the secondary too.
-            register_secondary_if_set(&app, &state);
+            // Capture suspended everything — re-arm the other two as well.
+            let _ = restore_all_hotkeys(&app, &state);
             Ok(accelerator)
         }
         Err(e) => {
-            // 4. Best-effort restore so we never end with no hotkey.
-            let _ = register_hotkey(&app, &old, HotkeySource::Primary, &state.hotkey_tx);
-            register_secondary_if_set(&app, &state);
+            // 4. Best-effort restore so we never end with no hotkey. Settings still
+            // hold `old`, so restoring from settings re-arms exactly that.
+            let _ = restore_all_hotkeys(&app, &state);
             eprintln!("[Typr] Rebind to {} failed ({}); kept {}", accelerator, e, old);
             Err(format!(
                 "`{}` is unavailable — it may be in use by Windows or another app.",
@@ -360,15 +377,10 @@ fn suspend_hotkeys(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Re-register the saved hotkeys after a capture is cancelled without a
-/// successful rebind — both the primary and (if set) the secondary, since
-/// capture suspends all global shortcuts.
+/// successful rebind — all three rows, since capture suspends all shortcuts.
 #[tauri::command]
 fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    let hotkey = state.settings.lock().unwrap().hotkey.clone();
-    let res = register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx);
-    register_secondary_if_set(&app, &state);
-    register_write_if_set(&app, &state);
-    res
+    restore_all_hotkeys(&app, &state)
 }
 
 #[tauri::command]
@@ -377,7 +389,11 @@ async fn set_secondary_hotkey(
     state: State<'_, AppState>,
     accelerator: String,
 ) -> Result<String, String> {
-    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+    // Suspended everything for capture — restore even on this early exit.
+    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
+        let _ = restore_all_hotkeys(&app, &state);
+        return Err(e);
+    }
 
     let (primary, old_secondary) = {
         let s = state.settings.lock().unwrap();
@@ -385,8 +401,7 @@ async fn set_secondary_hotkey(
     };
     if accelerator == primary {
         // Restore whatever was suspended for capture before returning.
-        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-        register_secondary_if_set(&app, &state);
+        let _ = restore_all_hotkeys(&app, &state);
         return Err("That's already your main hotkey — pick a different combo.".to_string());
     }
 
@@ -399,17 +414,14 @@ async fn set_secondary_hotkey(
             settings.hotkey_secondary = accelerator.clone();
             settings.save(&state.app_dir)?;
             *state.settings.lock().unwrap() = settings;
-            // Capture suspended everything — re-arm the primary.
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            // Capture suspended everything — re-arm all three, not just primary.
+            let _ = restore_all_hotkeys(&app, &state);
             println!("[Typr] Secondary hotkey set to {}", accelerator);
             Ok(accelerator)
         }
         Err(e) => {
-            // Restore prior state: old secondary (if any) + primary.
-            if !old_secondary.is_empty() {
-                let _ = register_hotkey(&app, &old_secondary, HotkeySource::Secondary, &state.hotkey_tx);
-            }
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            // Restore prior state from settings (still holding the old combo).
+            let _ = restore_all_hotkeys(&app, &state);
             eprintln!("[Typr] Secondary rebind to {} failed: {}", accelerator, e);
             Err(format!(
                 "`{}` is unavailable — it may be in use by Windows or another app.",
@@ -439,7 +451,11 @@ async fn set_write_hotkey(
     state: State<'_, AppState>,
     accelerator: String,
 ) -> Result<String, String> {
-    typr_lib::hotkey::validate_accelerator(&accelerator)?;
+    // Suspended everything for capture — restore even on this early exit.
+    if let Err(e) = typr_lib::hotkey::validate_accelerator(&accelerator) {
+        let _ = restore_all_hotkeys(&app, &state);
+        return Err(e);
+    }
 
     let (primary, secondary, old_write) = {
         let s = state.settings.lock().unwrap();
@@ -447,9 +463,7 @@ async fn set_write_hotkey(
     };
     if accelerator == primary || (!secondary.is_empty() && accelerator == secondary) {
         // Restore whatever was suspended for capture before returning.
-        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-        register_secondary_if_set(&app, &state);
-        register_write_if_set(&app, &state);
+        let _ = restore_all_hotkeys(&app, &state);
         return Err("That is already in use by another Typr hotkey - pick a different combo.".to_string());
     }
 
@@ -462,19 +476,14 @@ async fn set_write_hotkey(
             settings.hotkey_write = accelerator.clone();
             settings.save(&state.app_dir)?;
             *state.settings.lock().unwrap() = settings;
-            // Capture suspended everything - re-arm the other two.
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-            register_secondary_if_set(&app, &state);
+            // Capture suspended everything - re-arm all three.
+            let _ = restore_all_hotkeys(&app, &state);
             println!("[Typr] Write Mode hotkey set to {}", accelerator);
             Ok(accelerator)
         }
         Err(e) => {
-            // Restore prior state: old write (if any) + secondary + primary.
-            if !old_write.is_empty() {
-                let _ = register_hotkey(&app, &old_write, HotkeySource::WriteMode, &state.hotkey_tx);
-            }
-            register_secondary_if_set(&app, &state);
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
+            // Restore prior state from settings (still holding the old combo).
+            let _ = restore_all_hotkeys(&app, &state);
             eprintln!("[Typr] Write Mode rebind to {} failed: {}", accelerator, e);
             Err(format!(
                 "That combo is unavailable - it may be in use by Windows or another app. ({})",

@@ -920,14 +920,45 @@ function toDisplay(accel: string): string {
   return accel.replace("CmdOrCtrl", "Cmd").replace("Super", "Win").split("+").join(" + ");
 }
 
-/// A capture control bound to one hotkey (primary or secondary). Reuses the
+// Only one hotkey capture may listen at a time. Opening Change on a second row
+// while one is open cancels the first: two live captures would interleave their
+// suspend/commit cycles and scramble registrations badly enough to need a restart.
+let activeCapture: { cancel: () => Promise<void> } | null = null;
+
+/// A pressed modifier key maps to its accelerator token (same vocabulary as
+/// modifiersFromEvent). Used by the tap-latch below.
+function modKeyToToken(key: string): string | null {
+  switch (key) {
+    case "Control":
+      return "CmdOrCtrl";
+    case "Alt":
+      return "Alt";
+    case "Shift":
+      return "Shift";
+    case "Meta":
+    case "OS":
+      return "Super";
+    default:
+      return null;
+  }
+}
+
+/// Union of live and latched modifiers in canonical accelerator order, so the
+/// preview always shows exactly what a commit would send.
+function unionMods(live: string[], latched: string[]): string[] {
+  const order = ["CmdOrCtrl", "Alt", "Shift", "Super"];
+  const set = new Set([...live, ...latched]);
+  return order.filter((m) => set.has(m));
+}
+
+/// A capture control bound to one hotkey (primary, secondary, or write). Reuses the
 /// shared normalization/AltGr/suspend logic; only the DOM elements, the bind
 /// command, and the current-value accessor differ per instance.
 interface HotkeyCaptureConfig {
   display: HTMLElement;
   status: HTMLElement;
   changeBtn: HTMLButtonElement;
-  setCommand: string; // "set_hotkey" | "set_secondary_hotkey"
+  setCommand: string; // "set_hotkey" | "set_secondary_hotkey" | "set_write_hotkey"
   getCurrent: () => string;
   onSet: (accepted: string) => void;
   onCurrentRender?: () => void; // optional override for how the idle value renders
@@ -951,6 +982,19 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
     config.display.textContent = toDisplay(parts.join("+"));
   };
 
+  // Modifiers tapped (not held) stay latched for this capture, so pressing Ctrl,
+  // releasing it, then pressing W still commits CmdOrCtrl+W instead of a bare W.
+  // The latch deliberately survives keyup and clears only on commit/cancel/Esc;
+  // previews always render the union, so the display never promises a combo the
+  // commit would not send.
+  let latched: string[] = [];
+
+  function onKeyup(e: KeyboardEvent): void {
+    if (!capturing) return;
+    // No latch clearing here — see above.
+    e.preventDefault();
+  }
+
   async function onKeydown(e: KeyboardEvent): Promise<void> {
     if (!capturing) return;
     e.preventDefault();
@@ -961,9 +1005,11 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
       return;
     }
 
-    const mods = modifiersFromEvent(e);
+    const live = modifiersFromEvent(e);
     if (MODIFIER_KEYS.has(e.key)) {
-      renderPreview(mods, null);
+      const token = modKeyToToken(e.key);
+      if (token && !latched.includes(token)) latched.push(token);
+      renderPreview(unionMods(live, latched), null);
       setStatus("Listening… now press a key (Esc to cancel).");
       return;
     }
@@ -973,6 +1019,7 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
       setStatus("That key can't be used — try a letter, number, F-key, arrow, or Space.");
       return;
     }
+    const mods = unionMods(live, latched);
     if (mods.length === 0) {
       renderPreview([], key);
       setStatus("Add a modifier — Ctrl, Alt, or Shift — then this key.");
@@ -1013,13 +1060,21 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
 
   function endListening(): void {
     capturing = false;
+    latched = [];
+    if (activeCapture === api) activeCapture = null;
     config.changeBtn.textContent = "Change";
     window.removeEventListener("keydown", onKeydown, true);
+    window.removeEventListener("keyup", onKeyup, true);
   }
 
   async function start(): Promise<void> {
+    // A capture already open on another row is cancelled first (awaited: its
+    // resume must land before our suspend) so the two never interleave.
+    if (activeCapture && activeCapture !== api) await activeCapture.cancel();
+    activeCapture = api;
+    latched = [];
     config.changeBtn.textContent = "Listening…";
-    setStatus("Listening… hold your modifiers and press a key (Esc to cancel).");
+    setStatus("Listening… hold or tap your modifiers, then press a key (Esc to cancel).");
     renderPreview([], null);
     try {
       await invoke("suspend_hotkeys"); // stop the active hotkeys from eating keys
@@ -1028,14 +1083,16 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
     }
     capturing = true;
     window.addEventListener("keydown", onKeydown, true);
+    window.addEventListener("keyup", onKeyup, true);
   }
 
-  return {
+  const api = {
     start: () => void start(),
-    cancel: () => void cancel(),
+    cancel: () => cancel(),
     isCapturing: () => capturing,
     clearStatus,
   };
+  return api;
 }
 
 const primaryCapture = createHotkeyCapture({
@@ -1049,8 +1106,9 @@ const primaryCapture = createHotkeyCapture({
   },
 });
 
-hotkeyChangeBtn.addEventListener("click", () => {
-  if (primaryCapture.isCapturing()) primaryCapture.cancel();
+hotkeyChangeBtn.addEventListener("click", async () => {
+  // Awaited: resume must land before a fresh suspend/commit cycle starts.
+  if (primaryCapture.isCapturing()) await primaryCapture.cancel();
   else primaryCapture.start();
 });
 
@@ -1102,13 +1160,13 @@ const secondaryCapture = createHotkeyCapture({
   onCurrentRender: renderSecondaryHotkey,
 });
 
-hotkey2ChangeBtn.addEventListener("click", () => {
-  if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
+hotkey2ChangeBtn.addEventListener("click", async () => {
+  if (secondaryCapture.isCapturing()) await secondaryCapture.cancel();
   else secondaryCapture.start();
 });
 
 hotkey2ClearBtn.addEventListener("click", async () => {
-  if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
+  if (secondaryCapture.isCapturing()) await secondaryCapture.cancel();
   try {
     await invoke("clear_secondary_hotkey");
     currentSettings.hotkeySecondary = "";
@@ -1144,13 +1202,13 @@ const writeCapture = createHotkeyCapture({
   onCurrentRender: renderWriteHotkey,
 });
 
-hotkey3ChangeBtn.addEventListener("click", () => {
-  if (writeCapture.isCapturing()) writeCapture.cancel();
+hotkey3ChangeBtn.addEventListener("click", async () => {
+  if (writeCapture.isCapturing()) await writeCapture.cancel();
   else writeCapture.start();
 });
 
 hotkey3ClearBtn.addEventListener("click", async () => {
-  if (writeCapture.isCapturing()) writeCapture.cancel();
+  if (writeCapture.isCapturing()) await writeCapture.cancel();
   try {
     await invoke("clear_write_hotkey");
     currentSettings.hotkeyWrite = "";
