@@ -45,6 +45,9 @@ pub struct Recorder {
     // taken when it stops, so it lives and dies with one session and can never leak forward
     // to the next dictation the way a shared slot could.
     session_override: Arc<Mutex<Option<String>>>,
+    // Focused foreground app and window class captured at the moment recording begins.
+    // Preserves the user's active window context even if focus shifts during speech or processing.
+    session_context: Arc<Mutex<Option<(crate::context_detector::ForegroundApp, String)>>>,
 }
 
 impl Recorder {
@@ -53,6 +56,7 @@ impl Recorder {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
+            session_context: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -103,6 +107,10 @@ impl Recorder {
         // Bind the override to this session while we hold the state lock, so it is set
         // exactly once per recording and paired with the matching stop.
         *self.session_override.lock().unwrap() = session_override;
+        // Snapshot the focused window at the moment of hotkey trigger
+        let init_fg = crate::context_detector::ForegroundApp::detect();
+        let init_class = crate::context_detector::focused_child_class();
+        *self.session_context.lock().unwrap() = Some((init_fg, init_class));
         let _ = app.emit("recording-state", RecordingState::Recording);
         update_overlay(app, &RecordingState::Recording, true);
 
@@ -122,6 +130,7 @@ impl Recorder {
                 // never actually recorded can't apply its profile to a later dictation.
                 *state = RecordingState::Ready;
                 *self.session_override.lock().unwrap() = None;
+                *self.session_context.lock().unwrap() = None;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
@@ -141,9 +150,9 @@ impl Recorder {
     ) -> Result<String, String> {
         let transcription_started_at = Instant::now();
 
-        // Stop recording, taking this session's profile override in the same locked step
-        // that transitions out of Recording — so exactly one stop consumes it.
-        let session_override = {
+        // Stop recording, taking this session's profile override and initial context snapshot
+        // in the same locked step that transitions out of Recording — so exactly one stop consumes them.
+        let (session_override, session_context) = {
             let mut state = self.state.lock().unwrap();
             if *state != RecordingState::Recording {
                 return Err("Not currently recording".to_string());
@@ -151,7 +160,10 @@ impl Recorder {
             *state = RecordingState::Transcribing;
             let _ = app.emit("recording-state", RecordingState::Transcribing);
             update_overlay(app, &RecordingState::Transcribing, true);
-            self.session_override.lock().unwrap().take()
+            (
+                self.session_override.lock().unwrap().take(),
+                self.session_context.lock().unwrap().take(),
+            )
         };
 
         // Apply the override (if any) to a local copy of the live settings. The caller passes
@@ -279,8 +291,14 @@ impl Recorder {
             // sentence capitalization/periods is a corrupted command.
             let mut terminal_focus_once = false;
             let base_prompt = if settings.ai_profile == "auto" {
-                let fg = crate::context_detector::ForegroundApp::detect();
-                let focused_class = crate::context_detector::focused_child_class();
+                // Prefer the foreground app captured at recording start (when user triggered dictation)
+                let (fg, focused_class) = match session_context {
+                    Some((f, c)) if !f.process_name.is_empty() => (f, c),
+                    _ => (
+                        crate::context_detector::ForegroundApp::detect(),
+                        crate::context_detector::focused_child_class(),
+                    ),
+                };
                 let category = crate::context_detector::resolve_category(
                     &fg,
                     &settings.app_rules,

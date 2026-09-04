@@ -254,7 +254,7 @@ pub fn resolve_category(
         | "powershell.exe" | "pwsh.exe" | "idea64.exe" | "devenv.exe" | "sublime_text.exe"
         | "alacritty.exe" | "wezterm-gui.exe" | "wt.exe"
         | "pycharm64.exe" | "webstorm64.exe" | "rider64.exe" | "clion64.exe"
-        | "goland64.exe" | "zed.exe" | "windsurf.exe"
+        | "goland64.exe" | "zed.exe" | "windsurf.exe" | "orca.exe"
         | "conemu64.exe" | "hyper.exe" | "tabby.exe" | "mintty.exe"
         | "putty.exe" | "kitty.exe" | "ghostty.exe" => return ContextCategory::Developer,
 
@@ -506,7 +506,7 @@ mod tests {
     fn test_broadened_dev_apps() {
         for proc in [
             "pycharm64.exe", "webstorm64.exe", "rider64.exe",
-            "clion64.exe", "goland64.exe", "zed.exe", "windsurf.exe",
+            "clion64.exe", "goland64.exe", "zed.exe", "windsurf.exe", "orca.exe",
             "conemu64.exe", "hyper.exe", "tabby.exe", "mintty.exe",
             "putty.exe", "kitty.exe", "ghostty.exe",
         ] {
