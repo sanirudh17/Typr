@@ -183,6 +183,24 @@
             </div>
           </div>
           <div class="settings-group">
+            <div class="group-title">Appearance</div>
+            <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Theme</span>
+                <span class="label-hint">System follows your Windows light / dark setting.</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="theme-light" class="toggle-btn">Light</button>
+                  <button id="theme-dark" class="toggle-btn active">Dark</button>
+                  <button id="theme-system" class="toggle-btn">System</button>
+                </div>
+              </div>
+            </div>
+            </div>
+          </div>
+          <div class="settings-group">
             <div class="group-title">Startup</div>
             <div class="settings-list">
             <div class="setting-row">
@@ -406,7 +424,6 @@
                 <div class="setting-control">
                   <select id="ai-model-select">
                     <option value="qwen/qwen3.8-27b">Recommended &middot; Qwen 3.8 27B</option>
-                    <option value="qwen/qwen3.6-27b">Legacy &middot; Qwen 3.6 27B</option>
                     <option value="openai/gpt-oss-20b">Fast &middot; gpt-oss-20b</option>
                     <option value="openai/gpt-oss-120b">Quality &middot; gpt-oss-120b</option>
                   </select>

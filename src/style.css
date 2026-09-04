@@ -2218,3 +2218,141 @@ kbd {
   background: transparent;
   color: inherit;
 }
+
+/* ── Light theme ──────────────────────────────────────── */
+
+/* The whole app reads its colors through the variables above, so the light theme
+   is a variable flip scoped to `html[data-theme="light"]` — dark stays the
+   default and is untouched. Only rules with hardcoded light-on-dark colors
+   (status text, white-alpha glass panels, bright badges) need explicit
+   overrides below. Set from General → Appearance (Light / Dark / System). */
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg:             #eef0f3;
+  --sidebar-bg:     #e4e7ec;
+  --surface:        #ffffff;
+  --surface-hover:  #f1f3f6;
+  --surface-active: #e6e9ee;
+  --text:           #1b1d21;
+  --text-secondary: #5f646d;
+  --text-tertiary:  #a3a8b1;
+  --accent:         #5e6ad2;
+  --accent-hover:   #4f59bd;
+  --accent-subtle:  rgba(94, 106, 210, 0.12);
+  --green:          #1f9d55;
+  --red:            #d13438;
+  --yellow:         #9a6b0f;
+  --border:         rgba(20, 24, 33, 0.09);
+  --border-strong:  rgba(20, 24, 33, 0.16);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Brand gradient is white-on-dark by design — on a light canvas it would vanish,
+   so it renders dark-to-accent instead. */
+html[data-theme="light"] .app-name {
+  background: linear-gradient(135deg, #14161b 40%, #5e6ad2 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Status text: the dark-theme hues are too pale for a light canvas, so each state
+   steps down to a darker sibling. The soft tinted backgrounds already work on
+   both, and the glow shadows are dropped — they read as blur on white. */
+html[data-theme="light"] #status-indicator.ready #status-text {
+  color: #1f9d55;
+  text-shadow: none;
+}
+html[data-theme="light"] #status-indicator.recording #status-text {
+  color: #d13438;
+  text-shadow: none;
+}
+html[data-theme="light"] #status-indicator.transcribing #status-text {
+  color: #9a6b0f;
+  text-shadow: none;
+}
+
+/* White-alpha hover/border tints assume a dark canvas — flip to ink-alpha. */
+html[data-theme="light"] .custom-select-trigger:hover {
+  border-color: rgba(20, 24, 33, 0.28);
+}
+
+/* Legacy style-panel glasswork (currently unused, kept for completeness): the
+   same white-alpha → ink-alpha flip, plus dark text. */
+html[data-theme="light"] .switch-slider {
+  background: rgba(20, 24, 33, 0.12);
+}
+html[data-theme="light"] .switch-slider::before {
+  background: rgba(255, 255, 255, 0.95);
+}
+html[data-theme="light"] .style-detected-app,
+html[data-theme="light"] .style-category-tabs,
+html[data-theme="light"] .style-card,
+html[data-theme="light"] .style-options,
+html[data-theme="light"] .custom-rule-item {
+  background: rgba(20, 24, 33, 0.03);
+  border-color: rgba(20, 24, 33, 0.09);
+}
+html[data-theme="light"] .detected-label {
+  color: rgba(20, 24, 33, 0.5);
+}
+html[data-theme="light"] .detected-value,
+html[data-theme="light"] .style-card-title,
+html[data-theme="light"] .custom-rule-process {
+  color: rgba(20, 24, 33, 0.9);
+}
+html[data-theme="light"] .style-tab {
+  color: rgba(20, 24, 33, 0.55);
+}
+html[data-theme="light"] .style-tab:hover {
+  color: rgba(20, 24, 33, 0.8);
+  background: rgba(20, 24, 33, 0.04);
+}
+html[data-theme="light"] .style-tab.active {
+  background: rgba(20, 24, 33, 0.07);
+  color: #1b1d21;
+  box-shadow: 0 2px 8px rgba(20, 24, 33, 0.12);
+}
+html[data-theme="light"] .style-card:hover {
+  background: rgba(20, 24, 33, 0.05);
+  border-color: rgba(20, 24, 33, 0.16);
+}
+html[data-theme="light"] .style-card-preview {
+  color: rgba(20, 24, 33, 0.5);
+}
+html[data-theme="light"] .style-option-row {
+  border-bottom-color: rgba(20, 24, 33, 0.07);
+}
+html[data-theme="light"] .style-option-label {
+  color: rgba(20, 24, 33, 0.75);
+}
+html[data-theme="light"] .custom-rule-add-row select {
+  background: rgba(20, 24, 33, 0.04);
+  border-color: rgba(20, 24, 33, 0.14);
+  color: rgba(20, 24, 33, 0.9);
+}
+html[data-theme="light"] .custom-rule-item:hover {
+  background: rgba(20, 24, 33, 0.05);
+}
+html[data-theme="light"] .custom-rule-arrow,
+html[data-theme="light"] .custom-rule-delete {
+  color: rgba(20, 24, 33, 0.35);
+}
+
+/* Bright informational badges/data text need darkening to hold contrast on white. */
+html[data-theme="light"] .detected-category-badge,
+html[data-theme="light"] .custom-rule-category {
+  color: #0b6bcb;
+  border-color: rgba(11, 107, 203, 0.3);
+  background: linear-gradient(135deg, rgba(0, 150, 220, 0.1), rgba(11, 107, 203, 0.1));
+}
+
+/* Shadows tuned for dark glass are heavy on white — soften the floating panels. */
+html[data-theme="light"] .custom-select-panel,
+html[data-theme="light"] .app-picker-panel,
+html[data-theme="light"] .undo-toast {
+  box-shadow: 0 8px 24px rgba(20, 24, 33, 0.14), 0 2px 8px rgba(20, 24, 33, 0.08);
+}

@@ -62,7 +62,7 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 - Fixes spelling, casing, punctuation, filler words, and mis-hearings that only context can resolve.
 - **Profiles** — *Cleanup* tidies what you said, *Prompt Mode* rewrites a spoken ramble into a structured prompt, and *Auto* matches the style to the app in front of you.
 - **Auto context detection** picks Messaging, Email, Professional, Developer, or General from the focused application, with custom rules for anything it does not recognise.
-- **Model choice** — Qwen 3.6 27B by default, or either GPT-OSS model. If one fails, another takes over; if all of them do, deterministic cleanup still runs, so a dictation is never lost.
+- **Model choice** — Qwen 3.8 27B by default, or either GPT-OSS model. If one fails, another takes over; if all of them do, deterministic cleanup still runs, so a dictation is never lost.
 - **Tone and formatting controls**, plus custom instructions applied to every pass.
 
 **Voice commands** — spoken mid-sentence, applied offline, and independent of whether AI cleanup is on
@@ -148,7 +148,7 @@ All three run on Groq. Measured end-to-end in-app, on one machine and network �
 
 | Model | Typical latency | Notes |
 |---|---|---|
-| **Qwen 3.6 27B** *(default)* | ~150–450 ms | Fastest, and strongest on email layout and structured prompts |
+| **Qwen 3.8 27B** *(default)* | ~150–450 ms | Fastest, and strongest on email layout and structured prompts |
 | GPT-OSS 20B | ~700 ms – 1.5 s | Reasons before answering |
 | GPT-OSS 120B | ~700 ms – 1.3 s | Largest |
 
@@ -395,7 +395,7 @@ npx tsc --noEmit             # frontend typecheck
 | Local inference | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp) with CUDA, run as a sidecar |
 | Local Parakeet | [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/) (statically linked), NVIDIA Parakeet TDT 0.6B |
 | Cloud transcription | Groq (`whisper-large-v3`, `whisper-large-v3-turbo`) |
-| AI cleanup | Groq chat completions (Qwen 3.6, GPT-OSS) |
+| AI cleanup | Groq chat completions (Qwen 3.8, GPT-OSS) |
 | System integration | Win32 APIs for foreground-window detection, global hotkeys, keystroke injection |
 
 ---

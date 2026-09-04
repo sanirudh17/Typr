@@ -70,6 +70,14 @@
         border-radius: 50%;
         animation: spin 0.7s linear infinite;
       }
+      /* Light theme (set from General → Appearance in the main window): the
+         dark glass pill would glare on a bright desktop, so it renders as a
+         bright pill with the same accent waveform. */
+      html[data-theme="light"] .pill {
+        background: rgba(255, 255, 255, 0.92);
+        border-color: rgba(94, 106, 210, 0.35);
+        box-shadow: 0 8px 32px rgba(20, 24, 33, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
       @keyframes spin {
         to { transform: rotate(360deg); }
       }
@@ -99,6 +107,26 @@
     </div>
     <script type="module">
       import { invoke } from "@tauri-apps/api/core";
+      import { listen } from "@tauri-apps/api/event";
+
+      function resolveTheme(t) {
+        if (t === "light") return "light";
+        if (t === "system") {
+          return matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        return "dark";
+      }
+      async function applyTheme(theme) {
+        try {
+          const t = theme || (await invoke("get_settings")).theme || "dark";
+          document.documentElement.dataset.theme = resolveTheme(t);
+        } catch (e) {
+          console.error("theme error:", e);
+        }
+      }
+      listen("theme-changed", (e) => applyTheme(e.payload && e.payload.theme));
+      matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => applyTheme());
+      applyTheme();
 
       const pill = document.getElementById("pill");
       const waveform = document.getElementById("waveform");

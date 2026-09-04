@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
 import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
@@ -24,6 +24,7 @@ interface Settings {
   aiCustomInstructions: string;
   backgroundMode: boolean;
   autostart: boolean;
+  theme: string;
   hotkeySecondary: string;
   secondaryProfile: string;
   autoContextOverride: string;
@@ -112,6 +113,9 @@ const bgOff = document.getElementById("bg-off")!;
 const bgOn = document.getElementById("bg-on")!;
 const autostartOff = document.getElementById("autostart-off")!;
 const autostartOn = document.getElementById("autostart-on")!;
+const themeLight = document.getElementById("theme-light")!;
+const themeDark = document.getElementById("theme-dark")!;
+const themeSystem = document.getElementById("theme-system")!;
 const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
 const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
@@ -380,6 +384,9 @@ async function loadSettings() {
   setBackgroundMode(currentSettings.backgroundMode);
   setAutostart(currentSettings.autostart);
 
+  // Appearance — a stale/blank value falls back to dark inside setTheme.
+  setTheme(currentSettings.theme || THEME_DEFAULT);
+
   // AI post-processing
   setAiEnabled(currentSettings.aiEnabled);
   setAiModel(currentSettings.aiModel || AI_MODEL_DEFAULT);
@@ -509,6 +516,41 @@ function updateAiKeyWarning() {
   aiKeyMissingNote.classList.toggle("hidden", !missing);
 }
 
+// Appearance — dark is the default so configs written before the theme setting
+// keep looking exactly as they always have. System resolves through the OS
+// preference and re-resolves live when Windows switches under a running app.
+type Theme = "light" | "dark" | "system";
+const THEME_DEFAULT: Theme = "dark";
+
+function resolveTheme(t: Theme): "light" | "dark" {
+  if (t === "light") return "light";
+  if (t === "system") {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  return "dark";
+}
+
+function setTheme(theme: string) {
+  const t: Theme = theme === "light" || theme === "system" ? theme : "dark";
+  currentSettings.theme = t;
+  document.documentElement.dataset.theme = resolveTheme(t);
+  themeLight.classList.toggle("active", t === "light");
+  themeDark.classList.toggle("active", t === "dark");
+  themeSystem.classList.toggle("active", t === "system");
+  // The recording overlay is a separate window with its own document, so it
+  // cannot see this attribute — push the choice to it instead. A failure here
+  // must never break a settings change, hence the swallowed rejection.
+  emit("theme-changed", { theme: t }).catch(() => {});
+}
+
+// Follow the OS while "system" is selected. Registered once — the guard keeps
+// an OS switch from touching an explicit light/dark choice.
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", (e) => {
+  if ((currentSettings?.theme || THEME_DEFAULT) === "system") {
+    document.documentElement.dataset.theme = e.matches ? "light" : "dark";
+  }
+});
+
 function setBackgroundMode(enabled: boolean) {
   currentSettings.backgroundMode = enabled;
   bgOff.classList.toggle("active", !enabled);
@@ -524,8 +566,9 @@ function setAutostart(enabled: boolean) {
 }
 
 // Mirrors resolve_model() in ai_postprocess.rs — keep the two allowlists in step, or the
-// dropdown silently coerces a valid choice back to the default.
-const AI_MODELS = ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+// dropdown silently coerces a valid choice back to the default. A stored qwen3.6 id (from
+// before its deprecation) is not on the list, so it migrates to the default on next load.
+const AI_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
 const AI_MODEL_DEFAULT = "qwen/qwen3.8-27b";
 
 function setAiModel(model: string) {
@@ -721,6 +764,19 @@ autostartOff.addEventListener("click", () => {
 });
 autostartOn.addEventListener("click", () => {
   setAutostart(true);
+  saveSettings();
+});
+
+themeLight.addEventListener("click", () => {
+  setTheme("light");
+  saveSettings();
+});
+themeDark.addEventListener("click", () => {
+  setTheme("dark");
+  saveSettings();
+});
+themeSystem.addEventListener("click", () => {
+  setTheme("system");
   saveSettings();
 });
 

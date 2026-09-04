@@ -33,6 +33,8 @@ pub struct Settings {
     pub ai_format: String,
     #[serde(rename = "aiCustomInstructions", default)]
     pub ai_custom_instructions: String,
+    #[serde(rename = "theme", default = "default_theme")]
+    pub theme: String,
     #[serde(rename = "backgroundMode", default)]
     pub background_mode: bool,
     #[serde(rename = "autostart", default)]
@@ -67,6 +69,12 @@ fn default_cloud_model() -> String {
 
 fn default_ai_model() -> String {
     "qwen/qwen3.8-27b".to_string()
+}
+
+/// Dark stays the default so configs written before the Appearance setting keep
+/// looking exactly as they always have; light and system are opt-in.
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 fn default_ai_profile() -> String {
@@ -111,6 +119,7 @@ impl Default for Settings {
             ai_tone: "default".to_string(),
             ai_format: "default".to_string(),
             ai_custom_instructions: String::new(),
+            theme: "dark".to_string(),
             background_mode: false,
             autostart: false,
             hotkey_secondary: String::new(),
@@ -458,6 +467,32 @@ mod tests {
         assert_eq!(loaded.app_rules[0].process_name, "obsidian.exe");
         assert_eq!(loaded.app_rules[0].category, ContextCategory::Professional);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_theme_is_dark() {
+        // Dark stays the default so pre-Appearance configs look unchanged.
+        assert_eq!(Settings::default().theme, "dark");
+    }
+
+    #[test]
+    fn test_legacy_config_without_theme_defaults_dark() {
+        // A config.json written before the Appearance setting must still load.
+        let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.theme, "dark");
+    }
+
+    #[test]
+    fn test_theme_roundtrips() {
+        for theme in ["light", "dark", "system"] {
+            let mut s = Settings::default();
+            s.theme = theme.to_string();
+            let json = serde_json::to_string(&s).unwrap();
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.theme, theme);
+            assert!(json.contains("\"theme\":"));
+        }
     }
 
     #[test]
