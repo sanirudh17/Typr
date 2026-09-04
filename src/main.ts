@@ -27,7 +27,6 @@ interface Settings {
   theme: string;
   hotkeySecondary: string;
   hotkeyWrite: string;
-  livePreview: boolean;
   secondaryProfile: string;
   autoContextOverride: string;
   appRules: AppRule[];
@@ -165,8 +164,6 @@ const hotkey3Display = document.getElementById("hotkey3-display") as HTMLElement
 const hotkey3ChangeBtn = document.getElementById("hotkey3-change-btn") as HTMLButtonElement;
 const hotkey3ClearBtn = document.getElementById("hotkey3-clear-btn") as HTMLButtonElement;
 const hotkey3Status = document.getElementById("hotkey3-status") as HTMLElement;
-const livePreviewOff = document.getElementById("live-preview-off")!;
-const livePreviewOn = document.getElementById("live-preview-on")!;
 const secondaryProfileCleanup = document.getElementById("secondary-profile-cleanup") as HTMLButtonElement;
 const secondaryProfilePrompt = document.getElementById("secondary-profile-prompt") as HTMLButtonElement;
 const secondaryProfileAuto = document.getElementById("secondary-profile-auto") as HTMLButtonElement;
@@ -383,8 +380,7 @@ async function loadSettings() {
   // Recording mode
   setRecordingMode(currentSettings.recordingMode);
 
-  // Live Preview — older configs have no key, which reads as off.
-  setLivePreview(!!currentSettings.livePreview);
+
 
   // Hotkey
   hotkeyDisplay.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
@@ -634,15 +630,6 @@ function applyPreset(tone: string, format: string) {
   setAiTone(tone);
   setAiFormat(format);
   saveSettings();
-}
-
-// Live Preview: partial transcripts in the recording pill while dictating
-// (local engines only). Display-only — the stop path still runs the full
-// transcription, so a trailing preview can never corrupt the paste.
-function setLivePreview(enabled: boolean) {
-  currentSettings.livePreview = enabled;
-  livePreviewOff.classList.toggle("active", !enabled);
-  livePreviewOn.classList.toggle("active", enabled);
 }
 
 function setRecordingMode(mode: string) {
@@ -1160,15 +1147,6 @@ const writeCapture = createHotkeyCapture({
 hotkey3ChangeBtn.addEventListener("click", () => {
   if (writeCapture.isCapturing()) writeCapture.cancel();
   else writeCapture.start();
-});
-
-livePreviewOff.addEventListener("click", () => {
-  setLivePreview(false);
-  saveSettings();
-});
-livePreviewOn.addEventListener("click", () => {
-  setLivePreview(true);
-  saveSettings();
 });
 
 hotkey3ClearBtn.addEventListener("click", async () => {

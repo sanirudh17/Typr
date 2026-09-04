@@ -28,22 +28,24 @@ pub struct WriteModeResult {
 
 /// Read the user's current selection via the clipboard dance.
 ///
-/// Stashes the current clipboard text, sends Ctrl+C to the focused app, reads back
-/// the selection, then restores the stash. A non-text clipboard cannot be stashed
-/// through arboard's text API — in that case the selection is left on the clipboard
-/// (exactly where a manual Ctrl+C would have put it) and the rewrite still proceeds.
+/// Stashes the current clipboard text, CLEARS the clipboard, sends Ctrl+C to the
+/// focused app, then polls until non-empty text appears (or ~1.2s passes), and
+/// finally restores the stash. Clearing first is what makes this deterministic:
+/// a fixed sleep races slow apps and returns stale clipboard content as if it
+/// were the selection — polling for the post-clear arrival cannot misread.
+/// A non-text clipboard cannot be stashed through arboard's text API — in that
+/// case the selection is left on the clipboard (exactly where a manual Ctrl+C
+/// would have put it) and the rewrite still proceeds.
 pub fn capture_selection() -> Result<String, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     // Best-effort stash: a non-text clipboard (image, files) simply has no stash.
     let stash = clipboard.get_text().ok();
+    // Best-effort clear: even if it fails, the poll below still distinguishes a
+    // fresh copy from the stash by value.
+    let _ = clipboard.clear();
 
     send_copy()?;
-    // Give the focused app a beat to populate the clipboard, mirroring the
-    // propagation delay in paste_text.
-    std::thread::sleep(Duration::from_millis(200));
-    let selected = clipboard.get_text().map_err(|_| {
-        "No text selected — select some text first, then press the Write Mode hotkey.".to_string()
-    })?;
+    let selected = poll_clipboard_text(&mut clipboard, stash.as_deref())?;
 
     // Restore what was there before we borrowed the clipboard.
     if let Some(text) = stash {
@@ -57,6 +59,30 @@ pub fn capture_selection() -> Result<String, String> {
         );
     }
     Ok(selected)
+}
+
+/// Wait for the focused app to answer our Ctrl+C: any non-empty clipboard content
+/// that differs from the pre-copy stash is the fresh selection. Times out with a
+/// guidance error instead of returning stale text.
+fn poll_clipboard_text(
+    clipboard: &mut arboard::Clipboard,
+    stash: Option<&str>,
+) -> Result<String, String> {
+    for _ in 0..24 {
+        if let Ok(text) = clipboard.get_text() {
+            if !text.is_empty() && Some(text.as_str()) != stash {
+                return Ok(text);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // One last read: the app may have answered between the final poll and now.
+    if let Ok(text) = clipboard.get_text() {
+        if !text.is_empty() && Some(text.as_str()) != stash {
+            return Ok(text);
+        }
+    }
+    Err("Could not grab the selection — select some text first, then press the Write Mode hotkey.".to_string())
 }
 
 /// Send Ctrl+C to the focused app. Windows-only for now, matching paste_text —

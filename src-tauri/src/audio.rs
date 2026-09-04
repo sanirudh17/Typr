@@ -390,26 +390,6 @@ impl AudioRecorder {
         Ok(info)
     }
 
-    /// Clone the samples captured so far as 16 kHz mono, without disturbing the
-    /// recording. Powers Live Preview ticks: the caller writes these to a temp
-    /// wav and transcribes them off the record path.
-    pub fn snapshot_preview(&self) -> Option<(Vec<f32>, f32)> {
-        let samples = self.samples.lock().unwrap();
-        let duration_secs =
-            samples.len() as f32 / self.source_channels as f32 / self.source_sample_rate as f32;
-        // Shorter than this the engines return fragments or nothing — skip the tick.
-        if duration_secs < 1.5 {
-            return None;
-        }
-        let total_energy: f32 = samples.iter().map(|&x| x * x).sum();
-        let rms = (total_energy / samples.len() as f32).sqrt();
-        if rms < 0.003 {
-            return None;
-        }
-        let mono = to_16k_mono(&samples, self.source_channels, self.source_sample_rate);
-        Some((mono, duration_secs))
-    }
-
     pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {
         // Pause the stream (mic off between records); the device stays activated so the
         // next start() is a fast play with no dropped audio.
@@ -436,10 +416,32 @@ impl AudioRecorder {
 
         println!("[Typr] Captured {} raw samples", samples.len());
 
-        let resampled = to_16k_mono(&samples, self.source_channels, self.source_sample_rate);
+        let mono: Vec<f32> = if self.source_channels > 1 {
+            samples
+                .chunks(self.source_channels as usize)
+                .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+                .collect()
+        } else {
+            samples.clone()
+        };
+
+        let mut resampled = resample(&mono, self.source_sample_rate, 16000);
+        normalize_peak(&mut resampled, NORM_TARGET_PEAK, NORM_MAX_GAIN);
         println!("[Typr] Resampled to {} samples at 16kHz", resampled.len());
 
-        write_wav_16k_mono(output_path, &resampled)?;
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let mut writer = WavWriter::create(output_path, spec).map_err(|e| e.to_string())?;
+        for &sample in resampled.iter() {
+            let amplitude = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            writer.write_sample(amplitude).map_err(|e| e.to_string())?;
+        }
+        writer.finalize().map_err(|e| e.to_string())?;
 
         drop(samples);
         self.samples.lock().unwrap().clear();
@@ -447,39 +449,6 @@ impl AudioRecorder {
         println!("[Typr] WAV saved to {:?}", output_path);
         Ok((output_path.clone(), duration_secs))
     }
-}
-
-/// Raw session PCM -> normalized 16 kHz mono, the format every engine consumes.
-/// Shared by the final save and Live Preview snapshots so ticks transcribe
-/// exactly what the final pass will hear.
-fn to_16k_mono(raw: &[f32], channels: u16, sample_rate: u32) -> Vec<f32> {
-    let mono: Vec<f32> = if channels > 1 {
-        raw.chunks(channels as usize)
-            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-            .collect()
-    } else {
-        raw.to_vec()
-    };
-    let mut resampled = resample(&mono, sample_rate, 16000);
-    normalize_peak(&mut resampled, NORM_TARGET_PEAK, NORM_MAX_GAIN);
-    resampled
-}
-
-/// Write 16 kHz mono float samples as 16-bit PCM wav. Crate-visible for preview ticks.
-pub(crate) fn write_wav_16k_mono(output_path: &PathBuf, samples: &[f32]) -> Result<(), String> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: 16000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = WavWriter::create(output_path, spec).map_err(|e| e.to_string())?;
-    for &sample in samples.iter() {
-        let amplitude = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        writer.write_sample(amplitude).map_err(|e| e.to_string())?;
-    }
-    writer.finalize().map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 const NORM_TARGET_PEAK: f32 = 0.95;
@@ -591,62 +560,6 @@ fn lowpass(samples: &[f32], fc: f64, taps: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_to_16k_mono_downmixes_and_resamples() {
-        // Stereo 48 kHz sine -> mono 16 kHz: length scales by channels and rate,
-        // and the shared helper (final save + preview snapshots) agrees with itself.
-        let input: Vec<f32> = (0..48000 * 2 * 2).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
-        let out = to_16k_mono(&input, 2, 48000);
-        assert_eq!(out.len(), 16000 * 2);
-        // Mono passthrough of the same content matches the downmix.
-        let mono_in: Vec<f32> = (0..48000 * 2).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
-        let mono_out = to_16k_mono(&mono_in, 1, 48000);
-        assert_eq!(mono_out.len(), 16000 * 2);
-    }
-
-    /// A preview tick must be near-free next to the transcription it triggers:
-    /// snapshot + 16 kHz downmix + wav write for a full minute of audio has to
-    /// stay far under the 2s tick interval even in unoptimized debug builds
-    /// (release is ~30x faster still). Otherwise ticks would steal CPU from the
-    /// very engines they feed.
-    #[test]
-    fn test_preview_snapshot_is_cheap() {
-        let mut rec = AudioRecorder::new();
-        rec.source_sample_rate = 48000;
-        rec.source_channels = 1;
-        *rec.samples.lock().unwrap() =
-            (0..48000 * 60).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
-        let start = std::time::Instant::now();
-        let (mono, duration) = rec.snapshot_preview().expect("minute of tone snapshots");
-        assert!((duration - 60.0).abs() < 0.01);
-        let dir = std::env::temp_dir().join("typr_test_preview_tick");
-        let _ = std::fs::create_dir_all(&dir);
-        write_wav_16k_mono(&dir.join("tick.wav"), &mono).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(start.elapsed().as_millis() < 1500, "tick prep took {:?}", start.elapsed());
-    }
-
-    /// Silence must never reach an engine: quiet stretches cost nothing but the
-    /// sleep between ticks — no CPU transcription, no cloud API call.
-    #[test]
-    fn test_preview_snapshot_skips_silence() {
-        let mut rec = AudioRecorder::new();
-        rec.source_sample_rate = 48000;
-        rec.source_channels = 1;
-        *rec.samples.lock().unwrap() = vec![0.0001; 48000 * 10];
-        assert!(rec.snapshot_preview().is_none());
-    }
-
-    /// Fragments shorter than a breath would only transcribe as junk — skip them.
-    #[test]
-    fn test_preview_snapshot_skips_short_audio() {
-        let mut rec = AudioRecorder::new();
-        rec.source_sample_rate = 48000;
-        rec.source_channels = 1;
-        *rec.samples.lock().unwrap() = vec![0.5; 48000 * 1];
-        assert!(rec.snapshot_preview().is_none());
-    }
 
     #[test]
     fn test_smooth_band() {

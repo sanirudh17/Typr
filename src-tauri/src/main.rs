@@ -788,32 +788,6 @@ fn prewarm_local(app: &tauri::AppHandle) {
     });
 }
 
-/// Fire-and-forget Live Preview ticks for this recording. Gated on the setting;
-/// the loop itself exits immediately for cloud (no per-tick API cost), so only
-/// local engines ever tick. Model locations are snapshotted now so a mid-recording
-/// settings change cannot retarget the running loop.
-fn maybe_spawn_preview(app: &tauri::AppHandle, state: &AppState) {
-    let settings = state.settings.lock().unwrap().clone();
-    if !settings.live_preview {
-        return;
-    }
-    let bias_prompt = state.dictionary.lock().unwrap().get_bias_prompt();
-    let cfg = typr_lib::recorder::PreviewConfig {
-        engine: settings.engine.clone(),
-        app_dir: state.app_dir.clone(),
-        groq_api_key: settings.groq_api_key.clone(),
-        cloud_model: settings.cloud_model.clone(),
-        bias_prompt,
-        whisper_model_path: state
-            .app_dir
-            .join(transcribe_local::model_filename(&settings.whisper_model)),
-        parakeet_model_dir: state.app_dir.join(
-            typr_lib::transcribe_parakeet::model_dir_name(&settings.parakeet_model),
-        ),
-    };
-    typr_lib::recorder::spawn_preview_loop(app.clone(), state.recorder.clone(), cfg);
-}
-
 async fn do_toggle_recording(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -826,7 +800,6 @@ async fn do_toggle_recording(
             prewarm_local(app);
             let mic = state.settings.lock().unwrap().microphone.clone();
             state.recorder.start_recording(app, &mic, session_override)?;
-            maybe_spawn_preview(app, state);
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
@@ -1037,22 +1010,16 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Create the overlay window (floating pill, bottom center, always on top).
-            // Sized at full Live Preview width (480) from the start and centered once:
-            // the window is transparent and click-through, so the invisible margin
-            // costs nothing — and because nothing ever moves or resizes it at
-            // runtime, it cannot drift off-center (the old widen/restore dance
-            // stranded it 90px left on every preview cycle). The pill itself stays
-            // content-sized and centered by the overlay page's flex layout.
+            // Create the overlay window (floating pill, bottom center, always on top)
             let monitor = app.primary_monitor().ok().flatten();
             let (x, y) = if let Some(m) = monitor {
                 let size = m.size();
                 let scale = m.scale_factor();
                 let logical_w = size.width as f64 / scale;
                 let logical_h = size.height as f64 / scale;
-                ((logical_w - 480.0) as i32 / 2, (logical_h - 160.0) as i32)
+                ((logical_w - 300.0) as i32 / 2, (logical_h - 160.0) as i32)
             } else {
-                (720, 950)
+                (810, 950)
             };
 
             let overlay = WebviewWindowBuilder::new(
@@ -1061,7 +1028,7 @@ fn main() {
                 WebviewUrl::App("src/overlay.html".into()),
             )
             .title("")
-            .inner_size(480.0, 120.0)
+            .inner_size(300.0, 120.0)
             .position(x as f64, y as f64)
             .resizable(false)
             .decorations(false)
@@ -1211,7 +1178,6 @@ fn main() {
                                         match state.recorder.start_recording(&rx_handle, &mic, session_override) {
                                             Ok(_) => {
                                                 println!("[Typr] Recording started");
-                                                maybe_spawn_preview(&rx_handle, state.inner());
                                             }
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),
                                         }

@@ -438,18 +438,6 @@ impl Recorder {
         update_overlay(app, &state, show);
     }
 
-    /// Snapshot the in-progress audio to a temp wav for one Live Preview tick.
-    /// None when there is nothing worth transcribing yet (too short / silent).
-    pub fn write_preview_tick(&self, app_dir: &PathBuf) -> Option<PathBuf> {
-        let recorder = self.audio_recorder.lock().unwrap();
-        let (mono16k, _) = recorder.snapshot_preview()?;
-        drop(recorder);
-        let path = app_dir.join("preview_tick.wav");
-        if crate::audio::write_wav_16k_mono(&path, &mono16k).is_err() {
-            return None;
-        }
-        Some(path)
-    }
 
     /// Reset the recorder to Ready and clear the processing overlay. Called once the
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
@@ -460,88 +448,6 @@ impl Recorder {
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
     }
-}
-
-/// What a Live Preview loop needs: the engine pick and the already-resolved model
-/// locations, snapshotted at record-start so a mid-dictation settings change cannot
-/// retarget a running loop.
-#[derive(Clone)]
-pub struct PreviewConfig {
-    pub engine: String,
-    pub app_dir: PathBuf,
-    pub whisper_model_path: PathBuf,
-    pub parakeet_model_dir: PathBuf,
-    pub groq_api_key: String,
-    pub cloud_model: String,
-    /// Dictionary bias prompt, captured at record-start. Cloud is the only tick
-    /// path whose API accepts one — local Whisper ignores it, Parakeet has no
-    /// prompt window — but passing it keeps cloud partials as accurate as the
-    /// final pass on proper nouns and vocabulary hints.
-    pub bias_prompt: String,
-}
-
-/// Interval between preview ticks. Local small models answer in well under this for
-/// a few seconds of audio; slower models simply trail — ticks serialize, so a slow
-/// engine delays the next tick instead of piling transcriptions on top of each other.
-const PREVIEW_TICK: Duration = Duration::from_millis(2000);
-
-/// Push one line of preview text into the overlay pill. Empty clears it.
-fn push_preview_text(app: &AppHandle, text: &str) {
-    if let Some(overlay) = app.get_webview_window("overlay") {
-        // JSON-encoding the text is the escaping: dictation can contain quotes,
-        // backslashes, and newlines, none of which may break out of the eval.
-        let arg = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
-        let js = format!("if (window.__setPreviewText) window.__setPreviewText({});", arg);
-        let _ = overlay.eval(&js);
-    }
-}
-
-/// Run Live Preview ticks until the recording stops. Display-only: partials never
-/// touch history or paste — the stop path still runs the full transcription.
-/// Every tick re-transcribes from the start of the recording, so each partial
-/// supersedes the last with more context: early guesses self-correct as more
-/// audio arrives, which is what keeps the preview as accurate as the engine allows.
-/// Cloud ticks cost one API call per tick on the user's own key — acceptable because
-/// the whole loop is opt-in behind the Live Preview toggle, and Groq answers short
-/// clips fast enough to feel instant.
-pub fn spawn_preview_loop(app: AppHandle, recorder: Recorder, cfg: PreviewConfig) {
-    if cfg.engine != "local" && cfg.engine != "parakeet" && cfg.engine != "cloud" {
-        return;
-    }
-    if cfg.engine == "cloud" && cfg.groq_api_key.trim().is_empty() {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(PREVIEW_TICK).await;
-            if recorder.get_state() != RecordingState::Recording {
-                break;
-            }
-            let Some(tick_path) = recorder.write_preview_tick(&cfg.app_dir) else {
-                continue;
-            };
-            // Ticks serialize: awaiting here means a slow engine delays the next
-            // tick instead of overlapping transcriptions.
-            let text = if cfg.engine == "local" {
-                crate::transcribe_local::transcribe_local(&app, &cfg.whisper_model_path, &tick_path, "").await
-            } else if cfg.engine == "parakeet" {
-                crate::transcribe_parakeet::transcribe_parakeet(&cfg.parakeet_model_dir, &tick_path).await
-            } else {
-                crate::transcribe_groq::transcribe_groq(&cfg.groq_api_key, &tick_path, &cfg.bias_prompt, &cfg.cloud_model).await
-            };
-            let _ = std::fs::remove_file(&tick_path);
-            match text {
-                Ok(t) => {
-                    let t = crate::transcribe_local::normalize_transcript(&t);
-                    if !t.trim().is_empty() {
-                        push_preview_text(&app, &t);
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-        push_preview_text(&app, "");
-    });
 }
 
 /// True when the foreground surface is a terminal inside the Developer context: the Auto
