@@ -534,6 +534,11 @@ function resolveTheme(t: Theme): "light" | "dark" {
 function setTheme(theme: string) {
   const t: Theme = theme === "light" || theme === "system" ? theme : "dark";
   currentSettings.theme = t;
+  // Cache for the pre-paint head script so the next launch paints correctly
+  // before settings load. Storage failures must never break a theme change.
+  try {
+    localStorage.setItem("typr-theme", t);
+  } catch {}
   document.documentElement.dataset.theme = resolveTheme(t);
   themeLight.classList.toggle("active", t === "light");
   themeDark.classList.toggle("active", t === "dark");

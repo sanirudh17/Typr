@@ -2387,3 +2387,17 @@ kbd {
   flex-basis: 100%;
   margin-right: 0;
 }
+
+/* ── Group rhythm: text never crowds rules ────────────── */
+/* The separator above a group and the row borders inside it sit close to small
+   text by default; these minimums keep every text-to-line junction airy at any
+   width, including wrapped controls under their labels. */
+.group-title {
+  margin-bottom: 18px;
+}
+.setting-row {
+  gap: 16px 32px;
+}
+.settings-note {
+  margin: 2px 0 6px;
+}

@@ -2,6 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Paint the saved theme before first paint. The authoritative value lives
+      // in settings and only resolves seconds later in loadSettings(), which
+      // used to flash dark on light launches — this cached copy (rewritten on
+      // every change) resolves the same way so first paint is already correct.
+      try {
+        var t = localStorage.getItem("typr-theme") || "system";
+        var light = t === "light" || (t !== "dark" && matchMedia("(prefers-color-scheme: light)").matches);
+        document.documentElement.dataset.theme = light ? "light" : "dark";
+      } catch (e) {}
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Typr</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
