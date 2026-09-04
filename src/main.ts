@@ -384,7 +384,7 @@ async function loadSettings() {
   setBackgroundMode(currentSettings.backgroundMode);
   setAutostart(currentSettings.autostart);
 
-  // Appearance — a stale/blank value falls back to dark inside setTheme.
+  // Appearance — a stale/blank value falls back to the default inside setTheme.
   setTheme(currentSettings.theme || THEME_DEFAULT);
 
   // AI post-processing
@@ -516,11 +516,12 @@ function updateAiKeyWarning() {
   aiKeyMissingNote.classList.toggle("hidden", !missing);
 }
 
-// Appearance — dark is the default so configs written before the theme setting
-// keep looking exactly as they always have. System resolves through the OS
-// preference and re-resolves live when Windows switches under a running app.
+// Appearance — the default is System (platform convention: Apple HIG, Material,
+// Windows guidance all say follow the OS, never force one side). On stock
+// Windows 11 that resolves to light. Explicit light/dark always win, and the
+// OS is re-resolved live when Windows switches under a running app.
 type Theme = "light" | "dark" | "system";
-const THEME_DEFAULT: Theme = "dark";
+const THEME_DEFAULT: Theme = "system";
 
 function resolveTheme(t: Theme): "light" | "dark" {
   if (t === "light") return "light";

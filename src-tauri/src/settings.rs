@@ -71,10 +71,11 @@ fn default_ai_model() -> String {
     "qwen/qwen3.8-27b".to_string()
 }
 
-/// Dark stays the default so configs written before the Appearance setting keep
-/// looking exactly as they always have; light and system are opt-in.
+/// New and legacy configs alike follow the OS until the user picks otherwise.
+/// On a stock Windows 11 install that resolves to light, matching what other
+/// apps show; forcing light instead would fight dark-mode OS users.
 fn default_theme() -> String {
-    "dark".to_string()
+    "system".to_string()
 }
 
 fn default_ai_profile() -> String {
@@ -119,7 +120,7 @@ impl Default for Settings {
             ai_tone: "default".to_string(),
             ai_format: "default".to_string(),
             ai_custom_instructions: String::new(),
-            theme: "dark".to_string(),
+            theme: "system".to_string(),
             background_mode: false,
             autostart: false,
             hotkey_secondary: String::new(),
@@ -470,9 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn test_default_theme_is_dark() {
-        // Dark stays the default so pre-Appearance configs look unchanged.
-        assert_eq!(Settings::default().theme, "dark");
+    fn test_default_theme_follows_system() {
+        // Follow-the-OS is the default, per platform convention (Apple HIG,
+        // Material, Windows guidance) — never a forced light or dark.
+        assert_eq!(Settings::default().theme, "system");
     }
 
     #[test]
@@ -480,7 +482,7 @@ mod tests {
         // A config.json written before the Appearance setting must still load.
         let json = r#"{"microphone":"default","engine":"cloud","whisperModel":"small","groqApiKey":"k","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.theme, "dark");
+        assert_eq!(s.theme, "system");
     }
 
     #[test]
