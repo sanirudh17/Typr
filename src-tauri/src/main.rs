@@ -186,6 +186,53 @@ fn hotkey_candidates(preferred: &str) -> Vec<String> {
     candidates
 }
 
+/// Shows the main window once the frontend DOM has committed and painted its initial frame.
+/// Keeps the window invisible during cold-start WebView2 initialization to avoid the black/blank flash.
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if launched_hidden() {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        if !w.is_visible().unwrap_or(false) {
+            let _ = w.center();
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+}
+
+/// Disables the Windows DWM open/show transition animation so the frameless window
+/// snaps in cleanly without an OS fade/black-frame animation.
+#[cfg(windows)]
+fn disable_transitions(window: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: *mut std::ffi::c_void,
+                dwAttribute: u32,
+                pvAttribute: *const std::ffi::c_void,
+                cbAttribute: u32,
+            ) -> i32;
+        }
+        const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+        let on: i32 = 1;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd.0 as *mut std::ffi::c_void,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &on as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_transitions(_window: &tauri::WebviewWindow) {}
+
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
@@ -221,6 +268,22 @@ async fn save_settings(
 
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings.clone();
+
+    if old_settings.theme != settings.theme {
+        if let Some(win) = app.get_webview_window("main") {
+            let light = match settings.theme.as_str() {
+                "light" => true,
+                "dark" => false,
+                _ => !matches!(dark_light::detect(), Ok(dark_light::Mode::Dark)),
+            };
+            let bg = if light {
+                tauri::window::Color(0xee, 0xf0, 0xf3, 255)
+            } else {
+                tauri::window::Color(0x09, 0x09, 0x0b, 255)
+            };
+            let _ = win.set_background_color(Some(bg));
+        }
+    }
 
     if mic_changed {
         let recorder = state.recorder.clone();
@@ -814,6 +877,7 @@ fn main() {
             list_running_apps,
             add_app_rule,
             remove_app_rule,
+            show_main_window,
         ])
         .setup(move |app| {
             // Build the main window here, not in tauri.conf: only the builder can
@@ -874,18 +938,36 @@ fn main() {
                         Err(e) => eprintln!("[Typr] Failed to load main window icon: {}", e),
                     }
 
+                    disable_transitions(&window);
+
+                    // Always launch centered on the current monitor, whether this is a fresh
+                    // process or the window is being re-shown from the tray. The builder
+                    // .center() handles initial positioning, but the explicit call
+                    // guarantees the same result when opening or restoring.
+                    let _ = window.center();
+
                     if launched_hidden() {
                         println!("[Typr] Launched hidden (auto-start); main window stays in tray");
                     } else {
-                        // Always launch centered on the current monitor, whether this is a fresh
-                        // process or the window is being re-shown from the tray. The builder
-                        // .center() handles the very first show, but the explicit call
-                        // guarantees the same result after the window has been hidden to tray
-                        // (background mode) or when the OS restores a previous top-left position.
-                        let _ = window.center();
-                        if let Err(e) = window.show() {
-                            eprintln!("[Typr] Failed to show main window: {}", e);
-                        }
+                        // The window is created with visible(false) so WebView2 has time to boot,
+                        // parse HTML/CSS, run loadSettings(), and paint its initial frame before
+                        // appearing on screen. Once ready, main.ts calls `show_main_window` which
+                        // centers and reveals the window in one smooth step with zero blank/black flash.
+                        //
+                        // Safety valve: ensure the main window is shown even if webview script fails.
+                        let h = app.handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                            if let Some(win) = h.get_webview_window("main") {
+                                if !win.is_visible().unwrap_or(true) {
+                                    println!("[Typr] Safety valve: showing main window after timeout");
+                                    let _ = win.center();
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                        });
                     }
 
                     let app_handle = app.handle().clone();

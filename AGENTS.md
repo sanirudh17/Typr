@@ -9,12 +9,14 @@ This file is for future coding agents (and humans) working on Typr. It captures 
 **Implementation (do not remove):**
 - `src-tauri/src/main.rs` setup builds the `main` window dynamically via
   `WebviewWindowBuilder` (1160×720, min 700×500, frameless, `center()`,
-  `visible(false)` + explicit show) — NOT a static `tauri.conf.json` entry,
-  so the native `background_color` and the `__TYPR_BOOT__` init script can be
-  seeded per-launch from settings (this is what kills the cold-start theme
-  flash; a post-hoc `set_background_color` races first show and loses)
+  `visible(false)` + deferred show via `show_main_window` once DOM is painted)
+  — NOT a static `tauri.conf.json` entry, so the native `background_color` and
+  the `__TYPR_BOOT__` init script can be seeded per-launch from settings.
+  Starting hidden and revealing on double-rAF after `loadSettings()` completely
+  eliminates the cold-start WebView2 blank/black screen and layout flash; a
+  Rust safety valve (1500ms) guarantees the window shows even if script fails.
 - `src-tauri/src/main.rs` → explicit `window.center()` before `window.show()` in:
-  1. `setup` fresh launch (non-`--hidden` path)
+  1. `show_main_window` command and safety valve (non-`--hidden` path)
   2. tray `on_menu_event("show")`
   3. `on_tray_icon_event` left-click
 - `src-tauri/src/main.rs` → `try_focus_existing_window()` for the second-process case (single-instance mutex `Local\TyprSingleInstanceMutex`). Second launch of `Typr.exe` while hidden to tray must find the existing `"Typr"` HWND via `FindWindowW`, `ShowWindow(SW_RESTORE)`, `SetWindowPos` centered at `(screen_w-1160)/2, (screen_h-720)/2`, `SetForegroundWindow`. Otherwise the user sees "nothing happened".

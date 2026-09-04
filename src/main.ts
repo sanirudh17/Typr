@@ -2271,6 +2271,25 @@ getVersion()
     appVersion.textContent = v;
   })
   .catch(() => {});
+
+let windowShown = false;
+function revealWindow() {
+  if (windowShown) return;
+  windowShown = true;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      invoke("show_main_window").catch(() => {});
+    });
+  });
+}
+
+// Reveal once loadSettings finishes, or at 600ms maximum as a frontend safety fallback
+const revealTimer = setTimeout(revealWindow, 600);
+
 // The startup check runs only once settings are in hand — the banner has to know which
 // version was already dismissed, and currentSettings is unset until the load resolves.
-loadSettings().finally(() => runUpdateCheck(false));
+loadSettings().finally(() => {
+  clearTimeout(revealTimer);
+  revealWindow();
+  runUpdateCheck(false);
+});
