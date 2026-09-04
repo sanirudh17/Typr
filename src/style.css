@@ -2356,3 +2356,34 @@ html[data-theme="light"] .app-picker-panel,
 html[data-theme="light"] .undo-toast {
   box-shadow: 0 8px 24px rgba(20, 24, 33, 0.14), 0 2px 8px rgba(20, 24, 33, 0.08);
 }
+
+/* ── Light-theme legibility for small accent text ───────── */
+/* Brand indigo thins to borderline at 12px on white: step small accent text
+   (chips, command output, info titles, toast actions, hotkey status) down to
+   a deeper indigo that holds contrast, and give code chips a light ink wash
+   instead of the dark-theme black wash. */
+html[data-theme="light"] .info-card-body code,
+html[data-theme="light"] .cmd-out,
+html[data-theme="light"] .info-card-title,
+html[data-theme="light"] .undo-toast-btn,
+html[data-theme="light"] .hotkey-status {
+  color: #3f46ad;
+}
+html[data-theme="light"] .info-card-body code {
+  background: rgba(20, 24, 33, 0.06);
+}
+
+/* ── Hotkeys: combo as the anchor ───────────────────────── */
+/* The key combo is each row's value — set it like one: brighter text on a
+   slightly lifted chip in both themes, so it scans before the buttons. */
+kbd {
+  padding: 6px 14px;
+  background: var(--surface-active);
+  color: var(--text);
+}
+/* Status gets its own line above the combo instead of squeezing beside it, so
+   appearing/disappearing text never shoves the buttons sideways mid-capture. */
+.hotkey-status:not(:empty) {
+  flex-basis: 100%;
+  margin-right: 0;
+}

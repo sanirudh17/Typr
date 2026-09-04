@@ -309,6 +309,37 @@ mod tests {
         );
     }
 
+    /// Without-AI verification for "no text left out": a developer-style
+    /// instruction carries no filler and no stutters, so the deterministic chain
+    /// (filler-strip → dedupe → prose cleanup) must preserve every content word —
+    /// only casing and the trailing period may change.
+    #[test]
+    fn test_developer_instruction_loses_no_words_without_ai() {
+        let said = "check the agents folder and use the design skills from the docs folder";
+        let stripped = strip_filler_words(said);
+        for w in ["check", "agents", "folder", "use", "design", "skills", "docs"] {
+            assert!(stripped.contains(w), "filler-strip lost: {w}");
+        }
+        let deduped = deduplicate_text(&stripped);
+        for w in ["check", "agents", "folder", "use", "design", "skills", "docs"] {
+            assert!(deduped.contains(w), "dedupe lost: {w}");
+        }
+        // The repeated-but-not-consecutive "folder" is content, not a stutter.
+        assert_eq!(deduped.matches("folder").count(), 2);
+        let cleaned = cleanup_text(&deduped).to_lowercase();
+        for w in ["check", "agents", "folder", "design", "skills", "docs"] {
+            assert!(cleaned.contains(w), "cleanup lost: {w}");
+        }
+    }
+
+    /// Control: only actual stutter goes — "the the" collapses here, "um" goes
+    /// in the filler pass, content words survive both.
+    #[test]
+    fn test_stutter_collapses_but_content_survives_without_ai() {
+        assert_eq!(deduplicate_text("check the the agents folder"), "check the agents folder");
+        assert_eq!(strip_filler_words("check the agents folder um"), "check the agents folder");
+    }
+
     #[test]
     fn test_do_not_capitalize_emails_or_numbers() {
         assert_eq!(
