@@ -173,6 +173,9 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "8080".to_string(),
         "-t".to_string(),
         threads,
+        "-dev".to_string(),
+        "0".to_string(),
+        "-fa".to_string(),
         // Beam search, whisper.cpp's own default. `-bs 1` is greedy decoding, and greedy
         // decoding silently deletes enumerated speech: measured on a real 62s dictation
         // containing a seven-item numbered list, `-bs 1` returned ZERO of the seven items

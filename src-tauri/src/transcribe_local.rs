@@ -224,6 +224,7 @@ pub async fn transcribe_local(
         reqwest::multipart::Form::new()
             .part("file", part)
             .text("temperature", "0.0")
+            .text("temperature_inc", "0.0")
             .text("response_format", "json")
     };
 
@@ -316,6 +317,9 @@ pub async fn transcribe_local(
             audio_path.to_str().unwrap().to_string(),
             "-t".to_string(),
             cuda_threads.clone(),
+            "-dev".to_string(),
+            "0".to_string(),
+            "-fa".to_string(),
             "-bs".to_string(),
             "5".to_string(),
             "-mc".to_string(),
@@ -455,7 +459,7 @@ async fn run_sidecar_chunks(
         std::fs::write(&chunk_file, &chunk_bytes)
             .map_err(|e| format!("Failed to write temp chunk WAV: {}", e))?;
 
-        let args = vec![
+        let mut args = vec![
             "-m".to_string(),
             model_path.to_str().unwrap().to_string(),
             "-f".to_string(),
@@ -470,6 +474,11 @@ async fn run_sidecar_chunks(
             "-l".to_string(),
             "en".to_string(),
         ];
+        if sidecar_name.contains("cuda") {
+            args.push("-dev".to_string());
+            args.push("0".to_string());
+            args.push("-fa".to_string());
+        }
 
         let res = app
             .shell()
