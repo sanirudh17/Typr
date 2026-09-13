@@ -1150,9 +1150,10 @@ fn main() {
             }
 
             let handle_for_overlay = app.handle().clone();
-            app.listen("overlay-ready", move |_event| {
+            app.listen_any("overlay-ready", move |_event| {
                 typr_lib::overlay::mark_overlay_ready(&handle_for_overlay);
             });
+
 
             let handle = app.handle().clone();
 

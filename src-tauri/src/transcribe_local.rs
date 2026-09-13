@@ -20,7 +20,9 @@ fn local_client() -> &'static reqwest::Client {
 
 /// Estimate recorded audio length (seconds) from a 16 kHz mono s16 WAV's byte length.
 /// Used to scale the inference timeout; not exact, but well within the safety margin.
+#[allow(dead_code)]
 fn estimate_wav_seconds(byte_len: usize) -> f64 {
+
     // 16000 samples/s * 2 bytes/sample = 32000 B/s of PCM, past the 44-byte header.
     byte_len.saturating_sub(44) as f64 / 32_000.0
 }

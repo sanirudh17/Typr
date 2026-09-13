@@ -30,10 +30,10 @@ pub fn model_files_present(model_dir: &Path) -> bool {
         .all(|f| model_dir.join(f).is_file())
 }
 
-static RECOGNIZER: Mutex<Option<(PathBuf, sherpa_onnx::OfflineRecognizer)>> = Mutex::new(None);
+static RECOGNIZER: Mutex<Option<(PathBuf, sherpa_onnx::OnlineRecognizer)>> = Mutex::new(None);
 
-fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, String> {
-    let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
+fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, String> {
+    let mut config = sherpa_onnx::OnlineRecognizerConfig::default();
     config.model_config.transducer.encoder =
         Some(model_dir.join("encoder.int8.onnx").to_string_lossy().into_owned());
     config.model_config.transducer.decoder =
@@ -43,11 +43,11 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, 
     config.model_config.tokens =
         Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
     config.model_config.num_threads = 2;
-    config.decoding_method = Some("modified_beam_search".to_string());
-    config.max_active_paths = 8;
-    sherpa_onnx::OfflineRecognizer::create(&config)
-        .ok_or_else(|| "Failed to load the Nemotron model.".to_string())
+    config.decoding_method = Some("greedy_search".to_string());
+    sherpa_onnx::OnlineRecognizer::create(&config)
+        .ok_or_else(|| "Failed to load the Nemotron streaming model.".to_string())
 }
+
 
 pub fn release_model() {
     if let Ok(mut guard) = RECOGNIZER.lock() {
@@ -123,14 +123,18 @@ pub async fn transcribe_nemotron(
         for chunk in &chunks {
             let stream = recognizer.create_stream();
             stream.accept_waveform(sample_rate as i32, chunk.samples);
-            recognizer.decode(&stream);
-            let Some(result) = stream.get_result() else { continue };
+            stream.input_finished();
+            while recognizer.is_ready(&stream) {
+                recognizer.decode(&stream);
+            }
+            let Some(result) = recognizer.get_result(&stream) else { continue };
 
             let text = result.text.trim().to_string();
             if !text.is_empty() {
                 parts.push((text, chunk.overlaps_previous));
             }
         }
+
         let merged = audio_chunker::merge_chunk_texts(&parts);
         println!("[Typr] Nemotron completed in {:?}", started.elapsed());
         Ok(merged)

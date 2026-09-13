@@ -653,14 +653,19 @@ pub fn process_speech_audio_chain(
 }
 
 
+#[allow(dead_code)]
 const NORM_TARGET_PEAK: f32 = 0.95;
+#[allow(dead_code)]
 const NORM_MAX_GAIN: f32 = 15.0;
+#[allow(dead_code)]
 const NORM_EPS: f32 = 1e-4;
 
 /// Peak-normalize `samples` toward `target_peak`, but never amplify by more
 /// than `max_gain` (so a near-silent clip's noise floor is not blown up).
 /// Near-silent input is left unchanged.
+#[allow(dead_code)]
 fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+
     let peak = samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     if peak < NORM_EPS {
         return;

@@ -38,7 +38,12 @@ pub fn is_active_state(state: &RecordingState) -> bool {
 }
 
 pub fn reposition_overlay(window: &WebviewWindow) {
-    if let Ok(Some(m)) = window.primary_monitor() {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    if let Some(m) = monitor {
         let size = m.size();
         let scale = m.scale_factor();
         let logical_w = size.width as f64 / scale;
@@ -48,6 +53,7 @@ pub fn reposition_overlay(window: &WebviewWindow) {
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     }
 }
+
 
 pub fn create_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(old) = app.get_webview_window("overlay") {
@@ -187,7 +193,6 @@ pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) 
 
     if !is_overlay_ready() {
         set_pending_update(Some((state.clone(), show_pill)));
-        return;
     }
 
     if let Some(overlay) = app.get_webview_window("overlay") {
@@ -204,6 +209,7 @@ pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) 
         let _ = overlay.eval(&js);
     }
 }
+
 
 #[cfg(test)]
 mod tests {
