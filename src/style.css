@@ -1033,13 +1033,38 @@ input[type="password"]::placeholder {
   cursor: default;
 }
 
+.btn-danger {
+  padding: 7px 14px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.btn-danger:hover {
+  background: rgba(220, 53, 69, 0.12);
+  border-color: rgba(220, 53, 69, 0.4);
+  color: #ff6b6b;
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ── Model Row ──────────────────────────────────────── */
 
 .model-row {
   display: flex;
   gap: 8px;
   width: 100%;
-  max-width: 280px;
+  max-width: 440px;
 }
 
 .model-row select {

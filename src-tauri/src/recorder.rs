@@ -163,6 +163,10 @@ impl Recorder {
 
         let temp_path = app_dir.join("temp_recording.wav");
 
+        // Buffer drain: wait 150ms so in-flight audio buffers in the OS/WASAPI driver
+        // are delivered to the cpal stream callback before the stream is paused.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
         // Save audio
         let save_started_at = Instant::now();
         let save_result = {

@@ -734,15 +734,70 @@ async fn download_nemotron_model(
         let _ = std::fs::remove_file(&archive);
     } else {
         let wanted = ["tokens.txt", "joiner.int8.onnx", "decoder.int8.onnx", "encoder.int8.onnx"];
-        for name in wanted {
-            let file_url = format!("{}/{}", url.trim_end_matches('/'), name);
-            let dest = target.join(name);
-            downloader::download_model(app.clone(), &file_url, &dest).await?;
-        }
+        let items: Vec<downloader::MultiFileItem> = wanted
+            .iter()
+            .map(|&name| downloader::MultiFileItem {
+                url: format!("{}/{}", url.trim_end_matches('/'), name),
+                dest: target.join(name),
+            })
+            .collect();
+        downloader::download_multiple_files(app.clone(), &items).await?;
     }
 
     if !typr_lib::transcribe_nemotron::model_files_present(&target) {
         return Err("Download finished but the model files are incomplete.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_whisper_model(
+    state: State<'_, AppState>,
+    model_size: String,
+) -> Result<(), String> {
+    typr_lib::whisper_server::stop_server().await;
+    let model_file = transcribe_local::model_filename(&model_size);
+    let dest = state.app_dir.join(&model_file);
+    if dest.exists() {
+        std::fs::remove_file(&dest).map_err(|e| format!("Failed to delete model file: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_parakeet_model(
+    state: State<'_, AppState>,
+    variant: String,
+) -> Result<(), String> {
+    typr_lib::transcribe_parakeet::release_model();
+    let target = state
+        .app_dir
+        .join(typr_lib::transcribe_parakeet::model_dir_name(&variant));
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to delete model directory: {}", e))?;
+    }
+    let archive = state.app_dir.join("parakeet-download.tar.bz2");
+    if archive.exists() {
+        let _ = std::fs::remove_file(archive);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_nemotron_model(
+    state: State<'_, AppState>,
+    variant: String,
+) -> Result<(), String> {
+    typr_lib::transcribe_nemotron::release_model();
+    let target = state
+        .app_dir
+        .join(typr_lib::transcribe_nemotron::model_dir_name(&variant));
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to delete model directory: {}", e))?;
+    }
+    let archive = state.app_dir.join("nemotron-download.tar.bz2");
+    if archive.exists() {
+        let _ = std::fs::remove_file(archive);
     }
     Ok(())
 }
@@ -951,8 +1006,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             check_parakeet_downloaded,
             download_parakeet_model,
+            delete_parakeet_model,
             check_nemotron_downloaded,
             download_nemotron_model,
+            delete_nemotron_model,
             get_settings,
             save_settings,
             list_microphones,
@@ -961,6 +1018,7 @@ fn main() {
             get_frequency_bands,
             check_model_downloaded,
             download_model,
+            delete_whisper_model,
             toggle_recording,
             set_hotkey,
             suspend_hotkeys,

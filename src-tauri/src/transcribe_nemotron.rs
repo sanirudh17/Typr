@@ -42,7 +42,11 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, S
         Some(model_dir.join("joiner.int8.onnx").to_string_lossy().into_owned());
     config.model_config.tokens =
         Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
-    config.model_config.num_threads = 2;
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 4);
+    config.model_config.num_threads = num_threads as i32;
     config.decoding_method = Some("greedy_search".to_string());
     sherpa_onnx::OnlineRecognizer::create(&config)
         .ok_or_else(|| "Failed to load the Nemotron streaming model.".to_string())
@@ -205,54 +209,6 @@ pub async fn transcribe_nemotron(
             .collect::<Result<_, _>>()
             .map_err(|e| format!("Failed to decode audio samples: {}", e))?;
 
-        // Phase 0: Instrument (a) write exact 16 kHz mono float WAV received by engine
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let debug_wav_path = app_dir.join(format!("typr-nem-debug-{}.wav", ts));
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 16000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        if let Ok(mut writer) = hound::WavWriter::create(&debug_wav_path, spec) {
-            for &s in &samples {
-                let _ = writer.write_sample(s);
-            }
-            let _ = writer.finalize();
-        }
-
-        // Phase 0: Instrument (b) log ONNX metadata, cache shapes, and mel feature stats
-        let (mel_min, mel_max, mel_mean) = compute_mel_stats(&samples, sample_rate);
-        crate::debug_log::log(
-            app_dir,
-            &format!(
-                "[NEMOTRON DIAG] Audio received: {:.2}s ({} samples @ {}Hz), saved float WAV to {:?}",
-                samples.len() as f32 / sample_rate as f32,
-                samples.len(),
-                sample_rate,
-                debug_wav_path.file_name().unwrap_or_default()
-            ),
-        );
-        crate::debug_log::log(
-            app_dir,
-            "[NEMOTRON DIAG] ONNX session inputs/outputs:\n\
-             - Encoder inputs: audio_signal: [batch, 128, time], length: [batch], cache_last_channel: [batch, 24, 56, 1024], cache_last_time: [batch, 24, 1024, 8], cache_last_channel_len: [batch], prompt_index: [batch]\n\
-             - Encoder outputs: outputs: [batch, 1024, time], encoded_lengths: [batch], cache_last_channel_next: [batch, 24, 56, 1024], cache_last_time_next: [batch, 24, 1024, 8], cache_last_channel_next_len: [batch]\n\
-             - Decoder inputs: targets: [batch, seq], target_length: [batch], states.1: [2, batch, 640], onnx::Slice_3: [2, 1, 640]\n\
-             - Decoder outputs: outputs: [batch, 640, seq], prednet_lengths: [batch], states: [2, batch, 640], 162: [2, 1, 640]\n\
-             - Joiner inputs: encoder_outputs: [batch, 1024, time], decoder_outputs: [batch, 640, seq] -> outputs: [batch, time, seq, vocab_size]\n\
-             - Cache tensor shapes: cache_last_channel=[1, 24, 56, 1024], cache_last_time=[1, 24, 1024, 8], decoder_states=[2, 1, 640]",
-        );
-        crate::debug_log::log(
-            app_dir,
-            &format!(
-                "[NEMOTRON DIAG] Mel feature stats (128-dim log-mel, 25ms win, 10ms hop): min={:.4}, max={:.4}, mean={:.4}",
-                mel_min, mel_max, mel_mean
-            ),
-        );
 
         let mut guard = RECOGNIZER
             .lock()

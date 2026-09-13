@@ -436,6 +436,11 @@ impl AudioRecorder {
 
         let mut resampled = resample(&mono, self.source_sample_rate, 16000);
         let diagnostics = process_speech_audio_chain(&mut resampled, 16000, input_gain_db);
+        // Tail comfort silence padding: append 400ms (6400 samples @ 16kHz) of silence
+        // so that conformer lookahead, RNNT joiner, and Whisper attention have acoustic
+        // closure and future context frames. Prevents dropping the last 2-3 words.
+        let tail_silence_samples = (16000.0 * 0.400) as usize;
+        resampled.extend(std::iter::repeat(0.0f32).take(tail_silence_samples));
         println!(
             "[Typr] Audio preprocessed: resampled to {} samples @ 16kHz, pre-p95: {:.4}, post-p95: {:.4}, clips: {}",
             resampled.len(), diagnostics.p95_rms, diagnostics.post_rms, diagnostics.clip_count
@@ -1042,6 +1047,17 @@ mod tests {
         let quiet_diag = process_speech_audio_chain(&mut quiet_samples, 16000, 0.0);
         assert!(quiet_diag.is_quiet);
         assert!(!quiet_diag.clipping_detected);
+    }
+
+    #[test]
+    fn test_tail_silence_padding() {
+        let mut samples = vec![0.5f32; 16000];
+        let tail_silence_samples = (16000.0 * 0.400) as usize;
+        samples.extend(std::iter::repeat(0.0f32).take(tail_silence_samples));
+        assert_eq!(samples.len(), 16000 + 6400);
+        for &s in &samples[16000..] {
+            assert_eq!(s, 0.0);
+        }
     }
 }
 

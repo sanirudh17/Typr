@@ -80,13 +80,16 @@ const engineNemotron = document.getElementById("engine-nemotron")!;
 const parakeetSettings = document.getElementById("parakeet-settings")!;
 const parakeetModelSelect = document.getElementById("parakeet-model-select") as HTMLSelectElement;
 const parakeetDownloadBtn = document.getElementById("parakeet-download-btn") as HTMLButtonElement;
+const parakeetDeleteBtn = document.getElementById("parakeet-delete-btn") as HTMLButtonElement;
 const nemotronSettings = document.getElementById("nemotron-settings")!;
 const nemotronModelSelect = document.getElementById("nemotron-model-select") as HTMLSelectElement;
 const nemotronDownloadBtn = document.getElementById("nemotron-download-btn") as HTMLButtonElement;
+const nemotronDeleteBtn = document.getElementById("nemotron-delete-btn") as HTMLButtonElement;
 const localSettings = document.getElementById("local-settings")!;
 const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
 const downloadBtn = document.getElementById("download-btn")!;
+const deleteModelBtn = document.getElementById("delete-model-btn") as HTMLButtonElement;
 const downloadProgress = document.getElementById("download-progress")!;
 const progressFill = document.getElementById("progress-fill")!;
 const parakeetDownloadProgress = document.getElementById("parakeet-download-progress")!;
@@ -476,9 +479,11 @@ async function refreshParakeetDownloadState() {
       variant: currentSettings.parakeetModel || "v3",
     });
     parakeetDownloadBtn.textContent = present ? "Re-download" : "Download";
+    parakeetDeleteBtn.classList.toggle("hidden", !present);
     parakeetModelPresent = present;
   } catch {
     parakeetDownloadBtn.textContent = "Download";
+    parakeetDeleteBtn.classList.add("hidden");
   }
   updateEngineSetupNote();
 }
@@ -496,9 +501,11 @@ async function refreshNemotronDownloadState() {
       variant: currentSettings.nemotronModel || "v3_5",
     });
     nemotronDownloadBtn.textContent = present ? "Re-download" : "Download";
+    nemotronDeleteBtn.classList.toggle("hidden", !present);
     nemotronModelPresent = present;
   } catch {
     nemotronDownloadBtn.textContent = "Download";
+    nemotronDeleteBtn.classList.add("hidden");
   }
   updateEngineSetupNote();
 }
@@ -696,6 +703,7 @@ async function checkModelStatus() {
   // Standardized with Parakeet: a present model offers "Re-download" (still clickable) rather
   // than a disabled checkmark, so a corrupted or interrupted file can be re-fetched from the UI.
   downloadBtn.textContent = downloaded ? "Re-download" : "Download";
+  deleteModelBtn.classList.toggle("hidden", !downloaded);
   (downloadBtn as HTMLButtonElement).disabled = false;
   whisperModelPresent = downloaded;
   updateEngineSetupNote();
@@ -815,6 +823,7 @@ downloadBtn.addEventListener("click", async () => {
   try {
     await invoke("download_model", { modelSize: modelSelect.value });
     downloadBtn.textContent = "Re-download";
+    deleteModelBtn.classList.remove("hidden");
     // The model is on disk now, so clear the first-run note. Set directly rather than via
     // checkModelStatus() so the "Retry" label on the failure path below is left alone.
     whisperModelPresent = true;
@@ -827,6 +836,47 @@ downloadBtn.addEventListener("click", async () => {
   if (activeProgressFill === progressFill) activeProgressFill = null;
   (downloadBtn as HTMLButtonElement).disabled = false;
   downloadProgress.classList.add("hidden");
+});
+
+deleteModelBtn.addEventListener("click", async () => {
+  deleteModelBtn.disabled = true;
+  try {
+    await invoke("delete_whisper_model", { modelSize: modelSelect.value });
+    showToast("Whisper model removed from disk");
+  } catch (e) {
+    showToast(String(e));
+  } finally {
+    deleteModelBtn.disabled = false;
+    await checkModelStatus();
+  }
+});
+
+parakeetDeleteBtn.addEventListener("click", async () => {
+  const variant = currentSettings.parakeetModel || "v3";
+  parakeetDeleteBtn.disabled = true;
+  try {
+    await invoke("delete_parakeet_model", { variant });
+    showToast("Parakeet model removed from disk");
+  } catch (e) {
+    showToast(String(e));
+  } finally {
+    parakeetDeleteBtn.disabled = false;
+    await refreshParakeetDownloadState();
+  }
+});
+
+nemotronDeleteBtn.addEventListener("click", async () => {
+  const variant = currentSettings.nemotronModel || "v3_5";
+  nemotronDeleteBtn.disabled = true;
+  try {
+    await invoke("delete_nemotron_model", { variant });
+    showToast("Nemotron model removed from disk");
+  } catch (e) {
+    showToast(String(e));
+  } finally {
+    nemotronDeleteBtn.disabled = false;
+    await refreshNemotronDownloadState();
+  }
 });
 
 // Mirror on every keystroke so the warning clears as soon as a key is pasted, and persist
