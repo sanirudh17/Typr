@@ -165,26 +165,21 @@ pub async fn transcribe_parakeet(
             model_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
         );
         let started = std::time::Instant::now();
-        let mut pieces: Vec<String> = Vec::new();
+        let mut parts: Vec<(String, bool)> = Vec::new();
         for chunk in &chunks {
             let stream = recognizer.create_stream();
             stream.accept_waveform(sample_rate as i32, chunk.samples);
             recognizer.decode(&stream);
             let Some(result) = stream.get_result() else { continue };
 
-            let overlap = if chunk.overlaps_previous { audio_chunker::OVERLAP_SECS } else { 0.0 };
-            let text = audio_chunker::trim_overlap_tokens(
-                &result.tokens,
-                result.timestamps.as_deref(),
-                &result.text,
-                overlap,
-            );
+            let text = result.text.trim().to_string();
             if !text.is_empty() {
-                pieces.push(text);
+                parts.push((text, chunk.overlaps_previous));
             }
         }
+        let merged = audio_chunker::merge_chunk_texts(&parts);
         println!("[Typr] Parakeet completed in {:?}", started.elapsed());
-        Ok(pieces.join(" "))
+        Ok(merged)
     })
     .await
     .map_err(|e| format!("Parakeet task panicked: {}", e))?
@@ -227,5 +222,23 @@ mod tests {
         assert!(r.is_err());
         let e = r.unwrap_err();
         assert!(e.contains("model"), "error should name the model problem, got: {}", e);
+    }
+
+    #[test]
+    fn test_parakeet_seam_recovery_retains_all_words() {
+        // Simulating the Parakeet seam:
+        // Chunk 0 ends at forced cut: "First section with item 1 and item 2 and item 3."
+        // Chunk 1 begins within 3s overlap: "item 3. Item 4 and item 5 and final changes."
+        // Under the old trim_overlap_tokens, blind 3s trimming dropped words unconditionally.
+        // Under merge_chunk_texts, the seam reconciles "item 3" duplicate and preserves every word.
+        let parts = vec![
+            ("First section with item 1 and item 2 and item 3.".to_string(), false),
+            ("item 3. Item 4 and item 5 and final changes.".to_string(), true),
+        ];
+        let merged = audio_chunker::merge_chunk_texts(&parts);
+        assert_eq!(
+            merged,
+            "First section with item 1 and item 2 and item 3. Item 4 and item 5 and final changes."
+        );
     }
 }

@@ -234,6 +234,24 @@ impl Recorder {
             }
         };
 
+        // Transcript integrity check: detect truncation on long audio recordings.
+        let word_count = raw_text.split_whitespace().count();
+        let words_per_second = word_count as f64 / (duration_secs.max(0.001) as f64);
+        if duration_secs > 15.0 && words_per_second < 1.5 {
+            let warn_msg = format!(
+                "WARNING: Transcript integrity check failed: {:.1}s audio yielded {} words ({:.2} wps < 1.5 wps threshold)",
+                duration_secs, word_count, words_per_second
+            );
+            crate::debug_log::log(app_dir, &warn_msg);
+            let toast_msg = format!(
+                "Transcript looks incomplete — you dictated {:.0}s but got only {} words. Re-dictate or check the Engine tab.",
+                duration_secs, word_count
+            );
+            let _ = app.emit("show-toast", toast_msg);
+        }
+
+        crate::debug_log::log(app_dir, &format!("STAGE 1 [engine return]: {}", raw_text));
+
         // Dictionary vocabulary correction (snap close mis-hearings to exact hint
         // spellings), then snippet/email replacements — both before the LLM.
         let replaced = {
@@ -241,12 +259,14 @@ impl Recorder {
             let corrected = crate::vocab_correct::correct_vocabulary(&raw_text, &dict.vocabulary_hints);
             dict.apply_replacements(&corrected)
         };
+        crate::debug_log::log(app_dir, &format!("STAGE 2 [dictionary]: {}", replaced));
 
         // Assemble spoken email addresses ("name at gmail dot com") into real ones. Must run
         // before both the AI pass and the deterministic cleanup: the LLM only promises to
         // preserve addresses it can recognize, and the entity guard can only protect one that
         // already looks like an address.
         let replaced = crate::email_assemble::assemble_emails(&replaced);
+        crate::debug_log::log(app_dir, &format!("STAGE 3 [email assembly]: {}", replaced));
 
         // Deterministic cleanup is the always-available fallback.
         let deterministic = cleanup_text(&replaced);
@@ -413,6 +433,7 @@ impl Recorder {
         } else {
             deterministic
         };
+        crate::debug_log::log(app_dir, &format!("STAGE 4 [AI postprocess]: {}", final_text));
 
         // Deterministic de-duplication: collapse consecutive repeated words/phrases
         // (1-3 word window) that Whisper/Parakeet and chunk joins sometimes emit even
@@ -421,11 +442,13 @@ impl Recorder {
         // Runs before voice commands so "hello hello" dedupes to one hello before any
         // casing/layout pass. Always on — stutters are never intentional.
         let final_text = crate::cleanup::deduplicate_text(&final_text);
+        crate::debug_log::log(app_dir, &format!("STAGE 5 [dedup]: {}", final_text));
 
         // Final deterministic pass: apply always-on voice commands (casing / layout / symbols).
         // Runs after cleanup and any AI pass so nothing downstream can undo it; identical
         // behavior whether AI is on or off.
         let final_text = commands::apply_commands(&final_text);
+        crate::debug_log::log(app_dir, &format!("STAGE 6 [commands]: {}", final_text));
 
         // Transcription + AI cleanup are done; clear the spinner now, then paste so the text
         // appears right as the overlay disappears. Resetting before paste also guarantees the

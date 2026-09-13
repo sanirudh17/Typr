@@ -1178,6 +1178,13 @@ listen("history-updated", () => {
   loadHistory();
 });
 
+// Listen for backend toasts (e.g. transcript integrity check warning)
+listen<string>("show-toast", (event) => {
+  if (event.payload) {
+    showToast(event.payload, 6000);
+  }
+});
+
 let visibleHistoryCount = 50;
 let cachedHistory: History | null = null;
 

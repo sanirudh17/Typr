@@ -239,6 +239,42 @@ pub fn merge_chunk_texts(parts: &[(String, bool)]) -> String {
     acc.join(" ")
 }
 
+/// Helper: encode 16 kHz mono f32 samples to in-memory WAV bytes.
+pub fn samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut cursor, spec)
+        .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+    for &s in samples {
+        let sample_i16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        writer
+            .write_sample(sample_i16)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+    writer
+        .finalize()
+        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    Ok(cursor.into_inner())
+}
+
+/// Helper: read samples from a WAV file path into f32 samples and sample rate.
+pub fn read_wav_samples(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    let sample_rate = reader.spec().sample_rate;
+    let samples: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Failed to decode audio samples: {}", e))?;
+    Ok((samples, sample_rate))
+}
+
 fn norm(w: &str) -> String {
     w.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
 }
@@ -276,6 +312,10 @@ fn words_similar(a: &str, b: &str) -> bool {
     }
     if a == b {
         return true;
+    }
+    // Numbers/digits must match exactly; e.g. "2" and "3" or "item 1" and "item 2" are distinct items.
+    if a.chars().any(|c| c.is_ascii_digit()) || b.chars().any(|c| c.is_ascii_digit()) {
+        return false;
     }
     let budget = if a.len().max(b.len()) <= 4 { 1 } else { 2 };
     edit_distance(&a, &b) <= budget
@@ -450,5 +490,21 @@ mod tests {
         let parts =
             vec![("alpha beta".to_string(), false), ("gamma delta".to_string(), true)];
         assert_eq!(merge_chunk_texts(&parts), "alpha beta gamma delta");
+    }
+
+    /// Simulating a decoder that prematurely dropped words at the chunk boundary:
+    /// Chunk 1 decode died mid-sentence: "Let me know whether there are"
+    /// Chunk 2 started inside the 3s overlap and decoded: "whether there are some changes that you would like to make."
+    /// The merged result must recover 100% of the speech without duplicating the seam.
+    #[test]
+    fn test_merge_recovers_tail_dropping_decode() {
+        let parts = vec![
+            ("Item 1. Item 2. Item 3. Let me know whether there are".to_string(), false),
+            ("whether there are some changes that you would like to make.".to_string(), true),
+        ];
+        assert_eq!(
+            merge_chunk_texts(&parts),
+            "Item 1. Item 2. Item 3. Let me know whether there are some changes that you would like to make."
+        );
     }
 }

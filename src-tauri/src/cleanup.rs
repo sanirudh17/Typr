@@ -108,7 +108,16 @@ pub fn strip_filler_words(text: &str) -> String {
         if i + 1 < raw_tokens.len() {
             let next = raw_tokens[i + 1];
             let next_trimmed = next.to_lowercase().trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`' | '.')).to_string();
-            let is_you_know = trimmed == "you" && next_trimmed == "know";
+            let followed_by_what = i + 2 < raw_tokens.len() && {
+                let third = raw_tokens[i + 2].to_lowercase();
+                let t3 = third.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '!' | '?' | '`' | '.'));
+                t3 == "what"
+            };
+            let preceded_by_verb = matches!(
+                prev_kept_lower.as_deref(),
+                Some("do") | Some("did") | Some("does") | Some("dont") | Some("don't") | Some("let") | Some("if") | Some("to") | Some("as") | Some("would")
+            );
+            let is_you_know = trimmed == "you" && next_trimmed == "know" && !followed_by_what && !preceded_by_verb;
             let is_i_mean = trimmed == "i" && next_trimmed == "mean";
             if is_you_know || is_i_mean {
                 i += 2;
@@ -137,6 +146,7 @@ pub fn strip_filler_words(text: &str) -> String {
 /// chunk-join artefacts like "hello hello" or "fix the login fix the login".
 /// Keeps entities verbatim; checks 1-, 2-, and 3-word repeats with a small
 /// window so "the the" is collapsed but "the cat sat on the mat" is not.
+/// Preserves legitimate grammatical repetition like "had had" and "that that".
 /// Pure; never touches punctuation beyond token boundaries.
 pub fn deduplicate_text(text: &str) -> String {
     if text.trim().is_empty() {
@@ -176,6 +186,10 @@ pub fn deduplicate_text(text: &str) -> String {
                 }
                 let window_lower = &lowered[i..i + n];
                 let tail_lower = &kept_lower[kept_lower.len() - n..];
+                // Legitimate English grammar permits "had had" and "that that"; do not collapse them.
+                if n == 1 && (window_lower[0] == "had" || window_lower[0] == "that") {
+                    continue;
+                }
                 if window_lower == tail_lower {
                     // Skip the repeated window; do not update kept, so consecutive repeats of
                     // the same window (e.g., "hello hello hello") collapse to one.
@@ -353,6 +367,29 @@ mod tests {
         assert_eq!(
             cleanup_text("file saved as a .exe file."),
             "File saved as a .exe file."
+        );
+    }
+
+    #[test]
+    fn test_had_had_and_that_that_preserved() {
+        assert_eq!(deduplicate_text("I had had enough"), "I had had enough");
+        assert_eq!(deduplicate_text("he said that that was fine"), "he said that that was fine");
+    }
+
+    #[test]
+    fn test_you_know_what_preserved() {
+        assert_eq!(
+            strip_filler_words("you know what we should do"),
+            "you know what we should do"
+        );
+        assert_eq!(
+            strip_filler_words("do you know what happened"),
+            "do you know what happened"
+        );
+        // Ordinary standalone filler "you know" still stripped:
+        assert_eq!(
+            strip_filler_words("it was you know great"),
+            "it was great"
         );
     }
 }

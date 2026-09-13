@@ -172,6 +172,21 @@ pub async fn transcribe_local(
     let current_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
 
+    let (samples, sample_rate) = match crate::audio_chunker::read_wav_samples(audio_path) {
+        Ok(res) => res,
+        Err(_) => {
+            return Err("Failed to read audio file for local transcription".to_string());
+        }
+    };
+
+    let chunks = crate::audio_chunker::split_into_chunks(&samples, sample_rate);
+    println!(
+        "[Typr] Local Whisper transcribing {:.1}s in {} chunk(s), model {:?}",
+        samples.len() as f32 / sample_rate as f32,
+        chunks.len(),
+        model_path.file_name().unwrap_or_default()
+    );
+
     // 1. Try persistent HTTP server first
     println!(
         "[Typr] Attempting persistent local Whisper HTTP server execution with model {:?}",
@@ -179,107 +194,110 @@ pub async fn transcribe_local(
     );
     let http_start = Instant::now();
 
-    // Read audio bytes once
-    let file_bytes_result = std::fs::read(audio_path);
-    if let Ok(file_bytes) = file_bytes_result {
-        // Scale the inference timeout to the clip length so a slow-but-fine decode on a
-        // battery-throttled GPU stays on the warm server instead of tripping the fallback.
-        let est_audio_secs = estimate_wav_seconds(file_bytes.len());
-        let post_timeout = post_timeout_for(est_audio_secs);
+    // Guard the hot path on model identity: reuse the warm server only if it is
+    // already serving the selected model; otherwise (re)start it first so we never
+    // transcribe with a stale model (e.g. right after downloading a new model).
+    let intended_key = model_path.to_string_lossy().to_string();
+    let current = crate::whisper_server::current_model_key();
+    if !crate::whisper_server::warm_server_matches(current.as_deref(), &intended_key) {
         println!(
-            "[Typr] Local inference: ~{:.1}s audio; warm-server POST timeout {:.0}s",
-            est_audio_secs,
-            post_timeout.as_secs_f64()
+            "[Typr] Warm server model mismatch (have {:?}, want {}). Ensuring correct model...",
+            current, intended_key
         );
-
-        // Build the request body helper
-        let make_form = |bytes: Vec<u8>| {
-            let part = reqwest::multipart::Part::bytes(bytes)
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-                .unwrap();
-            // NO PROMPT. See `prompt` on the function signature — passing dictionary hints as
-            // an initial prompt makes this model silently skip speech.
-            reqwest::multipart::Form::new()
-                .part("file", part)
-                .text("temperature", "0.0")
-                .text("response_format", "json")
-        };
-
-        // Guard the hot path on model identity: reuse the warm server only if it is
-        // already serving the selected model; otherwise (re)start it first so we never
-        // transcribe with a stale model (e.g. right after downloading a new model).
-        let intended_key = model_path.to_string_lossy().to_string();
-        let current = crate::whisper_server::current_model_key();
-        if !crate::whisper_server::warm_server_matches(current.as_deref(), &intended_key) {
+        if let Err(e) = crate::whisper_server::ensure_running(app, model_path).await {
             println!(
-                "[Typr] Warm server model mismatch (have {:?}, want {}). Ensuring correct model...",
-                current, intended_key
+                "[Typr] Failed to ensure correct model server: {}. Will still try POST then sidecars...",
+                e
             );
-            if let Err(e) = crate::whisper_server::ensure_running(app, model_path).await {
-                println!(
-                    "[Typr] Failed to ensure correct model server: {}. Will still try POST then sidecars...",
-                    e
-                );
-            }
         }
+    }
 
-        // POST to the (now correct) warm server.
+    let make_form = |bytes: Vec<u8>| {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .unwrap();
+        // NO PROMPT. See `prompt` on the function signature — passing dictionary hints as
+        // an initial prompt makes this model silently skip speech.
+        reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("temperature", "0.0")
+            .text("response_format", "json")
+    };
+
+    let mut server_chunks_succeeded = true;
+    let mut parts: Vec<(String, bool)> = Vec::with_capacity(chunks.len());
+
+    for chunk in &chunks {
+        let chunk_bytes = match crate::audio_chunker::samples_to_wav_bytes(chunk.samples, sample_rate) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("[Typr] Failed to convert chunk to WAV bytes: {}", e);
+                server_chunks_succeeded = false;
+                break;
+            }
+        };
+        let chunk_secs = chunk.samples.len() as f64 / sample_rate as f64;
+        let post_timeout = post_timeout_for(chunk_secs);
+
         let mut http_result = local_client()
             .post("http://127.0.0.1:8080/inference")
             .timeout(post_timeout)
-            .multipart(make_form(file_bytes.clone()))
+            .multipart(make_form(chunk_bytes.clone()))
             .send()
             .await;
 
-        // If direct post fails (e.g. connection refused), ensure the server is running, and retry
         if http_result.is_err() {
             println!("[Typr] Direct POST failed. Ensuring persistent server is running...");
-            match crate::whisper_server::ensure_running(app, model_path).await {
-                Ok(_) => {
-                    println!("[Typr] Persistent server ensured healthy. Retrying inference POST...");
-                    http_result = local_client()
-                        .post("http://127.0.0.1:8080/inference")
-                        .timeout(post_timeout)
-                        .multipart(make_form(file_bytes))
-                        .send()
-                        .await;
-                }
-                Err(e) => {
-                    println!("[Typr] Failed to ensure persistent server: {}. Falling back to sidecars...", e);
-                }
+            if let Ok(_) = crate::whisper_server::ensure_running(app, model_path).await {
+                http_result = local_client()
+                    .post("http://127.0.0.1:8080/inference")
+                    .timeout(post_timeout)
+                    .multipart(make_form(chunk_bytes))
+                    .send()
+                    .await;
             }
         }
 
-        // Process the final HTTP result if we have a successful connection
-        if let Ok(response) = http_result {
-            if response.status().is_success() {
+        match http_result {
+            Ok(response) if response.status().is_success() => {
                 #[derive(serde::Deserialize)]
                 struct InferenceResponse {
                     text: String,
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
                     let text = normalize_transcript(&inf_res.text);
-                    crate::whisper_server::note_activity();
-                    let elapsed = http_start.elapsed();
-                    println!(
-                        "[Typr] Persistent HTTP Whisper completed in {:?} (~{:.2}x realtime, {:.1}s audio). Output: {}",
-                        elapsed,
-                        elapsed.as_secs_f64() / est_audio_secs.max(0.1),
-                        est_audio_secs,
-                        text
-                    );
-                    return Ok(text);
+                    if !text.is_empty() {
+                        parts.push((text, chunk.overlaps_previous));
+                    }
+                } else {
+                    server_chunks_succeeded = false;
+                    break;
                 }
-            } else {
-                println!("[Typr] HTTP server returned error: {}. Falling back to sidecars...", response.status());
             }
-        } else {
-            println!("[Typr] Persistent HTTP server failed. Falling back to sidecars...");
+            _ => {
+                server_chunks_succeeded = false;
+                break;
+            }
         }
-    } else {
-        println!("[Typr] Failed to read audio file. Falling back to sidecars...");
     }
+
+    if server_chunks_succeeded && !parts.is_empty() {
+        crate::whisper_server::note_activity();
+        let text = crate::audio_chunker::merge_chunk_texts(&parts);
+        let elapsed = http_start.elapsed();
+        let total_secs = samples.len() as f64 / sample_rate as f64;
+        println!(
+            "[Typr] Persistent HTTP Whisper completed in {:?} (~{:.2}x realtime, {:.1}s audio). Output: {}",
+            elapsed,
+            elapsed.as_secs_f64() / total_secs.max(0.1),
+            total_secs,
+            text
+        );
+        return Ok(text);
+    }
+
+    println!("[Typr] Persistent HTTP server failed or incomplete. Falling back to sidecars...");
 
     // 2. Try GPU (CUDA) execution as fallback
     println!(
@@ -288,42 +306,54 @@ pub async fn transcribe_local(
     );
     let started_gpu = Instant::now();
 
-    let cuda_cmd_args = vec![
-        "-m".to_string(),
-        model_path.to_str().unwrap().to_string(),
-        "-f".to_string(),
-        audio_path.to_str().unwrap().to_string(),
-        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
-        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
-        // result, which `normalize_transcript` strips.
-        "-t".to_string(),
-        cuda_threads,
-        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
-        // `-bs 1` silently drops enumerated speech.
-        "-bs".to_string(),
-        "5".to_string(),
-        "-mc".to_string(),
-        "0".to_string(),
-        "-nf".to_string(),
-        "-l".to_string(),
-        "en".to_string(),
-    ];
+    let cuda_result = if chunks.len() <= 1 {
+        let cuda_cmd_args = vec![
+            "-m".to_string(),
+            model_path.to_str().unwrap().to_string(),
+            "-f".to_string(),
+            audio_path.to_str().unwrap().to_string(),
+            "-t".to_string(),
+            cuda_threads.clone(),
+            "-bs".to_string(),
+            "5".to_string(),
+            "-mc".to_string(),
+            "0".to_string(),
+            "-nf".to_string(),
+            "-l".to_string(),
+            "en".to_string(),
+        ];
+        app.shell()
+            .sidecar("whisper-cpp-cuda")
+            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+            .env("PATH", &new_path)
+            .args(cuda_cmd_args)
+            .output()
+            .await
+            .map(|output| {
+                if output.status.success() {
+                    Ok(normalize_transcript(&String::from_utf8_lossy(&output.stdout)))
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(format!("Exit status: {:?}, Stderr: {}", output.status, stderr))
+                }
+            })
+            .map_err(|e| e.to_string())
+            .and_then(|r| r)
+    } else {
+        run_sidecar_chunks(
+            app,
+            "whisper-cpp-cuda",
+            model_path,
+            &chunks,
+            sample_rate,
+            &cuda_threads,
+            &new_path,
+        )
+        .await
+    };
 
-    // No --prompt: see the note on the `prompt` parameter. The sidecars run the same model
-    // as the server and skip speech the same way.
-
-    let gpu_result = app
-        .shell()
-        .sidecar("whisper-cpp-cuda")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-        .env("PATH", &new_path)
-        .args(cuda_cmd_args)
-        .output()
-        .await;
-
-    match gpu_result {
-        Ok(output) if output.status.success() => {
-            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
+    match cuda_result {
+        Ok(text) => {
             println!(
                 "[Typr] GPU (CUDA) Whisper completed in {:?}. Output: {}",
                 started_gpu.elapsed(),
@@ -331,14 +361,7 @@ pub async fn transcribe_local(
             );
             return Ok(text);
         }
-        other => {
-            let error_details = match &other {
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    format!("Exit status: {:?}, Stderr: {}", output.status, stderr)
-                }
-                Err(e) => e.to_string(),
-            };
+        Err(error_details) => {
             println!(
                 "[Typr] GPU (CUDA) execution failed or not available. Error: {}. Falling back to CPU...",
                 error_details
@@ -346,47 +369,61 @@ pub async fn transcribe_local(
         }
     }
 
-    // 2. CPU Fallback Path
+    // 3. CPU Fallback Path
     println!(
         "[Typr] Running CPU fallback sidecar with model {:?} using {} threads",
         model_path, cpu_threads
     );
     let started_cpu = Instant::now();
 
-    let cpu_cmd_args = vec![
-        "-m".to_string(),
-        model_path.to_str().unwrap().to_string(),
-        "-f".to_string(),
-        audio_path.to_str().unwrap().to_string(),
-        // No `--no-timestamps`: see the note in `whisper_server::ensure_running`. It makes the
-        // decoder drop speech. The CLI prefixes each line with a `[start --> end]` marker as a
-        // result, which `normalize_transcript` strips.
-        "-t".to_string(),
-        cpu_threads,
-        // Beam search, not greedy: see the note in `whisper_server::ensure_running`.
-        "-bs".to_string(),
-        "5".to_string(),
-        "-mc".to_string(),
-        "0".to_string(),
-        "-nf".to_string(),
-        "-l".to_string(),
-        "en".to_string(),
-    ];
+    let cpu_result = if chunks.len() <= 1 {
+        let cpu_cmd_args = vec![
+            "-m".to_string(),
+            model_path.to_str().unwrap().to_string(),
+            "-f".to_string(),
+            audio_path.to_str().unwrap().to_string(),
+            "-t".to_string(),
+            cpu_threads.clone(),
+            "-bs".to_string(),
+            "5".to_string(),
+            "-mc".to_string(),
+            "0".to_string(),
+            "-nf".to_string(),
+            "-l".to_string(),
+            "en".to_string(),
+        ];
+        app.shell()
+            .sidecar("whisper-cpp")
+            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+            .env("PATH", &new_path)
+            .args(cpu_cmd_args)
+            .output()
+            .await
+            .map(|output| {
+                if output.status.success() {
+                    Ok(normalize_transcript(&String::from_utf8_lossy(&output.stdout)))
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(format!("whisper.cpp CPU fallback failed with exit status: {:?}. Stderr: {}", output.status, stderr))
+                }
+            })
+            .map_err(|e| format!("Failed to run whisper.cpp CPU fallback: {}", e))
+            .and_then(|r| r)
+    } else {
+        run_sidecar_chunks(
+            app,
+            "whisper-cpp",
+            model_path,
+            &chunks,
+            sample_rate,
+            &cpu_threads,
+            &new_path,
+        )
+        .await
+    };
 
-    // No --prompt: see the note on the `prompt` parameter.
-
-    let cpu_output = app
-        .shell()
-        .sidecar("whisper-cpp")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-        .env("PATH", &new_path)
-        .args(cpu_cmd_args)
-        .output()
-        .await;
-
-    match cpu_output {
-        Ok(output) if output.status.success() => {
-            let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
+    match cpu_result {
+        Ok(text) => {
             println!(
                 "[Typr] CPU Fallback Whisper completed in {:?}. Output: {}",
                 started_cpu.elapsed(),
@@ -394,14 +431,76 @@ pub async fn transcribe_local(
             );
             Ok(text)
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("whisper.cpp CPU fallback failed with exit status: {:?}. Stderr: {}", output.status, stderr))
-        }
-        Err(e) => {
-            Err(format!("Failed to run whisper.cpp CPU fallback: {}", e))
+        Err(e) => Err(format!("Failed to run whisper.cpp CPU fallback: {}", e)),
+    }
+}
+
+async fn run_sidecar_chunks(
+    app: &AppHandle,
+    sidecar_name: &str,
+    model_path: &PathBuf,
+    chunks: &[crate::audio_chunker::Chunk<'_>],
+    sample_rate: u32,
+    threads: &str,
+    new_path: &str,
+) -> Result<String, String> {
+    let mut parts: Vec<(String, bool)> = Vec::with_capacity(chunks.len());
+    let temp_dir = std::env::temp_dir();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let chunk_file = temp_dir.join(format!("typr_chunk_{}_{}.wav", std::process::id(), i));
+        let chunk_bytes = crate::audio_chunker::samples_to_wav_bytes(chunk.samples, sample_rate)?;
+        std::fs::write(&chunk_file, &chunk_bytes)
+            .map_err(|e| format!("Failed to write temp chunk WAV: {}", e))?;
+
+        let args = vec![
+            "-m".to_string(),
+            model_path.to_str().unwrap().to_string(),
+            "-f".to_string(),
+            chunk_file.to_str().unwrap().to_string(),
+            "-t".to_string(),
+            threads.to_string(),
+            "-bs".to_string(),
+            "5".to_string(),
+            "-mc".to_string(),
+            "0".to_string(),
+            "-nf".to_string(),
+            "-l".to_string(),
+            "en".to_string(),
+        ];
+
+        let res = app
+            .shell()
+            .sidecar(sidecar_name)
+            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+            .env("PATH", new_path)
+            .args(args)
+            .output()
+            .await;
+
+        let _ = std::fs::remove_file(&chunk_file);
+
+        match res {
+            Ok(output) if output.status.success() => {
+                let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
+                if !text.is_empty() {
+                    parts.push((text, chunk.overlaps_previous));
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "{} failed with exit status: {:?}. Stderr: {}",
+                    sidecar_name, output.status, stderr
+                ));
+            }
+            Err(e) => {
+                return Err(format!("Failed to run {}: {}", sidecar_name, e));
+            }
         }
     }
+
+    Ok(crate::audio_chunker::merge_chunk_texts(&parts))
 }
 
 pub fn model_filename(model_size: &str) -> String {

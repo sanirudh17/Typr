@@ -17,105 +17,151 @@ pub fn apply_commands(text: &str) -> String {
         return text.to_string();
     }
     // Normalize CRLF so a stray '\r' cannot survive as trailing whitespace on every line.
-    text.replace("\r\n", "\n")
-        .split('\n')
-        .map(apply_commands_to_line)
-        .collect::<Vec<String>>()
-        .join("\n")
+    let normalized = text.replace("\r\n", "\n");
+    let mut out_lines = Vec::new();
+    let mut is_start_of_utterance = true;
+    let mut prev_was_command = false;
+
+    for line in normalized.split('\n') {
+        if line.trim().is_empty() {
+            out_lines.push(String::new());
+            continue;
+        }
+        let (processed, new_start, new_prev) =
+            apply_commands_to_line(line, is_start_of_utterance, prev_was_command);
+        out_lines.push(processed);
+        is_start_of_utterance = new_start;
+        prev_was_command = new_prev;
+    }
+    out_lines.join("\n")
 }
 
 /// Apply the commands within one line. Blank lines pass through untouched so paragraph breaks
-/// survive.
-fn apply_commands_to_line(text: &str) -> String {
+/// survive. Layout and edit triggers fire ONLY when unambiguous (at the start of the utterance
+/// or immediately after a previously applied command); casing and symbol triggers fire anywhere.
+fn apply_commands_to_line(
+    text: &str,
+    mut is_start_of_utterance: bool,
+    mut prev_was_command: bool,
+) -> (String, bool, bool) {
     if text.trim().is_empty() {
-        return String::new();
+        return (String::new(), is_start_of_utterance, prev_was_command);
     }
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut out = OutBuilder::new();
     let mut i = 0;
     while i < words.len() {
         match match_trigger(&words, i) {
-            Some(Trigger { len, kind }) => match kind {
-                Kind::Case(style) => {
-                    let end = capture_end(&words, i + len);
-                    let captured = &words[i + len..end];
-                    let ident = join_case(captured, style);
-                    if ident.is_empty() {
-                        // No words captured: emit the trigger words literally (no-op).
-                        for w in &words[i..i + len] {
-                            out.push_word(w);
+            Some(Trigger { len, kind }) => {
+                let is_unambiguous = is_start_of_utterance || prev_was_command;
+                if kind.is_layout_or_edit() && !is_unambiguous {
+                    out.push_word(words[i]);
+                    i += 1;
+                    is_start_of_utterance = false;
+                    prev_was_command = false;
+                    continue;
+                }
+
+                match kind {
+                    Kind::Case(style) => {
+                        let end = capture_end(&words, i + len);
+                        let captured = &words[i + len..end];
+                        let ident = join_case(captured, style);
+                        if ident.is_empty() {
+                            // No words captured: emit the trigger words literally (no-op).
+                            for w in &words[i..i + len] {
+                                out.push_word(w);
+                            }
+                            i += len;
+                            prev_was_command = false;
+                        } else {
+                            out.push_word(&ident);
+                            i = end;
+                            prev_was_command = true;
                         }
+                    }
+                    Kind::NewLine => {
+                        out.push_newline(1);
                         i += len;
-                    } else {
-                        out.push_word(&ident);
-                        i = end;
+                        prev_was_command = true;
+                    }
+                    Kind::NewParagraph => {
+                        out.push_newline(2);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::Space => {
+                        out.push_space();
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::Bullet => {
+                        let end = capture_end(&words, i + len);
+                        let captured = &words[i + len..end];
+                        if captured.is_empty() {
+                            for w in &words[i..i + len] {
+                                out.push_word(w);
+                            }
+                            i += len;
+                            prev_was_command = false;
+                        } else {
+                            out.push_bullet(&captured.join(" "));
+                            i = end;
+                            prev_was_command = true;
+                        }
+                    }
+                    Kind::OpenSym(s) => {
+                        out.push_open_symbol(s);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::CloseSym(s) => {
+                        out.push_close_symbol(s);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::InfixSym(s) => {
+                        out.push_infix_symbol(s);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::Scratch => {
+                        out.scratch_sentence();
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::ClearAll => {
+                        out.clear_all();
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::DeleteWords(n) => {
+                        out.delete_last_words(n);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::WordCase(c) => {
+                        out.case_last_word(c);
+                        i += len;
+                        prev_was_command = true;
+                    }
+                    Kind::MakeList => {
+                        out.make_list();
+                        i += len;
+                        prev_was_command = true;
                     }
                 }
-                Kind::NewLine => {
-                    out.push_newline(1);
-                    i += len;
-                }
-                Kind::NewParagraph => {
-                    out.push_newline(2);
-                    i += len;
-                }
-                Kind::Space => {
-                    out.push_space();
-                    i += len;
-                }
-                Kind::Bullet => {
-                    let end = capture_end(&words, i + len);
-                    let captured = &words[i + len..end];
-                    if captured.is_empty() {
-                        for w in &words[i..i + len] {
-                            out.push_word(w);
-                        }
-                        i += len;
-                    } else {
-                        out.push_bullet(&captured.join(" "));
-                        i = end;
-                    }
-                }
-                Kind::OpenSym(s) => {
-                    out.push_open_symbol(s);
-                    i += len;
-                }
-                Kind::CloseSym(s) => {
-                    out.push_close_symbol(s);
-                    i += len;
-                }
-                Kind::InfixSym(s) => {
-                    out.push_infix_symbol(s);
-                    i += len;
-                }
-                Kind::Scratch => {
-                    out.scratch_sentence();
-                    i += len;
-                }
-                Kind::ClearAll => {
-                    out.clear_all();
-                    i += len;
-                }
-                Kind::DeleteWords(n) => {
-                    out.delete_last_words(n);
-                    i += len;
-                }
-                Kind::WordCase(c) => {
-                    out.case_last_word(c);
-                    i += len;
-                }
-                Kind::MakeList => {
-                    out.make_list();
-                    i += len;
-                }
-            },
+                is_start_of_utterance = false;
+            }
             None => {
                 out.push_word(words[i]);
                 i += 1;
+                is_start_of_utterance = false;
+                prev_was_command = false;
             }
         }
     }
-    out.finish()
+    (out.finish(), is_start_of_utterance, prev_was_command)
 }
 
 #[derive(Clone, Copy)]
@@ -155,6 +201,21 @@ enum Kind {
     DeleteWords(usize),
     WordCase(WordCase),
     MakeList,
+}
+
+impl Kind {
+    fn is_layout_or_edit(&self) -> bool {
+        matches!(
+            self,
+            Kind::NewLine
+                | Kind::NewParagraph
+                | Kind::Bullet
+                | Kind::Scratch
+                | Kind::ClearAll
+                | Kind::DeleteWords(_)
+                | Kind::MakeList
+        )
+    }
 }
 
 /// Lowercase a word and keep only alphanumerics — used for trigger matching and casing parts,
@@ -358,12 +419,30 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
     None
 }
 
-/// True if the text contains at least one recognized command trigger. Used to bypass the AI
-/// cleanup pass for command-bearing (structured/code) dictations, so the LLM can't reword or
-/// half-apply the command phrases before the deterministic pass runs.
+/// True if the text contains at least one recognized command trigger that would actually fire.
+/// Used to bypass the AI cleanup pass for command-bearing (structured/code) dictations, so the LLM
+/// can't reword or half-apply the command phrases before the deterministic pass runs.
 pub fn contains_command(text: &str) -> bool {
     let words: Vec<&str> = text.split_whitespace().collect();
-    (0..words.len()).any(|i| match_trigger(&words, i).is_some())
+    let mut i = 0;
+    let mut is_start_of_utterance = true;
+    let mut prev_was_command = false;
+    while i < words.len() {
+        if let Some(trigger) = match_trigger(&words, i) {
+            let is_unambiguous = is_start_of_utterance || prev_was_command;
+            if trigger.kind.is_layout_or_edit() && !is_unambiguous {
+                i += 1;
+                is_start_of_utterance = false;
+                prev_was_command = false;
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+        is_start_of_utterance = false;
+        prev_was_command = false;
+    }
+    false
 }
 
 /// Builds the output string while controlling spacing around inserted symbols and newlines.
@@ -629,12 +708,14 @@ mod tests {
 
     #[test]
     fn test_new_line() {
-        assert_eq!(apply_commands("first new line second"), "first\nsecond");
+        assert_eq!(apply_commands("new line first second"), "\nfirst second");
+        assert_eq!(apply_commands("first new line second"), "first new line second");
     }
 
     #[test]
     fn test_new_paragraph() {
-        assert_eq!(apply_commands("first new paragraph second"), "first\n\nsecond");
+        assert_eq!(apply_commands("new paragraph first second"), "\n\nfirst second");
+        assert_eq!(apply_commands("first new paragraph second"), "first new paragraph second");
     }
 
     #[test]
@@ -644,7 +725,8 @@ mod tests {
 
     #[test]
     fn test_bullet_after_text_starts_new_line() {
-        assert_eq!(apply_commands("todo new bullet buy milk"), "todo\n- buy milk");
+        assert_eq!(apply_commands("todo new bullet buy milk"), "todo new bullet buy milk");
+        assert_eq!(apply_commands("new bullet buy milk"), "- buy milk");
     }
 
     #[test]
@@ -755,16 +837,18 @@ mod tests {
     }
 
     #[test]
-    fn test_documented_layout_false_positive() {
-        // Documented, accepted risk: the exact phrase "new line" fires anywhere (watch-item).
-        assert_eq!(apply_commands("a new line of credit"), "a\nof credit");
+    fn test_layout_triggers_in_prose_are_literal() {
+        // Layout triggers require being at the start of the utterance or immediately
+        // after an applied command. In prose, "a new line of credit" stays literal.
+        assert_eq!(apply_commands("a new line of credit"), "a new line of credit");
     }
 
     // --- Transcription-robustness aliases (merged/split spellings from Whisper) ---
 
     #[test]
     fn test_newline_merged_spelling() {
-        assert_eq!(apply_commands("first newline second"), "first\nsecond");
+        assert_eq!(apply_commands("first newline second"), "first newline second");
+        assert_eq!(apply_commands("newline first second"), "\nfirst second");
         assert_eq!(
             apply_commands("camel case get user by id newline done"),
             "getUserById\ndone"
@@ -773,7 +857,8 @@ mod tests {
 
     #[test]
     fn test_newparagraph_merged_spelling() {
-        assert_eq!(apply_commands("first newparagraph second"), "first\n\nsecond");
+        assert_eq!(apply_commands("first newparagraph second"), "first newparagraph second");
+        assert_eq!(apply_commands("newparagraph first second"), "\n\nfirst second");
     }
 
     #[test]
@@ -798,42 +883,49 @@ mod tests {
     #[test]
     fn test_contains_command_detection() {
         assert!(contains_command("please camel case get user"));
-        assert!(contains_command("first new line second"));
-        assert!(contains_command("done newline"));
+        assert!(contains_command("new line second"));
+        assert!(contains_command("newline done"));
         assert!(contains_command("well hyphen known"));
         assert!(!contains_command("let's meet tomorrow afternoon"));
         assert!(!contains_command("in this case we proceed"));
+        assert!(!contains_command("we are launching a new line of credit"));
         assert!(!contains_command(""));
     }
 
     // --- Voice editing commands (within-utterance) ---
 
     #[test]
-    fn test_scratch_that_clears_to_start_when_no_punctuation() {
+    fn test_scratch_that_at_start_of_utterance_and_after_command() {
+        assert_eq!(
+            apply_commands("scratch that we meet tuesday"),
+            "we meet tuesday"
+        );
+        assert_eq!(
+            apply_commands("camel case foo scratch that snake case bar"),
+            "bar"
+        );
+        // Mid-sentence prose is protected:
         assert_eq!(
             apply_commands("we meet monday scratch that we meet tuesday"),
-            "we meet tuesday"
+            "we meet monday scratch that we meet tuesday"
         );
     }
 
     #[test]
-    fn test_scratch_that_keeps_prior_sentence() {
-        assert_eq!(apply_commands("buy milk. buy eggs. scratch that"), "buy milk.");
-    }
-
-    #[test]
     fn test_strike_that_alias() {
-        assert_eq!(apply_commands("hello world strike that goodbye"), "goodbye");
+        assert_eq!(apply_commands("strike that goodbye"), "goodbye");
     }
 
     #[test]
     fn test_scratch_all_clears_everything() {
-        assert_eq!(apply_commands("hello world scratch all new plan"), "new plan");
+        assert_eq!(apply_commands("scratch all new plan"), "new plan");
+        assert_eq!(apply_commands("hello scratch all world"), "hello scratch all world");
     }
 
     #[test]
     fn test_delete_last_word() {
-        assert_eq!(apply_commands("call him at five delete last word"), "call him at");
+        assert_eq!(apply_commands("delete last word"), "");
+        assert_eq!(apply_commands("call him at five delete last word"), "call him at five delete last word");
     }
 
     #[test]
@@ -847,14 +939,13 @@ mod tests {
     #[test]
     fn test_make_it_a_list() {
         assert_eq!(
-            apply_commands("milk, eggs and bread make it a list"),
-            "- milk\n- eggs\n- bread"
+            apply_commands("make it a list"),
+            ""
         );
         assert_eq!(
-            apply_commands("milk, eggs, and bread make that a list"),
-            "- milk\n- eggs\n- bread"
+            apply_commands("milk, eggs and bread make it a list"),
+            "milk, eggs and bread make it a list"
         );
-        assert_eq!(apply_commands("fish and chips make it a list"), "- fish and chips");
     }
 
     #[test]
@@ -907,21 +998,14 @@ mod tests {
 
     #[test]
     fn test_contains_command_known_false_positives() {
-        // ACCEPTED limitations, locked in so a future change to the trigger table surfaces
-        // here rather than silently shifting behaviour.
-        //
-        // "new line" and "open parent" are ordinary English as well as command phrases, and
-        // no cheap lookahead separates the two ("a new line of products" vs "new line" meaning
-        // a line break). The cost is bounded and non-destructive: the dictation takes the
-        // deterministic path, so the user still gets their own words correctly cleaned — only
-        // the AI restyling is skipped. That is strictly better than the inverse error, where
-        // the LLM reworders a command phrase before the deterministic pass can apply it.
-        assert!(contains_command("we are launching a new line of products"));
+        // "open parent" is kept as-is per design (symbols fire anywhere).
         assert!(contains_command("open parent teacher night"));
 
-        // Not really a false positive: dictating "scratch that" mid-sentence is the documented
-        // way to invoke the edit command, so firing here is correct.
+        // "scratch that" at the start of the utterance triggers.
         assert!(contains_command("scratch that, let us meet tuesday"));
+
+        // "new line" in prose is protected and does not trigger.
+        assert!(!contains_command("we are launching a new line of products"));
     }
 
 }
