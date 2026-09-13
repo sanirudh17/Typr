@@ -92,55 +92,38 @@ impl Recorder {
         nemotron_model_dir: Option<&std::path::Path>,
         input_gain_db: f32,
     ) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-        if *state != RecordingState::Ready {
-            return Err("Already recording or transcribing".to_string());
+        // 1. Transition state to Recording while holding the state lock briefly
+        {
+            let mut state = self.state.lock().unwrap();
+            if *state != RecordingState::Ready {
+                return Err("Already recording or transcribing".to_string());
+            }
+
+            // Eagerly update the UI to eliminate perceived delay
+            *state = RecordingState::Recording;
+            // Bind the override to this session while we hold the state lock, so it is set
+            // exactly once per recording and paired with the matching stop.
+            *self.session_override.lock().unwrap() = session_override;
+            // Snapshot the focused window at the moment of hotkey trigger
+            let init_fg = crate::context_detector::ForegroundApp::detect();
+            let init_class = crate::context_detector::focused_child_class();
+            *self.session_context.lock().unwrap() = Some((init_fg, init_class));
+            let _ = app.emit("recording-state", RecordingState::Recording);
+            update_overlay(app, &RecordingState::Recording, true);
         }
 
-        // Eagerly update the UI to eliminate perceived delay
-        *state = RecordingState::Recording;
-        // Bind the override to this session while we hold the state lock, so it is set
-        // exactly once per recording and paired with the matching stop.
-        *self.session_override.lock().unwrap() = session_override;
-        // Snapshot the focused window at the moment of hotkey trigger
-        let init_fg = crate::context_detector::ForegroundApp::detect();
-        let init_class = crate::context_detector::focused_child_class();
-        *self.session_context.lock().unwrap() = Some((init_fg, init_class));
-        let _ = app.emit("recording-state", RecordingState::Recording);
-        update_overlay(app, &RecordingState::Recording, true);
+        // 2. Start audio stream holding the audio recorder lock briefly
+        let start_res = {
+            let mut recorder = self.audio_recorder.lock().unwrap();
+            recorder.start(mic_name)
+        };
 
-        // Now start the audio recording
-        let mut recorder = self.audio_recorder.lock().unwrap();
-        match recorder.start(mic_name) {
-            Ok(info) => {
-                if info.fell_back || info.changed {
-                    let _ = app.emit("mic-changed", serde_json::json!({
-                        "device": info.active_device,
-                        "fellBack": info.fell_back,
-                    }));
-                }
-
-                // If engine is Nemotron, initiate live streaming ingestion on the active mic stream
-                if engine == "nemotron" {
-                    if let Some(model_dir) = nemotron_model_dir {
-                        match crate::transcribe_nemotron::start_live_session(model_dir, self.audio_recorder.clone(), input_gain_db) {
-                            Ok(session) => {
-                                *self.nemotron_session.lock().unwrap() = Some(session);
-                                println!("[Typr] Started Nemotron live streaming session");
-                            }
-                            Err(e) => {
-                                eprintln!("[Typr] Could not start Nemotron live streaming session: {}", e);
-                                *self.nemotron_session.lock().unwrap() = None;
-                            }
-                        }
-                    }
-                } else {
-                    *self.nemotron_session.lock().unwrap() = None;
-                }
-            }
+        let info = match start_res {
+            Ok(info) => info,
             Err(e) => {
                 // Revert state if starting failed, and drop the override so a session that
                 // never actually recorded can't apply its profile to a later dictation.
+                let mut state = self.state.lock().unwrap();
                 *state = RecordingState::Ready;
                 *self.session_override.lock().unwrap() = None;
                 *self.session_context.lock().unwrap() = None;
@@ -149,6 +132,31 @@ impl Recorder {
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
             }
+        };
+
+        if info.fell_back || info.changed {
+            let _ = app.emit("mic-changed", serde_json::json!({
+                "device": info.active_device,
+                "fellBack": info.fell_back,
+            }));
+        }
+
+        // 3. If engine is Nemotron, initiate live streaming ingestion with NO state or recorder locks held
+        if engine == "nemotron" {
+            if let Some(model_dir) = nemotron_model_dir {
+                match crate::transcribe_nemotron::start_live_session(model_dir, self.audio_recorder.clone(), input_gain_db) {
+                    Ok(session) => {
+                        *self.nemotron_session.lock().unwrap() = Some(session);
+                        println!("[Typr] Started Nemotron live streaming session");
+                    }
+                    Err(e) => {
+                        eprintln!("[Typr] Could not start Nemotron live streaming session: {}", e);
+                        *self.nemotron_session.lock().unwrap() = None;
+                    }
+                }
+            }
+        } else {
+            *self.nemotron_session.lock().unwrap() = None;
         }
 
         Ok(())
@@ -204,6 +212,7 @@ impl Recorder {
             Err(e) => {
                 let mut state = self.state.lock().unwrap();
                 *state = RecordingState::Ready;
+                *self.nemotron_session.lock().unwrap() = None;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
