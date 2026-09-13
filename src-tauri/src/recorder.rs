@@ -385,7 +385,7 @@ impl Recorder {
                             settings.ai_profile,
                         ),
                     );
-                    Some(clean)
+                    guard_ai_output(clean, &replaced, &settings.ai_profile, app_dir)
                 }
                 Ok(Err(e)) => {
                     crate::debug_log::log(app_dir, &format!("AI skipped (error): {}", e));
@@ -496,6 +496,87 @@ fn choose_final(llm: Option<String>, fallback: String) -> String {
     match llm {
         Some(s) if !s.trim().is_empty() => s,
         _ => fallback,
+    }
+}
+
+/// Tokenize a text into lowercase alphanumeric words for multiset comparison.
+pub fn tokenize_words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Compute case-insensitive token multiset overlap (Jaccard similarity on words)
+/// and fractional length deviation (|len_ai - len_pre| / len_pre).
+pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
+    let pre_tokens = tokenize_words(pre_text);
+    let ai_tokens = tokenize_words(ai_text);
+
+    if pre_tokens.is_empty() && ai_tokens.is_empty() {
+        return (1.0, 0.0, false);
+    }
+    if pre_tokens.is_empty() || ai_tokens.is_empty() {
+        return (0.0, 1.0, true);
+    }
+
+    let mut pre_counts = std::collections::HashMap::new();
+    for token in &pre_tokens {
+        *pre_counts.entry(token.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut ai_counts = std::collections::HashMap::new();
+    for token in &ai_tokens {
+        *ai_counts.entry(token.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut all_keys: std::collections::HashSet<_> = pre_counts.keys().collect();
+    all_keys.extend(ai_counts.keys());
+
+    let mut intersection_count = 0usize;
+    let mut union_count = 0usize;
+
+    for key in all_keys {
+        let c1 = pre_counts.get(key).copied().unwrap_or(0);
+        let c2 = ai_counts.get(key).copied().unwrap_or(0);
+        intersection_count += c1.min(c2);
+        union_count += c1.max(c2);
+    }
+
+    let overlap = if union_count == 0 {
+        1.0
+    } else {
+        intersection_count as f32 / union_count as f32
+    };
+
+    let pre_len = pre_tokens.len() as f32;
+    let ai_len = ai_tokens.len() as f32;
+    let len_delta = (ai_len - pre_len).abs() / pre_len;
+
+    let diverged = overlap < 0.60 || len_delta > 0.40;
+    (overlap, len_delta, diverged)
+}
+
+/// Guard against AI hallucination or text expansion by checking divergence against
+/// the pre-AI transcript. Returns Some(clean) if valid, or None if diverged (triggering
+/// deterministic fallback in choose_final). Prompt mode is exempt.
+pub fn guard_ai_output(clean: String, pre_text: &str, ai_profile: &str, app_dir: &std::path::Path) -> Option<String> {
+    if ai_profile == "prompt" {
+        return Some(clean);
+    }
+    let (overlap, len_delta, diverged) = check_ai_divergence(pre_text, &clean);
+    if diverged {
+        crate::debug_log::log(
+            app_dir,
+            &format!(
+                "AI output diverged from transcript (overlap={:.2}, lenΔ={:.2}) -> deterministic fallback",
+                overlap, len_delta
+            ),
+        );
+        None
+    } else {
+        Some(clean)
     }
 }
 
@@ -624,5 +705,71 @@ mod tests {
     #[test]
     fn test_choose_final_falls_back_on_none() {
         assert_eq!(choose_final(None, "fallback".to_string()), "fallback");
+    }
+
+    #[test]
+    fn test_ai_divergence_identical_text() {
+        let pre = "Let me know whether there are some changes that you would like to make.";
+        let ai = "Let me know whether there are some changes that you would like to make.";
+        let (overlap, len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert_eq!(overlap, 1.0);
+        assert_eq!(len_delta, 0.0);
+        assert!(!diverged);
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, Some(ai.to_string()));
+    }
+
+    #[test]
+    fn test_ai_divergence_minor_cleanup() {
+        let pre = "um let me know whether there are some changes that you would like to make";
+        let ai = "Let me know whether there are some changes that you would like to make.";
+        let (overlap, len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(overlap > 0.85, "overlap was {}", overlap);
+        assert!(len_delta <= 0.40, "len_delta was {}", len_delta);
+        assert!(!diverged);
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, Some(ai.to_string()));
+    }
+
+    #[test]
+    fn test_ai_divergence_total_hallucination() {
+        let pre = "let me know if there are changes";
+        let ai = "Today we will discuss the implications of quantum computing on distributed ledger systems across modern enterprise software architectures.";
+        let (overlap, _len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(overlap < 0.30, "overlap was {}", overlap);
+        assert!(diverged);
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, None);
+    }
+
+    #[test]
+    fn test_ai_divergence_length_blowout() {
+        let pre = "one two three four five six seven eight nine ten";
+        let ai = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five";
+        let (_overlap, len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(len_delta > 0.40, "len_delta was {}", len_delta);
+        assert!(diverged);
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, None);
+    }
+
+    #[test]
+    fn test_ai_divergence_prompt_mode_exempt() {
+        let pre = "summarize the following email into three bullet points";
+        let ai = "- Point one\n- Point two\n- Point three";
+        let (overlap, _len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(diverged || overlap < 0.60);
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "prompt", &temp_dir);
+        assert_eq!(guarded, Some(ai.to_string()));
     }
 }

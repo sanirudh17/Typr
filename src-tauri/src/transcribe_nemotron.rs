@@ -264,57 +264,69 @@ pub async fn transcribe_nemotron(
         let recognizer = &guard.as_ref().expect("just built").1;
 
         let token_map = load_token_map(&model_dir);
-        let chunks = audio_chunker::split_into_chunks(&samples, sample_rate);
+        let stream = recognizer.create_stream();
+
+        // Condition 3.5 multilingual on English prompt (prompt index 0 = en-US).
+        // The English-only v3 model needs no prompt.
+        let is_v3_5 = model_dir.to_string_lossy().contains("3.5")
+            || !model_dir.to_string_lossy().contains("speech-streaming-en");
+        if is_v3_5 {
+            stream.set_option("language", "en");
+        }
+
         println!(
-            "[Typr] Nemotron transcribing {:.1}s in {} chunk(s), model {}",
+            "[Typr] Nemotron transcribing {:.1}s in streaming mode, model {}",
             samples.len() as f32 / sample_rate as f32,
-            chunks.len(),
             model_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
         );
         let started = std::time::Instant::now();
-        let mut parts: Vec<(String, bool)> = Vec::new();
-        for (chunk_idx, chunk) in chunks.iter().enumerate() {
-            let stream = recognizer.create_stream();
-            stream.accept_waveform(sample_rate as i32, chunk.samples);
-            stream.input_finished();
+
+        // Feed samples in 1120ms chunks (17920 samples @ 16kHz) to preserve streaming cache
+        // state chunk-by-chunk through FastConformer encoder and RNNT decoder.
+        let chunk_size = 17920;
+        let mut chunk_idx = 0;
+        for chunk in samples.chunks(chunk_size) {
+            chunk_idx += 1;
+            stream.accept_waveform(sample_rate as i32, chunk);
             while recognizer.is_ready(&stream) {
                 recognizer.decode(&stream);
             }
-            let Some(result) = recognizer.get_result(&stream) else { continue };
-
-            let token_ids: Vec<i64> = result
-                .tokens
-                .iter()
-                .map(|t| token_map.get(t).copied().unwrap_or(-1))
-                .collect();
-            let text = result.text.trim().to_string();
-
-            crate::debug_log::log(
-                app_dir,
-                &format!(
-                    "[NEMOTRON DIAG] Chunk {}/{} ({} samples, overlaps_prev={}): token_ids={:?} tokens={:?} text={:?}",
-                    chunk_idx + 1,
-                    chunks.len(),
-                    chunk.samples.len(),
-                    chunk.overlaps_previous,
-                    token_ids,
-                    result.tokens,
-                    text
-                ),
-            );
-
-            if !text.is_empty() {
-                parts.push((text, chunk.overlaps_previous));
-            }
         }
 
-        let merged = audio_chunker::merge_chunk_texts(&parts);
+        // Flush tail tokens with zero-padded final frames
+        stream.input_finished();
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+
+        let result = recognizer.get_result(&stream);
+        let (raw_tokens, final_text) = if let Some(ref r) = result {
+            (r.tokens.clone(), r.text.trim().to_string())
+        } else {
+            (Vec::new(), String::new())
+        };
+
+        let token_ids: Vec<i64> = raw_tokens
+            .iter()
+            .map(|t| token_map.get(t).copied().unwrap_or(-1))
+            .collect();
+
         crate::debug_log::log(
             app_dir,
-            &format!("[NEMOTRON DIAG] Final joined text: {:?}", merged),
+            &format!(
+                "[NEMOTRON DIAG] Streaming complete in {} chunks: token_ids={:?} tokens={:?} text={:?}",
+                chunk_idx,
+                token_ids,
+                raw_tokens,
+                final_text
+            ),
+        );
+        crate::debug_log::log(
+            app_dir,
+            &format!("[NEMOTRON DIAG] Final joined text: {:?}", final_text),
         );
         println!("[Typr] Nemotron completed in {:?}", started.elapsed());
-        Ok(merged)
+        Ok(final_text)
     })
     .await
     .map_err(|e| format!("Nemotron task panicked: {}", e))?
@@ -365,5 +377,95 @@ mod tests {
         ];
         let merged = audio_chunker::merge_chunk_texts(&parts);
         assert_eq!(merged, "Hello world item one and item two and item three");
+    }
+
+    #[test]
+    fn test_nemotron_mel_stats_diff() {
+        let clip_path = Path::new("../scripts/test_clips/clip1_5s.wav");
+        if !clip_path.exists() {
+            return;
+        }
+        let mut reader = hound::WavReader::open(clip_path).unwrap();
+        let samples: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+        let (min, max, mean) = compute_mel_stats(&samples, 16000);
+        println!("Rust computed mel stats: min={}, max={}, mean={}", min, max, mean);
+        // Compare with Python reference: min=-23.0259, max=6.4420, mean=-9.0704
+        assert!((min - (-23.0259)).abs() < 1e-3, "min diff too large: {}", min);
+        assert!((max - 6.4420).abs() < 1e-3, "max diff too large: {}", max);
+        assert!((mean - (-9.0704)).abs() < 1e-3, "mean diff too large: {}", mean);
+    }
+
+    fn word_accuracy(hyp: &str, ref_text: &str) -> f32 {
+        let clean = |s: &str| -> Vec<String> {
+            s.to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric() && !c.is_whitespace(), "")
+                .split_whitespace()
+                .map(|w| w.to_string())
+                .collect()
+        };
+        let hyp_words = clean(hyp);
+        let ref_words = clean(ref_text);
+        if ref_words.is_empty() {
+            return if hyp_words.is_empty() { 1.0 } else { 0.0 };
+        }
+        let m = ref_words.len();
+        let n = hyp_words.len();
+        let mut dp = vec![vec![0usize; n + 1]; m + 1];
+        for i in 0..=m { dp[i][0] = i; }
+        for j in 0..=n { dp[0][j] = j; }
+        for i in 1..=m {
+            for j in 1..=n {
+                let cost = if ref_words[i - 1] == hyp_words[j - 1] { 0 } else { 1 };
+                dp[i][j] = (dp[i - 1][j] + 1)
+                    .min(dp[i][j - 1] + 1)
+                    .min(dp[i - 1][j - 1] + cost);
+            }
+        }
+        let dist = dp[m][n];
+        let wer = dist as f32 / m as f32;
+        (1.0 - wer).max(0.0)
+    }
+
+    #[tokio::test]
+    async fn test_nemotron_golden_accuracy_3_clips() {
+        let model_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("com.typr.app")
+            .join("nemotron-3.5-asr-streaming-0.6b-int8");
+        if !model_files_present(&model_dir) {
+            eprintln!("Nemotron model not downloaded in test env; skipping golden accuracy test");
+            return;
+        }
+
+        let clips = [
+            (
+                "../scripts/test_clips/clip1_5s.wav",
+                "Let me know whether there are some changes that you would like to make."
+            ),
+            (
+                "../scripts/test_clips/clip2_30s.wav",
+                "We are conducting a comprehensive evaluation of the speech recognition engine to determine transcription accuracy across different speech models and acoustic conditions. The quick brown fox jumps over the lazy dog. Please confirm that all parameters are functioning properly and that no words are being dropped at chunk seams. Local inference requires consistent acoustic processing, zero padded frames, and robust decoding algorithms."
+            ),
+            (
+                "../scripts/test_clips/clip3_75s.wav",
+                "First item check the audio pipeline and ensure sixteen kHz sample rate with mono float values. Second item verify that the encoder cache states are properly preserved and carried between consecutive chunks. Third item make sure language ID prompt tokens are properly provided for all multilingual speech models. Fourth item check the input dynamic range and avoid overly aggressive soft knee limiting or audio clipping. Fifth item ensure windowing and fast Fourier transform parameters match the model preprocessor configuration exactly. Sixth item verify that the token vocabulary correctly handles subwords, word pieces, and special language tags. Seventh item validate that the hallucination guard rejects diverged outputs and restores deterministic transcripts. Eighth item test long audio recordings to ensure that tail truncation never silently drops the final clauses. Ninth item review the accuracy and word error rate across all local and cloud speech engines before deployment. Tenth item confirm that streaming inference maintains low latency and stable memory usage throughout the dictation. Let me know whether there are some changes that you would like to make."
+            ),
+        ];
+
+        for (path_str, expected_ref) in clips {
+            let wav_path = PathBuf::from(path_str);
+            if !wav_path.exists() {
+                continue;
+            }
+            let res = transcribe_nemotron(&model_dir, &wav_path).await;
+            assert!(res.is_ok(), "Transcription failed: {:?}", res);
+            let hyp = res.unwrap();
+            let acc = word_accuracy(&hyp, expected_ref);
+            println!("Clip: {} -> Word Accuracy: {:.1}% | Transcript: {}", path_str, acc * 100.0, hyp);
+            assert!(acc >= 0.95, "Accuracy {:.2} below 95% threshold for {}", acc, path_str);
+        }
     }
 }
