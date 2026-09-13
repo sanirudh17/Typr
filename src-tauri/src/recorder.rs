@@ -167,7 +167,7 @@ impl Recorder {
         let save_started_at = Instant::now();
         let save_result = {
             let mut recorder = self.audio_recorder.lock().unwrap();
-            recorder.stop_and_save(&temp_path)
+            recorder.stop_and_save(&temp_path, settings.input_gain_db, Some(app))
         };
         
         let duration_secs = match save_result {

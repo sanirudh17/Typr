@@ -4,6 +4,10 @@ use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use tauri::{AppHandle, Emitter};
+
+static CLIPPING_TOAST_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static QUIET_TOAST_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MicDevice {
@@ -390,7 +394,12 @@ impl AudioRecorder {
         Ok(info)
     }
 
-    pub fn stop_and_save(&mut self, output_path: &PathBuf) -> Result<(PathBuf, f32), String> {
+    pub fn stop_and_save(
+        &mut self,
+        output_path: &PathBuf,
+        input_gain_db: f32,
+        app: Option<&AppHandle>,
+    ) -> Result<(PathBuf, f32), String> {
         // Pause the stream (mic off between records); the device stays activated so the
         // next start() is a fast play with no dropped audio.
         if let Some(ref s) = self.stream {
@@ -426,8 +435,28 @@ impl AudioRecorder {
         };
 
         let mut resampled = resample(&mono, self.source_sample_rate, 16000);
-        normalize_peak(&mut resampled, NORM_TARGET_PEAK, NORM_MAX_GAIN);
-        println!("[Typr] Resampled to {} samples at 16kHz", resampled.len());
+        let diagnostics = process_speech_audio_chain(&mut resampled, 16000, input_gain_db);
+        println!(
+            "[Typr] Audio preprocessed: resampled to {} samples @ 16kHz, pre-p95: {:.4}, post-p95: {:.4}, clips: {}",
+            resampled.len(), diagnostics.p95_rms, diagnostics.post_rms, diagnostics.clip_count
+        );
+
+        if diagnostics.clipping_detected && !CLIPPING_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "show-toast",
+                    "Microphone audio is clipping — try lowering the Input Gain or speaking further from the mic.",
+                );
+            }
+        }
+        if diagnostics.is_quiet && !QUIET_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "show-toast",
+                    "Microphone audio is very quiet — try increasing the Input Gain or speaking closer to the mic.",
+                );
+            }
+        }
 
         let spec = WavSpec {
             channels: 1,
@@ -450,6 +479,179 @@ impl AudioRecorder {
         Ok((output_path.clone(), duration_secs))
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreprocessDiagnostics {
+    pub clipping_detected: bool,
+    pub clip_count: usize,
+    pub p95_rms: f32,
+    pub post_rms: f32,
+    pub is_quiet: bool,
+}
+
+pub fn apply_gain_db(samples: &mut [f32], gain_db: f32) {
+    if gain_db.abs() < 1e-4 || samples.is_empty() {
+        return;
+    }
+    let factor = 10.0f32.powf(gain_db / 20.0);
+    for s in samples.iter_mut() {
+        *s *= factor;
+    }
+}
+
+pub fn remove_dc_offset(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let mean = samples.iter().map(|&x| x as f64).sum::<f64>() / samples.len() as f64;
+    for s in samples.iter_mut() {
+        *s = (*s as f64 - mean) as f32;
+    }
+}
+
+pub fn highpass_50hz(samples: &mut [f32], sample_rate: u32) {
+    if samples.is_empty() || sample_rate < 100 {
+        return;
+    }
+    let fc = 50.0f64;
+    let fs = sample_rate as f64;
+    if fc >= fs / 2.0 {
+        return;
+    }
+    let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+    let cos_w0 = w0.cos();
+    let sin_w0 = w0.sin();
+    let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
+
+    let b0 = (1.0 + cos_w0) / 2.0;
+    let b1 = -(1.0 + cos_w0);
+    let b2 = (1.0 + cos_w0) / 2.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_w0;
+    let a2 = 1.0 - alpha;
+
+    let b0 = (b0 / a0) as f32;
+    let b1 = (b1 / a0) as f32;
+    let b2 = (b2 / a0) as f32;
+    let a1 = (a1 / a0) as f32;
+    let a2 = (a2 / a0) as f32;
+
+    let mut s1 = 0.0f32;
+    let mut s2 = 0.0f32;
+    for s in samples.iter_mut() {
+        let x = *s;
+        let y = b0 * x + s1;
+        s1 = b1 * x - a1 * y + s2;
+        s2 = b2 * x - a2 * y;
+        *s = y;
+    }
+}
+
+pub fn measure_p95_frame_rms(samples: &[f32], sample_rate: u32) -> f32 {
+    if samples.is_empty() || sample_rate == 0 {
+        return 0.0;
+    }
+    let frame_size = ((sample_rate as f32) * 0.020).round() as usize;
+    if frame_size == 0 {
+        return 0.0;
+    }
+    if samples.len() < frame_size {
+        let sum_sq: f64 = samples.iter().map(|&x| (x as f64) * (x as f64)).sum();
+        return (sum_sq / samples.len() as f64).sqrt() as f32;
+    }
+
+    let mut rms_values = Vec::with_capacity(samples.len() / frame_size);
+    for chunk in samples.chunks(frame_size) {
+        if chunk.len() >= frame_size / 2 {
+            let sum_sq: f64 = chunk.iter().map(|&x| (x as f64) * (x as f64)).sum();
+            let rms = (sum_sq / chunk.len() as f64).sqrt() as f32;
+            rms_values.push(rms);
+        }
+    }
+    if rms_values.is_empty() {
+        return 0.0;
+    }
+    rms_values.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((rms_values.len() - 1) as f32 * 0.95).round() as usize;
+    rms_values[idx.min(rms_values.len() - 1)]
+}
+
+pub fn normalize_target_rms(samples: &mut [f32], sample_rate: u32, target_rms: f32, max_gain: f32) -> f32 {
+    let p95 = measure_p95_frame_rms(samples, sample_rate);
+    if p95 < 1e-5 {
+        return p95;
+    }
+    let gain = (target_rms / p95).min(max_gain);
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+    p95
+}
+
+pub fn apply_tanh_limiter(samples: &mut [f32], threshold: f32, ceiling: f32) {
+    if threshold <= 0.0 || ceiling <= threshold {
+        return;
+    }
+    let range = ceiling - threshold;
+    for s in samples.iter_mut() {
+        let abs_val = s.abs();
+        if abs_val > threshold {
+            let sign = if *s >= 0.0 { 1.0 } else { -1.0 };
+            let saturated = threshold + range * ((abs_val - threshold) / range).tanh();
+            *s = sign * saturated;
+        }
+    }
+}
+
+pub fn process_speech_audio_chain(
+    samples: &mut [f32],
+    sample_rate: u32,
+    input_gain_db: f32,
+) -> PreprocessDiagnostics {
+    if samples.is_empty() {
+        return PreprocessDiagnostics {
+            clipping_detected: false,
+            clip_count: 0,
+            p95_rms: 0.0,
+            post_rms: 0.0,
+            is_quiet: false,
+        };
+    }
+
+    // 1. User input gain adjustment
+    apply_gain_db(samples, input_gain_db);
+
+    // 2. Clipping detection
+    let clip_count = samples.iter().filter(|&&s| s.abs() >= 0.999).count();
+    let clipping_detected = clip_count > 0;
+
+    // 3. DC offset removal
+    remove_dc_offset(samples);
+
+    // 4. 50 Hz high-pass filter
+    highpass_50hz(samples, sample_rate);
+
+    // 5. p95 frame RMS target normalization (target 0.08, max gain 20x)
+    const TARGET_RMS: f32 = 0.08;
+    const MAX_GAIN: f32 = 20.0;
+    let p95_rms = normalize_target_rms(samples, sample_rate, TARGET_RMS, MAX_GAIN);
+
+    // 6. Soft-knee tanh limiter capping at 0.95
+    apply_tanh_limiter(samples, 0.75, 0.95);
+
+    // 7. Post-normalization RMS and quiet check
+    let post_rms = measure_p95_frame_rms(samples, sample_rate);
+    let is_quiet = p95_rms < 0.010;
+
+    PreprocessDiagnostics {
+        clipping_detected,
+        clip_count,
+        p95_rms,
+        post_rms,
+        is_quiet,
+    }
+}
+
 
 const NORM_TARGET_PEAK: f32 = 0.95;
 const NORM_MAX_GAIN: f32 = 15.0;
@@ -724,4 +926,117 @@ mod tests {
         normalize_peak(&mut empty, 0.95, 15.0); // must not panic
         assert!(empty.is_empty());
     }
+
+    #[test]
+    fn test_apply_gain_db() {
+        let mut s = vec![0.1f32, -0.2, 0.5];
+        apply_gain_db(&mut s, 0.0);
+        assert_eq!(s, vec![0.1f32, -0.2, 0.5]);
+
+        apply_gain_db(&mut s, 6.0205999);
+        assert!((s[0] - 0.2).abs() < 1e-4);
+        assert!((s[1] - (-0.4)).abs() < 1e-4);
+        assert!((s[2] - 1.0).abs() < 1e-4);
+
+        apply_gain_db(&mut s, -6.0205999);
+        assert!((s[0] - 0.1).abs() < 1e-4);
+        assert!((s[1] - (-0.2)).abs() < 1e-4);
+        assert!((s[2] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_remove_dc_offset() {
+        let mut s = vec![1.2f32, 1.4, 0.8, 1.0];
+        remove_dc_offset(&mut s);
+        let mean: f32 = s.iter().sum::<f32>() / s.len() as f32;
+        assert!(mean.abs() < 1e-6);
+        assert!((s[0] - 0.1).abs() < 1e-6);
+        assert!((s[2] - (-0.3)).abs() < 1e-6);
+
+        let mut empty: Vec<f32> = vec![];
+        remove_dc_offset(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_highpass_50hz() {
+        let mut hi = tone(1000.0, 16000, 0.5);
+        highpass_50hz(&mut hi, 16000);
+        let hi_rms = rms(&hi[320..]);
+        assert!(hi_rms > 0.65, "1000 Hz tone should pass, rms was {}", hi_rms);
+
+        let mut lo = tone(10.0, 16000, 0.5);
+        highpass_50hz(&mut lo, 16000);
+        let lo_rms = rms(&lo[320..]);
+        assert!(lo_rms < 0.15, "10 Hz sub-bass tone should be attenuated, rms was {}", lo_rms);
+
+        let mut dc = vec![0.8f32; 3200];
+        highpass_50hz(&mut dc, 16000);
+        let end_rms = rms(&dc[2000..]);
+        assert!(end_rms < 0.05, "DC should be filtered out, tail rms was {}", end_rms);
+    }
+
+    #[test]
+    fn test_measure_p95_frame_rms() {
+        let frame_len = 320;
+        let mut samples = vec![0.0f32; 90 * frame_len];
+        samples.extend(vec![0.2f32; 10 * frame_len]);
+
+        let p95 = measure_p95_frame_rms(&samples, 16000);
+        assert!((p95 - 0.2).abs() < 0.01, "p95 was {}", p95);
+    }
+
+    #[test]
+    fn test_normalize_target_rms() {
+        let frame_len = 320;
+        let mut samples = vec![0.02f32; 100 * frame_len];
+        let pre_p95 = normalize_target_rms(&mut samples, 16000, 0.08, 20.0);
+        assert!((pre_p95 - 0.02).abs() < 1e-4);
+        let post_p95 = measure_p95_frame_rms(&samples, 16000);
+        assert!((post_p95 - 0.08).abs() < 1e-3, "post_p95 was {}", post_p95);
+
+        let mut very_quiet = vec![0.001f32; 100 * frame_len];
+        normalize_target_rms(&mut very_quiet, 16000, 0.08, 20.0);
+        let post_quiet_p95 = measure_p95_frame_rms(&very_quiet, 16000);
+        assert!((post_quiet_p95 - 0.02).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_apply_tanh_limiter() {
+        let mut s = vec![0.5f32, -0.75, 0.85, 1.5, 10.0, -10.0];
+        apply_tanh_limiter(&mut s, 0.75, 0.95);
+
+        assert_eq!(s[0], 0.5);
+        assert_eq!(s[1], -0.75);
+
+        assert!(s[2] > 0.75 && s[2] < 0.85);
+        assert!(s[3] > 0.90 && s[3] < 0.95);
+        assert!(s[4] <= 0.95 && s[4] > 0.94);
+        assert!(s[5] >= -0.95 && s[5] < -0.94);
+    }
+
+    #[test]
+    fn test_process_speech_audio_chain() {
+        let mut samples = tone(400.0, 16000, 2.0);
+        samples[100] = 1.05;
+
+        let diag = process_speech_audio_chain(&mut samples, 16000, 0.0);
+        assert!(diag.clipping_detected);
+        assert!(diag.clip_count >= 1);
+        assert!(diag.post_rms > 0.05 && diag.post_rms <= 0.10);
+        assert!(!diag.is_quiet);
+
+        for &x in &samples {
+            assert!(x.abs() <= 0.9501, "sample {} exceeded ceiling 0.95", x);
+        }
+
+        let mut quiet_samples = tone(400.0, 16000, 1.0);
+        for s in quiet_samples.iter_mut() {
+            *s *= 0.005;
+        }
+        let quiet_diag = process_speech_audio_chain(&mut quiet_samples, 16000, 0.0);
+        assert!(quiet_diag.is_quiet);
+        assert!(!quiet_diag.clipping_detected);
+    }
 }
+

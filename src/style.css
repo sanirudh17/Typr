@@ -794,7 +794,74 @@ input[type="password"]::placeholder {
   color: var(--text-tertiary);
 }
 
+/* ── Input Gain Slider ──────────────────────────────── */
+
+.input-gain-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 280px;
+  width: 100%;
+}
+
+#input-gain-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--surface-active);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+#input-gain-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 120ms ease, background var(--transition);
+}
+
+#input-gain-slider::-webkit-slider-thumb:hover {
+  background: var(--accent-hover);
+  transform: scale(1.15);
+}
+
+#input-gain-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 120ms ease, background var(--transition);
+}
+
+#input-gain-slider::-moz-range-thumb:hover {
+  background: var(--accent-hover);
+  transform: scale(1.15);
+}
+
+.slider-value {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  min-width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Custom Select (replaces native dropdowns) ────── */
+
 .custom-select {
   position: relative;
   width: 100%;
