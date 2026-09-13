@@ -65,7 +65,7 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, 
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, 6);
+        .clamp(2, 4);
     config.model_config.num_threads = num_threads as i32;
     // Beam search instead of the library-default greedy decode. Greedy commits to the single
     // highest-probability token at every step; beam search keeps several hypotheses and picks
@@ -142,11 +142,12 @@ pub async fn transcribe_parakeet(
         let mut reader = hound::WavReader::open(&audio_path)
             .map_err(|e| format!("Failed to read audio file: {}", e))?;
         let sample_rate = reader.spec().sample_rate;
-        let samples: Vec<f32> = reader
-            .samples::<i16>()
-            .map(|s| s.map(|v| v as f32 / 32768.0))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("Failed to decode audio samples: {}", e))?;
+        let num_samples = reader.len() as usize;
+        let mut samples = Vec::with_capacity(num_samples);
+        for s in reader.samples::<i16>() {
+            let v = s.map_err(|e| format!("Failed to decode audio sample: {}", e))?;
+            samples.push(v as f32 / 32768.0);
+        }
 
         let mut guard = RECOGNIZER
             .lock()

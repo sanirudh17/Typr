@@ -17,8 +17,8 @@ pub fn paste_text(text: &str) -> Result<(), String> {
         return Err(format!("Failed to set clipboard: {}", err));
     }
 
-    // Increased delay to ensure clipboard is fully propagated on Windows/macOS before pasting (150ms)
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Delay to ensure clipboard is fully propagated on Windows/macOS before pasting (50ms)
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Simulate Cmd+V via osascript (works from any thread, unlike enigo which
     // calls TSMGetInputSourceProperty requiring the main thread)

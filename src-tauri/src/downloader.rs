@@ -38,6 +38,9 @@ pub async fn download_model(
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
 
+    let mut last_emit = std::time::Instant::now();
+    let mut last_percent = 0.0f64;
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
         file.write_all(&chunk).map_err(|e| e.to_string())?;
@@ -49,11 +52,15 @@ pub async fn download_model(
             0.0
         };
 
-        let _ = app.emit("download-progress", DownloadProgress {
-            downloaded,
-            total,
-            percent,
-        });
+        if percent - last_percent >= 0.5 || last_emit.elapsed() >= std::time::Duration::from_millis(50) {
+            last_percent = percent;
+            last_emit = std::time::Instant::now();
+            let _ = app.emit("download-progress", DownloadProgress {
+                downloaded,
+                total,
+                percent,
+            });
+        }
     }
 
     // Ensure clean 100% emission upon completion
@@ -95,25 +102,33 @@ pub async fn download_multiple_files(
     use futures_util::StreamExt;
 
     let client = reqwest::Client::new();
-    let mut total_size: u64 = 0;
 
-    // Pre-flight HEAD requests to calculate cumulative size across all files
-    for item in files {
-        if let Ok(resp) = client.head(&item.url).send().await {
-            if resp.status().is_success() {
-                total_size += extract_content_length(&resp);
+    // Concurrent pre-flight HEAD requests to calculate cumulative size across all files without delay
+    let head_futures = files.iter().map(|item| {
+        let client = client.clone();
+        let url = item.url.clone();
+        async move {
+            if let Ok(resp) = client.head(&url).send().await {
+                if resp.status().is_success() {
+                    return extract_content_length(&resp);
+                }
             }
+            0u64
         }
-    }
+    });
+    let sizes = futures_util::future::join_all(head_futures).await;
+    let mut total_size: u64 = sizes.into_iter().sum();
 
     // Fallback: If HEAD requests failed or CDN gave 0, estimate total_size
-    // (Nemotron models are ~671 MB = 671,276,400 bytes) so the progress bar
+    // (Nemotron models are 682,215,474 bytes) so the progress bar
     // moves monotonically and is never stuck at 0%.
-    if total_size == 0 {
-        total_size = 671_000_000;
+    if total_size < 500_000_000 {
+        total_size = 682_215_474;
     }
 
     let mut cumulative_downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut last_percent = 0.0f64;
 
     for item in files {
         let response = client
@@ -148,11 +163,15 @@ pub async fn download_multiple_files(
                 0.0
             };
 
-            let _ = app.emit("download-progress", DownloadProgress {
-                downloaded: cumulative_downloaded,
-                total: total_size,
-                percent,
-            });
+            if percent - last_percent >= 0.5 || last_emit.elapsed() >= std::time::Duration::from_millis(50) {
+                last_percent = percent;
+                last_emit = std::time::Instant::now();
+                let _ = app.emit("download-progress", DownloadProgress {
+                    downloaded: cumulative_downloaded,
+                    total: total_size,
+                    percent,
+                });
+            }
         }
     }
 
@@ -200,5 +219,14 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::CONTENT_LENGTH, "12345".parse().unwrap());
         assert_eq!(extract_content_length_from_headers(&headers), 12345);
+    }
+
+    #[test]
+    fn test_progress_throttling_condition() {
+        let last_percent = 50.0f64;
+        let p1 = 50.2f64;
+        assert!(p1 - last_percent < 0.5);
+        let p2 = 50.5f64;
+        assert!(p2 - last_percent >= 0.5);
     }
 }

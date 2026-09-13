@@ -44,7 +44,7 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, S
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, 6);
+        .clamp(2, 4);
     config.model_config.num_threads = num_threads as i32;
     config.decoding_method = Some("greedy_search".to_string());
     sherpa_onnx::OnlineRecognizer::create(&config)
@@ -81,20 +81,7 @@ pub fn prewarm(model_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_token_map(model_dir: &Path) -> std::collections::HashMap<String, i64> {
-    let mut map = std::collections::HashMap::new();
-    if let Ok(content) = std::fs::read_to_string(model_dir.join("tokens.txt")) {
-        for line in content.lines() {
-            let mut parts = line.rsplitn(2, ' ');
-            if let (Some(id_str), Some(tok)) = (parts.next(), parts.next()) {
-                if let Ok(id) = id_str.parse::<i64>() {
-                    map.insert(tok.to_string(), id);
-                }
-            }
-        }
-    }
-    map
-}
+
 
 #[cfg(test)]
 fn compute_mel_stats(samples: &[f32], sample_rate: u32) -> (f32, f32, f32) {
@@ -199,16 +186,15 @@ pub async fn transcribe_nemotron(
     let audio_path = audio_path.clone();
 
     tokio::task::spawn_blocking(move || {
-        let app_dir = model_dir.parent().unwrap_or(model_dir.as_path());
         let mut reader = hound::WavReader::open(&audio_path)
             .map_err(|e| format!("Failed to read audio file: {}", e))?;
         let sample_rate = reader.spec().sample_rate;
-        let samples: Vec<f32> = reader
-            .samples::<i16>()
-            .map(|s| s.map(|v| v as f32 / 32768.0))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("Failed to decode audio samples: {}", e))?;
-
+        let num_samples = reader.len() as usize;
+        let mut samples = Vec::with_capacity(num_samples);
+        for s in reader.samples::<i16>() {
+            let v = s.map_err(|e| format!("Failed to decode audio sample: {}", e))?;
+            samples.push(v as f32 / 32768.0);
+        }
 
         let mut guard = RECOGNIZER
             .lock()
@@ -219,7 +205,6 @@ pub async fn transcribe_nemotron(
         }
         let recognizer = &guard.as_ref().expect("just built").1;
 
-        let token_map = load_token_map(&model_dir);
         let stream = recognizer.create_stream();
 
         // Condition 3.5 multilingual on English prompt (prompt index 0 = en-US).
@@ -249,31 +234,12 @@ pub async fn transcribe_nemotron(
         }
 
         let result = recognizer.get_result(&stream);
-        let (raw_tokens, final_text) = if let Some(ref r) = result {
-            (r.tokens.clone(), r.text.trim().to_string())
+        let final_text = if let Some(ref r) = result {
+            r.text.trim().to_string()
         } else {
-            (Vec::new(), String::new())
+            String::new()
         };
 
-        let token_ids: Vec<i64> = raw_tokens
-            .iter()
-            .map(|t| token_map.get(t).copied().unwrap_or(-1))
-            .collect();
-
-        crate::debug_log::log(
-            app_dir,
-            &format!(
-                "[NEMOTRON DIAG] Streaming complete ({} samples): token_ids={:?} tokens={:?} text={:?}",
-                samples.len(),
-                token_ids,
-                raw_tokens,
-                final_text
-            ),
-        );
-        crate::debug_log::log(
-            app_dir,
-            &format!("[NEMOTRON DIAG] Final joined text: {:?}", final_text),
-        );
         println!("[Typr] Nemotron completed in {:?}", started.elapsed());
         Ok(final_text)
     })
