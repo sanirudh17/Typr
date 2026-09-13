@@ -62,9 +62,11 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer, 
         Some(model_dir.join("joiner.int8.onnx").to_string_lossy().into_owned());
     config.model_config.tokens =
         Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
-    // Two threads, matching the reference implementations. More does not help a 0.6B model on
-    // a typical laptop and competes with whatever the user is actually doing.
-    config.model_config.num_threads = 2;
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 6);
+    config.model_config.num_threads = num_threads as i32;
     // Beam search instead of the library-default greedy decode. Greedy commits to the single
     // highest-probability token at every step; beam search keeps several hypotheses and picks
     // the best-scoring whole sequence, which is the correct decode for a transducer.

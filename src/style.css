@@ -1075,7 +1075,8 @@ input[type="password"]::placeholder {
 /* ── Progress Bar ───────────────────────────────────── */
 
 #download-progress,
-#parakeet-download-progress {
+#parakeet-download-progress,
+#nemotron-download-progress {
   padding: 0 0 16px;
   border-bottom: 1px solid var(--border);
 }

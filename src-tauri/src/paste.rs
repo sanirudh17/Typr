@@ -1,7 +1,21 @@
 pub fn paste_text(text: &str) -> Result<(), String> {
-    // Set clipboard (arboard is thread-safe)
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard.set_text(text).map_err(|e| e.to_string())?;
+    // Set clipboard with retry loop in case another application temporarily locked the clipboard
+    let mut last_err = None;
+    for _ in 0..5 {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(_) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+    if let Some(err) = last_err {
+        return Err(format!("Failed to set clipboard: {}", err));
+    }
 
     // Increased delay to ensure clipboard is fully propagated on Windows/macOS before pasting (150ms)
     std::thread::sleep(std::time::Duration::from_millis(150));

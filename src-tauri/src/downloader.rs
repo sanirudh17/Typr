@@ -25,7 +25,7 @@ pub async fn download_model(
         return Err(format!("Download failed with status: {}", response.status()));
     }
 
-    let total = response.content_length().unwrap_or(0);
+    let total = extract_content_length(&response);
 
     // Ensure parent directory exists
     if let Some(parent) = dest.parent() {
@@ -44,7 +44,7 @@ pub async fn download_model(
         downloaded += chunk.len() as u64;
 
         let percent = if total > 0 {
-            (downloaded as f64 / total as f64) * 100.0
+            ((downloaded as f64 / total as f64) * 100.0).min(99.0)
         } else {
             0.0
         };
@@ -56,7 +56,30 @@ pub async fn download_model(
         });
     }
 
+    // Ensure clean 100% emission upon completion
+    let _ = app.emit("download-progress", DownloadProgress {
+        downloaded,
+        total: total.max(downloaded),
+        percent: 100.0,
+    });
+
     Ok(())
+}
+
+fn extract_content_length_from_headers(headers: &reqwest::header::HeaderMap) -> u64 {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn extract_content_length(resp: &reqwest::Response) -> u64 {
+    let header_len = extract_content_length_from_headers(resp.headers());
+    if header_len > 0 {
+        return header_len;
+    }
+    resp.content_length().unwrap_or(0)
 }
 
 #[derive(Clone, Debug)]
@@ -78,9 +101,16 @@ pub async fn download_multiple_files(
     for item in files {
         if let Ok(resp) = client.head(&item.url).send().await {
             if resp.status().is_success() {
-                total_size += resp.content_length().unwrap_or(0);
+                total_size += extract_content_length(&resp);
             }
         }
+    }
+
+    // Fallback: If HEAD requests failed or CDN gave 0, estimate total_size
+    // (Nemotron models are ~671 MB = 671,276,400 bytes) so the progress bar
+    // moves monotonically and is never stuck at 0%.
+    if total_size == 0 {
+        total_size = 671_000_000;
     }
 
     let mut cumulative_downloaded: u64 = 0;
@@ -108,8 +138,12 @@ pub async fn download_multiple_files(
             file.write_all(&chunk).map_err(|e| e.to_string())?;
             cumulative_downloaded += chunk.len() as u64;
 
+            if cumulative_downloaded > total_size {
+                total_size = cumulative_downloaded + 50_000_000;
+            }
+
             let percent = if total_size > 0 {
-                ((cumulative_downloaded as f64 / total_size as f64) * 100.0).min(100.0)
+                ((cumulative_downloaded as f64 / total_size as f64) * 100.0).min(99.0)
             } else {
                 0.0
             };
@@ -125,7 +159,7 @@ pub async fn download_multiple_files(
     // Ensure clean 100% emission upon completion
     let _ = app.emit("download-progress", DownloadProgress {
         downloaded: cumulative_downloaded,
-        total: total_size.max(cumulative_downloaded),
+        total: cumulative_downloaded,
         percent: 100.0,
     });
 
@@ -159,5 +193,12 @@ mod tests {
             last_percent = percent;
         }
         assert_eq!(last_percent, 100.0);
+    }
+
+    #[test]
+    fn test_extract_content_length_from_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::CONTENT_LENGTH, "12345".parse().unwrap());
+        assert_eq!(extract_content_length_from_headers(&headers), 12345);
     }
 }

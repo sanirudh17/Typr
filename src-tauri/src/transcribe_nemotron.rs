@@ -3,7 +3,6 @@
 //! FastConformer-RNNT (transducer) streaming ASR engine running in-process via sherpa-onnx.
 //! Supports v3.5 (multilingual, 40 languages) and v3 (English-only).
 
-use crate::audio_chunker;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -45,7 +44,7 @@ fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, S
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, 4);
+        .clamp(2, 6);
     config.model_config.num_threads = num_threads as i32;
     config.decoding_method = Some("greedy_search".to_string());
     sherpa_onnx::OnlineRecognizer::create(&config)
@@ -97,6 +96,7 @@ fn load_token_map(model_dir: &Path) -> std::collections::HashMap<String, i64> {
     map
 }
 
+#[cfg(test)]
 fn compute_mel_stats(samples: &[f32], sample_rate: u32) -> (f32, f32, f32) {
     if samples.is_empty() {
         return (0.0, 0.0, 0.0);
@@ -237,16 +237,9 @@ pub async fn transcribe_nemotron(
         );
         let started = std::time::Instant::now();
 
-        // Feed samples in 1120ms chunks (17920 samples @ 16kHz) to preserve streaming cache
-        // state chunk-by-chunk through FastConformer encoder and RNNT decoder.
-        let chunk_size = 17920;
-        let mut chunk_idx = 0;
-        for chunk in samples.chunks(chunk_size) {
-            chunk_idx += 1;
-            stream.accept_waveform(sample_rate as i32, chunk);
-            while recognizer.is_ready(&stream) {
-                recognizer.decode(&stream);
-            }
+        stream.accept_waveform(sample_rate as i32, &samples);
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
         }
 
         // Flush tail tokens with zero-padded final frames
@@ -270,8 +263,8 @@ pub async fn transcribe_nemotron(
         crate::debug_log::log(
             app_dir,
             &format!(
-                "[NEMOTRON DIAG] Streaming complete in {} chunks: token_ids={:?} tokens={:?} text={:?}",
-                chunk_idx,
+                "[NEMOTRON DIAG] Streaming complete ({} samples): token_ids={:?} tokens={:?} text={:?}",
+                samples.len(),
                 token_ids,
                 raw_tokens,
                 final_text
@@ -291,6 +284,7 @@ pub async fn transcribe_nemotron(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio_chunker;
 
     #[test]
     fn test_nemotron_model_dir_name_maps_variants() {

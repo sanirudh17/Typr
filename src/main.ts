@@ -1320,7 +1320,25 @@ listen<string>("recording-state", (event) => {
 // so the Whisper and Parakeet fills never cross-update.
 listen<DownloadProgress>("download-progress", (event) => {
   const { percent } = event.payload;
-  if (activeProgressFill) activeProgressFill.style.width = `${percent}%`;
+  const pct = Math.min(100, Math.max(0, percent));
+  const pctStr = `${pct.toFixed(0)}%`;
+  if (activeProgressFill) {
+    activeProgressFill.style.width = `${pct}%`;
+  } else if (nemotronDownloading) {
+    nemotronProgressFill.style.width = `${pct}%`;
+  } else if (parakeetDownloading) {
+    parakeetProgressFill.style.width = `${pct}%`;
+  } else if (whisperDownloading) {
+    progressFill.style.width = `${pct}%`;
+  }
+
+  if (nemotronDownloading && nemotronDownloadBtn.disabled) {
+    nemotronDownloadBtn.textContent = `Downloading… ${pctStr}`;
+  } else if (parakeetDownloading && parakeetDownloadBtn.disabled) {
+    parakeetDownloadBtn.textContent = `Downloading… ${pctStr}`;
+  } else if (whisperDownloading && (downloadBtn as HTMLButtonElement).disabled) {
+    downloadBtn.textContent = `Downloading… ${pctStr}`;
+  }
 });
 
 // Listen for history updates
