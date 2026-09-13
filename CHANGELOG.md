@@ -2,7 +2,7 @@
 
 This changelog documents the major engineering milestones and features added during the recent development sprint of **Typr**.
 
-## [v0.1.9] - 2026-09-13 — Real-Time Streaming Ingestion, Acoustic Preprocessing & Engine Hardening
+## [v0.1.9] - 2026-09-13 - Real-Time Streaming Ingestion, Acoustic Preprocessing & Engine Hardening
 
 ### 1. Real-Time Streaming Ingestion for Nemotron
 * **Continuous Background Transcription:** The Nemotron engine now continuously streams and decodes microphone audio on a background worker thread while speech is in progress using an OnlineRecognizer transducer stream.
