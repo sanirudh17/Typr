@@ -13,6 +13,7 @@ use crate::settings::Settings;
 use crate::transcribe_local;
 use crate::transcribe_groq;
 use crate::transcribe_parakeet;
+use crate::transcribe_nemotron;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum RecordingState {
@@ -204,6 +205,11 @@ impl Recorder {
                 // No prompt: transducer models have no equivalent of Whisper's prompt window,
                 // so the dictionary bias the other two engines receive has nowhere to go here.
                 transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
+            }
+            "nemotron" => {
+                let model_dir = app_dir
+                    .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };

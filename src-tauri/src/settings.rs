@@ -17,6 +17,8 @@ pub struct Settings {
     pub hotkey: String,
     #[serde(rename = "parakeetModel", default = "default_parakeet_model")]
     pub parakeet_model: String,
+    #[serde(rename = "nemotronModel", default = "default_nemotron_model")]
+    pub nemotron_model: String,
     #[serde(rename = "cloudModel", default = "default_cloud_model")]
     pub cloud_model: String,
     #[serde(rename = "aiEnabled", default)]
@@ -61,6 +63,10 @@ pub struct Settings {
 
 fn default_parakeet_model() -> String {
     "v3".to_string()
+}
+
+fn default_nemotron_model() -> String {
+    "v3_5".to_string()
 }
 
 fn default_cloud_model() -> String {
@@ -112,6 +118,7 @@ impl Default for Settings {
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
             parakeet_model: "v3".to_string(),
+            nemotron_model: "v3_5".to_string(),
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
             ai_model: "qwen/qwen3.8-27b".to_string(),
@@ -504,5 +511,22 @@ mod tests {
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.hotkey_secondary, "");
         assert_eq!(s.secondary_profile, "prompt");
+    }
+
+    #[test]
+    fn test_nemotron_engine_roundtrips() {
+        let mut s = Settings::default();
+        s.nemotron_model = "v3".to_string();
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.nemotron_model, "v3");
+        assert!(json.contains("\"nemotronModel\":\"v3\""));
+    }
+
+    #[test]
+    fn test_config_without_nemotron_field_defaults_to_v3_5() {
+        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.nemotron_model, "v3_5");
     }
 }

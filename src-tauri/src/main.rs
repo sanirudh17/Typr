@@ -265,6 +265,7 @@ async fn save_settings(
     let engine_changed = old_settings.engine != settings.engine;
     let model_changed = old_settings.whisper_model != settings.whisper_model;
     let parakeet_model_changed = old_settings.parakeet_model != settings.parakeet_model;
+    let nemotron_model_changed = old_settings.nemotron_model != settings.nemotron_model;
 
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings.clone();
@@ -345,6 +346,18 @@ async fn save_settings(
                     tauri::async_runtime::spawn_blocking(move || {
                         if let Err(e) = typr_lib::transcribe_parakeet::prewarm(&model_dir) {
                             eprintln!("[Typr] Parakeet prewarm failed: {}", e);
+                        }
+                    });
+                }
+            }
+            "nemotron" => {
+                if engine_changed || nemotron_model_changed {
+                    let model_dir = app_dir_clone
+                        .join(typr_lib::transcribe_nemotron::model_dir_name(&settings_clone.nemotron_model));
+                    println!("[Typr] Engine/model change to Nemotron: prewarming {:?}", model_dir);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = typr_lib::transcribe_nemotron::prewarm(&model_dir) {
+                            eprintln!("[Typr] Nemotron prewarm failed: {}", e);
                         }
                     });
                 }
@@ -680,6 +693,61 @@ async fn download_parakeet_model(
 }
 
 #[tauri::command]
+fn check_nemotron_downloaded(state: State<AppState>, variant: String) -> bool {
+    let dir = state.app_dir.join(typr_lib::transcribe_nemotron::model_dir_name(&variant));
+    typr_lib::transcribe_nemotron::model_files_present(&dir)
+}
+
+#[tauri::command]
+async fn download_nemotron_model(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    variant: String,
+) -> Result<(), String> {
+    let url = typr_lib::transcribe_nemotron::model_download_url(&variant);
+    let target = state
+        .app_dir
+        .join(typr_lib::transcribe_nemotron::model_dir_name(&variant));
+    std::fs::create_dir_all(&target).map_err(|e| format!("Could not create model dir: {}", e))?;
+
+    if url.ends_with(".tar.bz2") {
+        use std::io::Read;
+        let archive = state.app_dir.join("nemotron-download.tar.bz2");
+        downloader::download_model(app.clone(), &url, &archive).await?;
+        let file = std::fs::File::open(&archive).map_err(|e| format!("Could not open archive: {}", e))?;
+        let mut tar = tar::Archive::new(bzip2::read::BzDecoder::new(file));
+        let wanted = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
+        for entry in tar.entries().map_err(|e| format!("Could not read archive: {}", e))? {
+            let mut entry = entry.map_err(|e| format!("Corrupt archive entry: {}", e))?;
+            let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !wanted.contains(&name.as_str()) {
+                continue;
+            }
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).map_err(|e| format!("Could not extract {}: {}", name, e))?;
+            std::fs::write(target.join(&name), buf)
+                .map_err(|e| format!("Could not write {}: {}", name, e))?;
+        }
+        let _ = std::fs::remove_file(&archive);
+    } else {
+        let wanted = ["tokens.txt", "joiner.int8.onnx", "decoder.int8.onnx", "encoder.int8.onnx"];
+        for name in wanted {
+            let file_url = format!("{}/{}", url.trim_end_matches('/'), name);
+            let dest = target.join(name);
+            downloader::download_model(app.clone(), &file_url, &dest).await?;
+        }
+    }
+
+    if !typr_lib::transcribe_nemotron::model_files_present(&target) {
+        return Err("Download finished but the model files are incomplete.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn download_model(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -883,6 +951,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             check_parakeet_downloaded,
             download_parakeet_model,
+            check_nemotron_downloaded,
+            download_nemotron_model,
             get_settings,
             save_settings,
             list_microphones,
@@ -1126,6 +1196,14 @@ fn main() {
                     tauri::async_runtime::spawn_blocking(move || {
                         if let Err(e) = typr_lib::transcribe_parakeet::prewarm(&model_dir) {
                             eprintln!("[Typr] Failed to pre-warm Parakeet model on startup: {}", e);
+                        }
+                    });
+                } else if settings.engine == "nemotron" {
+                    let model_dir = state_clone.app_dir.join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                    println!("[Typr] Pre-warming Nemotron model on startup: {:?}", model_dir);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = typr_lib::transcribe_nemotron::prewarm(&model_dir) {
+                            eprintln!("[Typr] Failed to pre-warm Nemotron model on startup: {}", e);
                         }
                     });
                 }

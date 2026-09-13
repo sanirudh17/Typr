@@ -272,12 +272,13 @@
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">Transcription engine</span>
-                <span class="label-hint">Local Whisper needs an NVIDIA GPU. Local Parakeet runs on any modern CPU. Cloud is fastest and needs a Groq API key.</span>
+                <span class="label-hint">Local Whisper needs an NVIDIA GPU. Local Parakeet &amp; Nemotron run on any modern CPU. Cloud is fastest and needs a Groq API key.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
                   <button id="engine-local" class="toggle-btn active">Local Whisper</button>
                   <button id="engine-parakeet" class="toggle-btn">Local Parakeet</button>
+                  <button id="engine-nemotron" class="toggle-btn">Local Nemotron</button>
                   <button id="engine-cloud" class="toggle-btn">Groq Cloud</button>
                 </div>
               </div>
@@ -328,6 +329,24 @@
             </div>
             <div id="parakeet-download-progress" class="hidden">
               <div id="parakeet-progress-bar"><div id="parakeet-progress-fill"></div></div>
+            </div>
+            <div class="setting-row setting-child hidden" id="nemotron-settings">
+              <div class="setting-label">
+                <span class="label-text">Nemotron model</span>
+                <span class="label-hint">FastConformer-RNNT streaming transducer on CPU. High accuracy speech recognition.</span>
+              </div>
+              <div class="setting-control">
+                <div class="model-row">
+                  <select id="nemotron-model-select">
+                    <option value="v3_5">v3.5 &middot; 40 languages &middot; recommended</option>
+                    <option value="v3">v3 &middot; English only &middot; faster</option>
+                  </select>
+                  <button id="nemotron-download-btn" class="btn-primary">Download</button>
+                </div>
+              </div>
+            </div>
+            <div id="nemotron-download-progress" class="hidden">
+              <div id="nemotron-progress-bar"><div id="nemotron-progress-fill"></div></div>
             </div>
             <div class="setting-row setting-child hidden" id="cloud-model-settings">
               <div class="setting-label">

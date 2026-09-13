@@ -15,6 +15,7 @@ interface Settings {
   hotkey: string;
   cloudModel: string;
   parakeetModel: string;
+  nemotronModel: string;
   aiEnabled: boolean;
   aiModel: string;
   aiProfile: string;
@@ -74,9 +75,13 @@ const micSelect = document.getElementById("mic-select") as HTMLSelectElement;
 const engineLocal = document.getElementById("engine-local")!;
 const engineCloud = document.getElementById("engine-cloud")!;
 const engineParakeet = document.getElementById("engine-parakeet")!;
+const engineNemotron = document.getElementById("engine-nemotron")!;
 const parakeetSettings = document.getElementById("parakeet-settings")!;
 const parakeetModelSelect = document.getElementById("parakeet-model-select") as HTMLSelectElement;
 const parakeetDownloadBtn = document.getElementById("parakeet-download-btn") as HTMLButtonElement;
+const nemotronSettings = document.getElementById("nemotron-settings")!;
+const nemotronModelSelect = document.getElementById("nemotron-model-select") as HTMLSelectElement;
+const nemotronDownloadBtn = document.getElementById("nemotron-download-btn") as HTMLButtonElement;
 const localSettings = document.getElementById("local-settings")!;
 const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
@@ -85,17 +90,20 @@ const downloadProgress = document.getElementById("download-progress")!;
 const progressFill = document.getElementById("progress-fill")!;
 const parakeetDownloadProgress = document.getElementById("parakeet-download-progress")!;
 const parakeetProgressFill = document.getElementById("parakeet-progress-fill")!;
+const nemotronDownloadProgress = document.getElementById("nemotron-download-progress")!;
+const nemotronProgressFill = document.getElementById("nemotron-progress-fill")!;
 // Each engine owns its own progress bar (a single shared one jumped position when switching
 // tabs mid-download). A download is in flight only for the engine whose flag is set; the
 // progress event routes to whichever fill is active.
 let whisperDownloading = false;
 let parakeetDownloading = false;
+let nemotronDownloading = false;
 let activeProgressFill: HTMLElement | null = null;
 const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 // The same key powers two different features on two different tabs: Cloud transcription
 // (Engine) and AI cleanup (AI). It used to live only under the Engine tab's Cloud block,
-// which is hidden unless Cloud is the selected engine — so anyone on Local Whisper or
-// Parakeet could turn AI cleanup on and have nowhere to enter the key it needs. Both inputs
+// which is hidden unless Cloud is the selected engine — so anyone on Local Whisper,
+// Parakeet or Nemotron could turn AI cleanup on and have nowhere to enter the key it needs. Both inputs
 // edit one setting and are mirrored on every keystroke.
 const aiGroqKey = document.getElementById("ai-groq-key") as HTMLInputElement;
 const aiKeyMissingNote = document.getElementById("ai-key-missing-note")!;
@@ -104,6 +112,7 @@ const engineSetupNote = document.getElementById("engine-setup-note")!;
 // last backend check so the setup note can re-render without re-querying.
 let whisperModelPresent = false;
 let parakeetModelPresent = false;
+let nemotronModelPresent = false;
 const cloudModelSettings = document.getElementById("cloud-model-settings")!;
 const modelFast = document.getElementById("model-fast")!;
 const modelAccurate = document.getElementById("model-accurate")!;
@@ -371,6 +380,8 @@ async function loadSettings() {
   setCloudModel(currentSettings.cloudModel || "accurate");
   setParakeetModel(currentSettings.parakeetModel || "v3");
   refreshParakeetDownloadState();
+  setNemotronModel(currentSettings.nemotronModel || "v3_5");
+  refreshNemotronDownloadState();
 
   // Recording mode
   setRecordingMode(currentSettings.recordingMode);
@@ -420,13 +431,22 @@ async function populateMics() {
 // Mirrors the dispatch arms in recorder.rs. An unrecognized value falls back to local so a
 // stale config can never leave the engine unset.
 function setEngine(engine: string) {
-  const e = engine === "cloud" ? "cloud" : engine === "parakeet" ? "parakeet" : "local";
+  const e =
+    engine === "cloud"
+      ? "cloud"
+      : engine === "parakeet"
+      ? "parakeet"
+      : engine === "nemotron"
+      ? "nemotron"
+      : "local";
   currentSettings.engine = e;
   engineLocal.classList.toggle("active", e === "local");
   engineParakeet.classList.toggle("active", e === "parakeet");
+  engineNemotron.classList.toggle("active", e === "nemotron");
   engineCloud.classList.toggle("active", e === "cloud");
   localSettings.classList.toggle("hidden", e !== "local");
   parakeetSettings.classList.toggle("hidden", e !== "parakeet");
+  nemotronSettings.classList.toggle("hidden", e !== "nemotron");
   cloudSettings.classList.toggle("hidden", e !== "cloud");
   cloudModelSettings.classList.toggle("hidden", e !== "cloud");
   // A progress bar shows only on its own engine's tab, and only while that engine is
@@ -434,6 +454,7 @@ function setEngine(engine: string) {
   // wrong place, and returning to the tab shows it again at its real progress.
   downloadProgress.classList.toggle("hidden", !(e === "local" && whisperDownloading));
   parakeetDownloadProgress.classList.toggle("hidden", !(e === "parakeet" && parakeetDownloading));
+  nemotronDownloadProgress.classList.toggle("hidden", !(e === "nemotron" && nemotronDownloading));
   updateEngineSetupNote();
 }
 
@@ -458,6 +479,26 @@ async function refreshParakeetDownloadState() {
   updateEngineSetupNote();
 }
 
+function setNemotronModel(variant: string) {
+  const v = variant === "v3" ? "v3" : "v3_5";
+  currentSettings.nemotronModel = v;
+  nemotronModelSelect.value = v;
+  syncCustomSelectDisplay(nemotronModelSelect);
+}
+
+async function refreshNemotronDownloadState() {
+  try {
+    const present = await invoke<boolean>("check_nemotron_downloaded", {
+      variant: currentSettings.nemotronModel || "v3_5",
+    });
+    nemotronDownloadBtn.textContent = present ? "Re-download" : "Download";
+    nemotronModelPresent = present;
+  } catch {
+    nemotronDownloadBtn.textContent = "Download";
+  }
+  updateEngineSetupNote();
+}
+
 /// First-run guidance: name the one thing still missing for the selected engine. A new user
 /// otherwise sees an ordinary settings page with nothing to indicate that local transcription
 /// needs a model downloaded before the hotkey will produce anything at all.
@@ -469,6 +510,9 @@ function updateEngineSetupNote() {
   } else if (currentSettings.engine === "parakeet" && !parakeetModelPresent) {
     msg =
       "No Parakeet model downloaded yet — dictation won't work until you download one. Click Download above (about 640 MB).";
+  } else if (currentSettings.engine === "nemotron" && !nemotronModelPresent) {
+    msg =
+      "No Nemotron model downloaded yet — dictation won't work until you download one. Click Download above (about 650 MB).";
   } else if (currentSettings.engine === "cloud" && !(currentSettings.groqApiKey || "").trim()) {
     msg =
       "No Groq API key set — cloud transcription won't work until you add one. Get a free key at console.groq.com (Groq, not grok.com).";
@@ -700,6 +744,40 @@ parakeetDownloadBtn.addEventListener("click", async () => {
     parakeetDownloadBtn.disabled = false;
     // refreshParakeetDownloadState sets the label to "Re-download" (present) or "Download".
     refreshParakeetDownloadState();
+  }
+});
+
+engineNemotron.addEventListener("click", () => {
+  setEngine("nemotron");
+  saveSettings();
+  refreshNemotronDownloadState();
+});
+
+nemotronModelSelect.addEventListener("change", () => {
+  setNemotronModel(nemotronModelSelect.value);
+  saveSettings();
+  refreshNemotronDownloadState();
+});
+
+nemotronDownloadBtn.addEventListener("click", async () => {
+  const variant = currentSettings.nemotronModel || "v3_5";
+  nemotronDownloadBtn.disabled = true;
+  nemotronDownloadBtn.textContent = "Downloading…";
+  nemotronDownloading = true;
+  activeProgressFill = nemotronProgressFill;
+  nemotronProgressFill.style.width = "0%";
+  nemotronDownloadProgress.classList.remove("hidden");
+  try {
+    await invoke("download_nemotron_model", { variant });
+    showToast("Nemotron model ready");
+  } catch (e) {
+    showToast(String(e));
+  } finally {
+    nemotronDownloading = false;
+    if (activeProgressFill === nemotronProgressFill) activeProgressFill = null;
+    nemotronDownloadProgress.classList.add("hidden");
+    nemotronDownloadBtn.disabled = false;
+    refreshNemotronDownloadState();
   }
 });
 
