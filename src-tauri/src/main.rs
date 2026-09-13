@@ -800,6 +800,43 @@ async fn do_toggle_recording(
 /// only the first time per process, not on every close.
 static FIRST_HIDE_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
+async fn handle_close_requested(app: &tauri::AppHandle) {
+    let (background, app_dir) = {
+        let state = app.state::<AppState>();
+        let bg = state.settings.lock().unwrap().background_mode;
+        let dir = state.app_dir.clone();
+        (bg, dir)
+    };
+    typr_lib::debug_log::log(
+        &app_dir,
+        &format!("[Typr] Close requested (background_mode: {})", background),
+    );
+    if background {
+        // Hide to tray, keep running so the hotkey still works.
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+        }
+        if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Typr is still running")
+                .body("Right-click the tray icon to quit.")
+                .show();
+        }
+    } else {
+        println!("[Typr] Main window close requested, exiting app");
+        typr_lib::debug_log::log(&app_dir, "[Typr] Exiting app cleanly, stopping whisper server");
+        typr_lib::whisper_server::stop_server().await;
+        std::process::exit(0);
+    }
+}
+
+#[tauri::command]
+async fn request_app_close(app: tauri::AppHandle) {
+    handle_close_requested(&app).await;
+}
+
 fn main() {
     let _single_instance = match acquire_single_instance() {
         Ok(guard) => guard,
@@ -878,6 +915,7 @@ fn main() {
             add_app_rule,
             remove_app_rule,
             show_main_window,
+            request_app_close,
         ])
         .setup(move |app| {
             // Build the main window here, not in tauri.conf: only the builder can
@@ -973,33 +1011,11 @@ fn main() {
                     let app_handle = app.handle().clone();
                     window.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            let background = app_handle
-                                .state::<AppState>()
-                                .settings
-                                .lock()
-                                .unwrap()
-                                .background_mode;
-                            if background {
-                                // Hide to tray, keep running so the hotkey still works.
-                                api.prevent_close();
-                                if let Some(w) = app_handle.get_webview_window("main") {
-                                    let _ = w.hide();
-                                }
-                                if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
-                                    let _ = app_handle
-                                        .notification()
-                                        .builder()
-                                        .title("Typr is still running")
-                                        .body("Right-click the tray icon to quit.")
-                                        .show();
-                                }
-                            } else {
-                                println!("[Typr] Main window close requested, exiting app");
-                                tauri::async_runtime::block_on(async {
-                                    typr_lib::whisper_server::stop_server().await;
-                                });
-                                std::process::exit(0);
-                            }
+                            api.prevent_close();
+                            let h = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                handle_close_requested(&h).await;
+                            });
                         }
                     });
                 }
@@ -1031,6 +1047,8 @@ fn main() {
                     }
                     "quit" => {
                         println!("[Typr] Quit from tray, exiting app");
+                        let app_dir = app.state::<AppState>().app_dir.clone();
+                        typr_lib::debug_log::log(&app_dir, "[Typr] Quit from tray, exiting app");
                         tauri::async_runtime::block_on(async {
                             typr_lib::whisper_server::stop_server().await;
                         });

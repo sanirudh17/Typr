@@ -315,7 +315,7 @@ maximizeBtn.addEventListener("click", () => {
 });
 
 closeBtn.addEventListener("click", () => {
-  appWindow.close();
+  invoke("request_app_close");
 });
 
 async function updateMaximizeIcon() {
