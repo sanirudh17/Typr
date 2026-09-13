@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(not(windows))]
 use tauri::image::Image;
-use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Listener, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -1075,41 +1075,14 @@ fn main() {
                 .build(app)?;
 
             // Create the overlay window (floating pill, bottom center, always on top)
-            let monitor = app.primary_monitor().ok().flatten();
-            let (x, y) = if let Some(m) = monitor {
-                let size = m.size();
-                let scale = m.scale_factor();
-                let logical_w = size.width as f64 / scale;
-                let logical_h = size.height as f64 / scale;
-                ((logical_w - 300.0) as i32 / 2, (logical_h - 160.0) as i32)
-            } else {
-                (810, 950)
-            };
-
-            let overlay = WebviewWindowBuilder::new(
-                app,
-                "overlay",
-                WebviewUrl::App("src/overlay.html".into()),
-            )
-            .title("")
-            .inner_size(300.0, 120.0)
-            .position(x as f64, y as f64)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focused(false)
-            .shadow(false)
-            .build();
-
-            match overlay {
-                Ok(window) => {
-                    println!("[Typr] Overlay window created");
-                    let _ = window.set_ignore_cursor_events(true);
-                }
-                Err(e) => eprintln!("[Typr] Failed to create overlay: {}", e),
+            if let Err(e) = typr_lib::overlay::create_overlay_window(app.handle()) {
+                eprintln!("[Typr] Failed to create overlay: {}", e);
             }
+
+            let handle_for_overlay = app.handle().clone();
+            app.listen("overlay-ready", move |_event| {
+                typr_lib::overlay::mark_overlay_ready(&handle_for_overlay);
+            });
 
             let handle = app.handle().clone();
 

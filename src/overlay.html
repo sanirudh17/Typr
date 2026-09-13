@@ -107,7 +107,7 @@
     </div>
     <script type="module">
       import { invoke } from "@tauri-apps/api/core";
-      import { listen } from "@tauri-apps/api/event";
+      import { emit, listen } from "@tauri-apps/api/event";
 
       function resolveTheme(t) {
         if (t === "light") return "light";
@@ -126,7 +126,11 @@
       }
       listen("theme-changed", (e) => applyTheme(e.payload && e.payload.theme));
       matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => applyTheme());
-      applyTheme();
+      applyTheme().finally(() => {
+        requestAnimationFrame(() => {
+          emit("overlay-ready");
+        });
+      });
 
       const pill = document.getElementById("pill");
       const waveform = document.getElementById("waveform");

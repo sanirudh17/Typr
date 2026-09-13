@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::ai_postprocess;
 use crate::audio::AudioRecorder;
@@ -22,19 +22,7 @@ pub enum RecordingState {
 }
 
 fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) {
-    if let Some(overlay) = app.get_webview_window("overlay") {
-        let pill_state = match state {
-            RecordingState::Ready => "ready",
-            RecordingState::Recording => "recording",
-            RecordingState::Transcribing => "processing",
-        };
-        let js = format!(
-            "if (window.__setPillState) window.__setPillState('{}'); else document.getElementById('pill').style.display = '{}';",
-            pill_state,
-            if show_pill { "flex" } else { "none" }
-        );
-        let _ = overlay.eval(&js);
-    }
+    crate::overlay::update_overlay(app, state, show_pill);
 }
 
 #[derive(Clone)]
