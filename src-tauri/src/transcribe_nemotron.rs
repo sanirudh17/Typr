@@ -81,7 +81,175 @@ pub fn prewarm(model_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub struct NemotronLiveSession {
+    pub model_dir: PathBuf,
+    stop_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker_handle: Option<std::thread::JoinHandle<(sherpa_onnx::OnlineStream, usize)>>,
+    audio_recorder: std::sync::Arc<std::sync::Mutex<crate::audio::AudioRecorder>>,
+    input_gain_db: f32,
+}
 
+impl NemotronLiveSession {
+    pub fn finish(mut self) -> Result<String, String> {
+        let started = std::time::Instant::now();
+        self.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (stream, last_read) = if let Some(h) = self.worker_handle.take() {
+            h.join().map_err(|_| "Nemotron stream worker panicked".to_string())?
+        } else {
+            return Err("Nemotron stream worker already finished".to_string());
+        };
+
+        // Drain any remaining unread samples from the live stream
+        let (new_samples, _, src_rate, src_channels) = {
+            let rec = self.audio_recorder.lock().unwrap();
+            rec.get_raw_samples_from(last_read)
+        };
+        if !new_samples.is_empty() {
+            let mut mono: Vec<f32> = if src_channels > 1 {
+                new_samples
+                    .chunks(src_channels as usize)
+                    .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                    .collect()
+            } else {
+                new_samples
+            };
+            if self.input_gain_db.abs() >= 0.01 {
+                let factor = 10.0f32.powf(self.input_gain_db / 20.0);
+                for s in mono.iter_mut() {
+                    *s *= factor;
+                }
+            }
+            let resampled = crate::audio::resample(&mono, src_rate, 16000);
+            stream.accept_waveform(16000, &resampled);
+        }
+
+        // Comfort tail silence padding (400ms = 6400 samples @ 16kHz)
+        let tail_silence = vec![0.0f32; 6400];
+        stream.accept_waveform(16000, &tail_silence);
+
+        stream.input_finished();
+
+        let guard = RECOGNIZER
+            .lock()
+            .map_err(|_| "Nemotron model lock poisoned; restart Typr.".to_string())?;
+        let recognizer = &guard
+            .as_ref()
+            .ok_or_else(|| "Nemotron recognizer missing".to_string())?
+            .1;
+
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+
+        let result = recognizer.get_result(&stream);
+        let final_text = if let Some(ref r) = result {
+            r.text.trim().to_string()
+        } else {
+            String::new()
+        };
+
+        println!(
+            "[Typr] Nemotron live streaming completed tail decode in {:?}",
+            started.elapsed()
+        );
+        Ok(final_text)
+    }
+}
+
+impl Drop for NemotronLiveSession {
+    fn drop(&mut self) {
+        self.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.worker_handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+pub fn start_live_session(
+    model_dir: &Path,
+    audio_recorder: std::sync::Arc<std::sync::Mutex<crate::audio::AudioRecorder>>,
+    input_gain_db: f32,
+) -> Result<NemotronLiveSession, String> {
+    if !model_files_present(model_dir) {
+        return Err(format!(
+            "Nemotron model not found in {}. Download it from the Engine tab.",
+            model_dir.display()
+        ));
+    }
+
+    let mut guard = RECOGNIZER
+        .lock()
+        .map_err(|_| "Nemotron model lock poisoned; restart Typr.".to_string())?;
+    let needs_build = !matches!(&*guard, Some((dir, _)) if dir == model_dir);
+    if needs_build {
+        *guard = Some((model_dir.to_path_buf(), build_recognizer(model_dir)?));
+    }
+    let recognizer = &guard.as_ref().expect("just built").1;
+
+    let stream = recognizer.create_stream();
+    let is_v3_5 = model_dir.to_string_lossy().contains("3.5")
+        || !model_dir.to_string_lossy().contains("speech-streaming-en");
+    if is_v3_5 {
+        stream.set_option("language", "en");
+    }
+
+    // Drop guard before spawning worker so the worker can acquire RECOGNIZER lock when decoding
+    drop(guard);
+
+    let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_clone = stop_signal.clone();
+    let audio_clone = audio_recorder.clone();
+
+    let worker_handle = std::thread::Builder::new()
+        .name("nemotron-live-stream".to_string())
+        .spawn(move || {
+            let mut last_read = 0usize;
+            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let (new_samples, new_end, src_rate, src_channels) = {
+                    let rec = audio_clone.lock().unwrap();
+                    rec.get_raw_samples_from(last_read)
+                };
+                if new_samples.is_empty() {
+                    continue;
+                }
+                last_read = new_end;
+                let mut mono: Vec<f32> = if src_channels > 1 {
+                    new_samples
+                        .chunks(src_channels as usize)
+                        .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                        .collect()
+                } else {
+                    new_samples
+                };
+                if input_gain_db.abs() >= 0.01 {
+                    let factor = 10.0f32.powf(input_gain_db / 20.0);
+                    for s in mono.iter_mut() {
+                        *s *= factor;
+                    }
+                }
+                let resampled = crate::audio::resample(&mono, src_rate, 16000);
+                stream.accept_waveform(16000, &resampled);
+                if let Ok(guard) = RECOGNIZER.lock() {
+                    if let Some((_, ref rec)) = *guard {
+                        while rec.is_ready(&stream) {
+                            rec.decode(&stream);
+                        }
+                    }
+                }
+            }
+            (stream, last_read)
+        })
+        .map_err(|e| format!("Failed to spawn Nemotron stream worker: {}", e))?;
+
+    Ok(NemotronLiveSession {
+        model_dir: model_dir.to_path_buf(),
+        stop_signal,
+        worker_handle: Some(worker_handle),
+        audio_recorder,
+        input_gain_db,
+    })
+}
 
 #[cfg(test)]
 fn compute_mel_stats(samples: &[f32], sample_rate: u32) -> (f32, f32, f32) {
@@ -252,6 +420,8 @@ mod tests {
     use super::*;
     use crate::audio_chunker;
 
+    static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn test_nemotron_model_dir_name_maps_variants() {
         assert_eq!(model_dir_name("v3_5"), "nemotron-3.5-asr-streaming-0.6b-int8");
@@ -347,6 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nemotron_golden_accuracy_3_clips() {
+        let _lock = TEST_MUTEX.lock().await;
         let model_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("com.typr.app")
@@ -383,5 +554,118 @@ mod tests {
             println!("Clip: {} -> Word Accuracy: {:.1}% | Transcript: {}", path_str, acc * 100.0, hyp);
             assert!(acc >= 0.95, "Accuracy {:.2} below 95% threshold for {}", acc, path_str);
         }
+    }
+
+    #[tokio::test]
+    async fn test_nemotron_streaming_chunks() {
+        let model_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("com.typr.app")
+            .join("nemotron-3.5-asr-streaming-0.6b-int8");
+        if !model_files_present(&model_dir) {
+            return;
+        }
+
+        let wav_path = PathBuf::from("../scripts/test_clips/clip2_30s.wav");
+        if !wav_path.exists() {
+            return;
+        }
+
+        let mut reader = hound::WavReader::open(&wav_path).unwrap();
+        let sample_rate = reader.spec().sample_rate;
+        let samples: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+
+        let recognizer = build_recognizer(&model_dir).unwrap();
+        let stream = recognizer.create_stream();
+        stream.set_option("language", "en");
+
+        // Feed in 0.5s chunks (8000 samples @ 16kHz) as if streaming in real-time
+        let started = std::time::Instant::now();
+        for chunk in samples.chunks(8000) {
+            stream.accept_waveform(sample_rate as i32, chunk);
+            while recognizer.is_ready(&stream) {
+                recognizer.decode(&stream);
+            }
+        }
+        stream.input_finished();
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+        let elapsed = started.elapsed();
+
+        let result = recognizer.get_result(&stream).map(|r| r.text.trim().to_string()).unwrap_or_default();
+        let expected = "We are conducting a comprehensive evaluation of the speech recognition engine to determine transcription accuracy across different speech models and acoustic conditions. The quick brown fox jumps over the lazy dog. Please confirm that all parameters are functioning properly and that no words are being dropped at chunk seams. Local inference requires consistent acoustic processing, zero padded frames, and robust decoding algorithms.";
+        let acc = word_accuracy(&result, expected);
+        println!("Streaming chunk decode: acc={:.1}% in {:?} -> {}", acc * 100.0, elapsed, result);
+        assert!(acc >= 0.95);
+    }
+
+    #[test]
+    fn test_stream_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<sherpa_onnx::OnlineStream>();
+    }
+
+    #[tokio::test]
+    async fn test_nemotron_live_session_lifecycle() {
+        let _lock = TEST_MUTEX.lock().await;
+        let model_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("com.typr.app")
+            .join("nemotron-3.5-asr-streaming-0.6b-int8");
+        if !model_files_present(&model_dir) {
+            return;
+        }
+
+        let wav_path = PathBuf::from("../scripts/test_clips/clip1_5s.wav");
+        if !wav_path.exists() {
+            return;
+        }
+
+        let mut reader = hound::WavReader::open(&wav_path).unwrap();
+        let sample_rate = reader.spec().sample_rate;
+        let channels = reader.spec().channels;
+        let samples: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+
+        let mut rec = crate::audio::AudioRecorder::new();
+        rec.set_source_format_for_test(sample_rate, channels);
+        let recorder = std::sync::Arc::new(std::sync::Mutex::new(rec));
+
+        let session = start_live_session(&model_dir, recorder.clone(), 0.0)
+            .expect("start_live_session should succeed");
+
+        // Feed audio in chunks of 2400 samples (150ms @ 16kHz)
+        for chunk in samples.chunks(2400) {
+            recorder.lock().unwrap().push_raw_samples_for_test(chunk);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+
+        // Give the background worker thread a moment to ingest
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let finish_start = std::time::Instant::now();
+        let text = session.finish().expect("finish should succeed");
+        let finish_elapsed = finish_start.elapsed();
+
+        let expected = "Let me know whether there are some changes that you would like to make.";
+        let acc = word_accuracy(&text, expected);
+        println!(
+            "Live session lifecycle: acc={:.1}%, finish_latency={:?} -> '{}'",
+            acc * 100.0,
+            finish_elapsed,
+            text
+        );
+        assert!(acc >= 0.90, "Live session accuracy too low: {:.2}", acc);
+        assert!(
+            finish_elapsed < std::time::Duration::from_millis(1500),
+            "Finish tail latency took too long: {:?}",
+            finish_elapsed
+        );
     }
 }

@@ -165,6 +165,35 @@ impl AudioRecorder {
         self.frequency_bands.lock().unwrap().clone()
     }
 
+    /// Slice new unread raw PCM float samples since `start` index, aligning to whole frames
+    /// if multi-channel. Returns `(slice, new_aligned_end, source_sample_rate, source_channels)`.
+    pub fn get_raw_samples_from(&self, start: usize) -> (Vec<f32>, usize, u32, u16) {
+        let buf = self.samples.lock().unwrap();
+        let current_len = buf.len();
+        let frame_size = self.source_channels.max(1) as usize;
+        let aligned_len = if frame_size > 1 {
+            current_len - (current_len % frame_size)
+        } else {
+            current_len
+        };
+        if aligned_len <= start {
+            return (Vec::new(), start, self.source_sample_rate, self.source_channels);
+        }
+        let slice = buf[start..aligned_len].to_vec();
+        (slice, aligned_len, self.source_sample_rate, self.source_channels)
+    }
+
+    #[cfg(test)]
+    pub fn push_raw_samples_for_test(&self, data: &[f32]) {
+        self.samples.lock().unwrap().extend_from_slice(data);
+    }
+
+    #[cfg(test)]
+    pub fn set_source_format_for_test(&mut self, sample_rate: u32, channels: u16) {
+        self.source_sample_rate = sample_rate;
+        self.source_channels = channels;
+    }
+
     pub fn ensure_initialized(&mut self, mic_name: &str) -> Result<MicStartInfo, String> {
         // Fast path: reuse the warm stream for the same setting without touching cpal
         // enumeration (that enumeration was the ~1-2s dead window on the record path).
@@ -687,7 +716,7 @@ fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
 /// (an earlier windowed-sinc-per-sample version made a debug build take ~30s per clip).
 const RESAMPLE_LOWPASS_TAPS: usize = 31;
 
-fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate || samples.is_empty() {
         return samples.to_vec();
     }

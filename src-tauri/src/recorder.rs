@@ -37,6 +37,8 @@ pub struct Recorder {
     // Focused foreground app and window class captured at the moment recording begins.
     // Preserves the user's active window context even if focus shifts during speech or processing.
     session_context: Arc<Mutex<Option<(crate::context_detector::ForegroundApp, String)>>>,
+    // Live streaming session for Nemotron transducer to ingest and decode chunks during speech
+    nemotron_session: Arc<Mutex<Option<crate::transcribe_nemotron::NemotronLiveSession>>>,
 }
 
 impl Recorder {
@@ -46,6 +48,7 @@ impl Recorder {
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
             session_context: Arc::new(Mutex::new(None)),
+            nemotron_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,6 +88,9 @@ impl Recorder {
         app: &AppHandle,
         mic_name: &str,
         session_override: Option<String>,
+        engine: &str,
+        nemotron_model_dir: Option<&std::path::Path>,
+        input_gain_db: f32,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if *state != RecordingState::Ready {
@@ -113,6 +119,24 @@ impl Recorder {
                         "fellBack": info.fell_back,
                     }));
                 }
+
+                // If engine is Nemotron, initiate live streaming ingestion on the active mic stream
+                if engine == "nemotron" {
+                    if let Some(model_dir) = nemotron_model_dir {
+                        match crate::transcribe_nemotron::start_live_session(model_dir, self.audio_recorder.clone(), input_gain_db) {
+                            Ok(session) => {
+                                *self.nemotron_session.lock().unwrap() = Some(session);
+                                println!("[Typr] Started Nemotron live streaming session");
+                            }
+                            Err(e) => {
+                                eprintln!("[Typr] Could not start Nemotron live streaming session: {}", e);
+                                *self.nemotron_session.lock().unwrap() = None;
+                            }
+                        }
+                    }
+                } else {
+                    *self.nemotron_session.lock().unwrap() = None;
+                }
             }
             Err(e) => {
                 // Revert state if starting failed, and drop the override so a session that
@@ -120,6 +144,7 @@ impl Recorder {
                 *state = RecordingState::Ready;
                 *self.session_override.lock().unwrap() = None;
                 *self.session_context.lock().unwrap() = None;
+                *self.nemotron_session.lock().unwrap() = None;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
@@ -211,9 +236,27 @@ impl Recorder {
                 transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
             }
             "nemotron" => {
-                let model_dir = app_dir
-                    .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
-                transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await
+                let live_session = self.nemotron_session.lock().unwrap().take();
+                let live_result = if let Some(session) = live_session {
+                    match session.finish() {
+                        Ok(text) if !text.trim().is_empty() => Some(text),
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!("[Typr] Nemotron live streaming error: {}, falling back to batch", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(text) = live_result {
+                    Ok(text)
+                } else {
+                    let model_dir = app_dir
+                        .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                    transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await
+                }
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };
@@ -474,6 +517,7 @@ impl Recorder {
     fn reset_ready(&self, app: &AppHandle) {
         let mut state = self.state.lock().unwrap();
         *state = RecordingState::Ready;
+        *self.nemotron_session.lock().unwrap() = None;
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
     }

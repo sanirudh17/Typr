@@ -901,8 +901,14 @@ async fn do_toggle_recording(
         RecordingState::Ready => {
             let session_override = profile_override_for(state, source);
             prewarm_local(app);
-            let mic = state.settings.lock().unwrap().microphone.clone();
-            state.recorder.start_recording(app, &mic, session_override)?;
+            let settings = state.settings.lock().unwrap().clone();
+            let mic = settings.microphone.clone();
+            let nemotron_dir = state
+                .app_dir
+                .join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+            state
+                .recorder
+                .start_recording(app, &mic, session_override, &settings.engine, Some(&nemotron_dir), settings.input_gain_db)?;
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
@@ -1319,8 +1325,19 @@ fn main() {
                                     if current == RecordingState::Ready {
                                         let session_override = profile_override_for(state.inner(), hotkey_event.source);
                                         prewarm_local(&rx_handle);
-                                        let mic = state.settings.lock().unwrap().microphone.clone();
-                                        match state.recorder.start_recording(&rx_handle, &mic, session_override) {
+                                        let settings = state.settings.lock().unwrap().clone();
+                                        let mic = settings.microphone.clone();
+                                        let nemotron_dir = state
+                                            .app_dir
+                                            .join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                                        match state.recorder.start_recording(
+                                            &rx_handle,
+                                            &mic,
+                                            session_override,
+                                            &settings.engine,
+                                            Some(&nemotron_dir),
+                                            settings.input_gain_db,
+                                        ) {
                                             Ok(_) => println!("[Typr] Recording started"),
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),
                                         }
