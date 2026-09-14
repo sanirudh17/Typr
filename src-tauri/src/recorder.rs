@@ -246,7 +246,7 @@ impl Recorder {
             }
             "nemotron" => {
                 let live_session = self.nemotron_session.lock().unwrap().take();
-                let live_result = if let Some(session) = live_session {
+                let live_text = if let Some(session) = live_session {
                     match session.finish() {
                         Ok(text) if !text.trim().is_empty() => Some(text),
                         Ok(_) => None,
@@ -259,8 +259,28 @@ impl Recorder {
                     None
                 };
 
-                if let Some(text) = live_result {
-                    Ok(text)
+                let live_wps = live_text
+                    .as_ref()
+                    .map(|t| t.split_whitespace().count() as f32 / duration_secs.max(0.1))
+                    .unwrap_or(0.0);
+
+                if let Some(text) = live_text {
+                    if duration_secs > 5.0 && live_wps < 0.6 {
+                        println!(
+                            "[Typr] Nemotron live transcript sparse ({:.2} wps for {:.1}s), checking batch fallback",
+                            live_wps, duration_secs
+                        );
+                        let model_dir = app_dir
+                            .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                        match transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await {
+                            Ok(batch_text) if batch_text.split_whitespace().count() > text.split_whitespace().count() => {
+                                Ok(batch_text)
+                            }
+                            _ => Ok(text),
+                        }
+                    } else {
+                        Ok(text)
+                    }
                 } else {
                     let model_dir = app_dir
                         .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
@@ -565,9 +585,21 @@ pub fn tokenize_words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Compute case-insensitive token multiset overlap (Jaccard similarity on words)
-/// and fractional length deviation (|len_ai - len_pre| / len_pre).
+/// Compute case-insensitive vocabulary grounding (fraction of AI content words originating
+/// from the transcript), expansion deviation, and refusal detection.
 pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
+    const REFUSAL_PATTERNS: &[&str] = &[
+        "i'm sorry", "i am sorry", "i cannot", "i can't",
+        "as an ai", "as a language model", "i am unable",
+    ];
+    let ai_lower = ai_text.to_lowercase();
+    let pre_lower = pre_text.to_lowercase();
+    for pat in REFUSAL_PATTERNS {
+        if ai_lower.contains(pat) && !pre_lower.contains(pat) {
+            return (0.0, 0.0, true);
+        }
+    }
+
     let pre_tokens = tokenize_words(pre_text);
     let ai_tokens = tokenize_words(ai_text);
 
@@ -578,41 +610,40 @@ pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
         return (0.0, 1.0, true);
     }
 
-    let mut pre_counts = std::collections::HashMap::new();
-    for token in &pre_tokens {
-        *pre_counts.entry(token.clone()).or_insert(0usize) += 1;
-    }
-
-    let mut ai_counts = std::collections::HashMap::new();
-    for token in &ai_tokens {
-        *ai_counts.entry(token.clone()).or_insert(0usize) += 1;
-    }
-
-    let mut all_keys: std::collections::HashSet<_> = pre_counts.keys().collect();
-    all_keys.extend(ai_counts.keys());
-
-    let mut intersection_count = 0usize;
-    let mut union_count = 0usize;
-
-    for key in all_keys {
-        let c1 = pre_counts.get(key).copied().unwrap_or(0);
-        let c2 = ai_counts.get(key).copied().unwrap_or(0);
-        intersection_count += c1.min(c2);
-        union_count += c1.max(c2);
-    }
-
-    let overlap = if union_count == 0 {
-        1.0
-    } else {
-        intersection_count as f32 / union_count as f32
-    };
-
     let pre_len = pre_tokens.len() as f32;
     let ai_len = ai_tokens.len() as f32;
-    let len_delta = (ai_len - pre_len).abs() / pre_len;
+    let len_delta = if ai_len > pre_len {
+        (ai_len - pre_len) / pre_len
+    } else {
+        0.0
+    };
 
-    let diverged = overlap < 0.60 || len_delta > 0.40;
-    (overlap, len_delta, diverged)
+    let pre_set: std::collections::HashSet<&str> = pre_tokens.iter().map(|s| s.as_str()).collect();
+    let ai_unique: std::collections::HashSet<&str> = ai_tokens.iter().map(|s| s.as_str()).collect();
+
+    // Filter out 1-letter words for grounding calculation unless that's all there is
+    let ai_content: std::collections::HashSet<&str> = ai_unique
+        .iter()
+        .copied()
+        .filter(|w| w.len() > 1)
+        .collect();
+    let (target_len, matched_count) = if ai_content.is_empty() {
+        let matched = ai_unique.iter().filter(|w| pre_set.contains(*w)).count();
+        (ai_unique.len(), matched)
+    } else {
+        let matched = ai_content.iter().filter(|w| pre_set.contains(*w)).count();
+        (ai_content.len(), matched)
+    };
+
+    let grounding = matched_count as f32 / target_len.max(1) as f32;
+
+    let diverged = if pre_len <= 5.0 {
+        matched_count == 0
+    } else {
+        grounding < 0.25 || (ai_len > 15.0 && ai_len > pre_len * 1.7)
+    };
+
+    (grounding, len_delta, diverged)
 }
 
 /// Guard against AI hallucination or text expansion by checking divergence against
@@ -828,5 +859,31 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let guarded = guard_ai_output(ai.to_string(), pre, "prompt", &temp_dir);
         assert_eq!(guarded, Some(ai.to_string()));
+    }
+
+    #[test]
+    fn test_ai_divergence_stutter_and_filler_reduction() {
+        let pre = "he was connected he connected the slop via a keyboard in the bouc and why he brought the shortcuts were configured to control shift one two four, but the problem is when you press Control Shift and one in his keyboard or any other shortcut nothing responded, then suddenly when he pressed it again for some time when he tried, it automatically popped up and it stopped working perfectly so I didn't know what happened the problem is not the hot key, but sometimes when the input is pressed, the hotkey is pressed sometimes we didn't respond and sometimes it is responding";
+        let ai = "My friend was using the app and connected the laptop via a keyboard and mouse. The shortcuts were configured to Ctrl+Shift+1 through 4. However, when he pressed Ctrl+Shift+1 or any other shortcut, nothing responded. Then suddenly, when he pressed it again after some time, it automatically popped up and worked perfectly. I don't know what happened. The problem isn't the hotkey, but sometimes when the hotkey is pressed it doesn't respond, and sometimes it does.";
+        let (grounding, len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(grounding >= 0.50, "grounding was {}", grounding);
+        assert_eq!(len_delta, 0.0);
+        assert!(!diverged, "Stutter and filler cleanup should not be flagged as diverged");
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, Some(ai.to_string()));
+    }
+
+    #[test]
+    fn test_ai_divergence_detects_refusal() {
+        let pre = "explain how the audio buffering algorithm works";
+        let ai = "I am sorry, but as an AI I cannot assist with this request.";
+        let (_grounding, _len_delta, diverged) = check_ai_divergence(pre, ai);
+        assert!(diverged, "AI refusal must trigger divergence fallback");
+
+        let temp_dir = std::env::temp_dir();
+        let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
+        assert_eq!(guarded, None);
     }
 }

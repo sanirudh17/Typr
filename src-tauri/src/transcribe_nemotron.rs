@@ -119,25 +119,9 @@ impl NemotronLiveSession {
                     *s *= factor;
                 }
             }
-            let mut resampled = crate::audio::resample(&mono, src_rate, 16000);
-            crate::audio::highpass_50hz(&mut resampled, 16000);
-            let energy: f32 = resampled.iter().map(|&x| x * x).sum();
-            let chunk_rms = (energy / resampled.len().max(1) as f32).sqrt();
-            if chunk_rms >= 0.003 {
-                let gain = (0.08 / chunk_rms).clamp(0.5, 8.0);
-                for s in resampled.iter_mut() {
-                    *s *= gain;
-                }
-                crate::audio::apply_tanh_limiter(&mut resampled, 0.75, 0.95);
-            }
+            let resampled = crate::audio::resample(&mono, src_rate, 16000);
             stream.accept_waveform(16000, &resampled);
         }
-
-        // Comfort tail silence padding (400ms = 6400 samples @ 16kHz)
-        let tail_silence = vec![0.0f32; 6400];
-        stream.accept_waveform(16000, &tail_silence);
-
-        stream.input_finished();
 
         let guard = RECOGNIZER
             .lock()
@@ -147,6 +131,14 @@ impl NemotronLiveSession {
             .ok_or_else(|| "Nemotron recognizer missing".to_string())?
             .1;
 
+        // Comfort tail silence padding (1.0s = 16000 samples @ 16kHz) to fully flush the 1120ms chunk
+        let tail_silence = vec![0.0f32; 16000];
+        stream.accept_waveform(16000, &tail_silence);
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+
+        stream.input_finished();
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
         }
@@ -214,7 +206,6 @@ pub fn start_live_session(
         .name("nemotron-live-stream".to_string())
         .spawn(move || {
             let mut last_read = 0usize;
-            let mut running_rms = 0.05f32;
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let (new_samples, new_end, src_rate, src_channels) = {
@@ -239,20 +230,7 @@ pub fn start_live_session(
                         *s *= factor;
                     }
                 }
-                let mut resampled = crate::audio::resample(&mono, src_rate, 16000);
-                crate::audio::highpass_50hz(&mut resampled, 16000);
-
-                // Adaptive RMS normalization matching batch target (0.08)
-                let energy: f32 = resampled.iter().map(|&x| x * x).sum();
-                let chunk_rms = (energy / resampled.len().max(1) as f32).sqrt();
-                if chunk_rms >= 0.003 {
-                    running_rms = (running_rms * 0.85 + chunk_rms * 0.15).max(0.005);
-                    let gain = (0.08 / running_rms).clamp(0.5, 8.0);
-                    for s in resampled.iter_mut() {
-                        *s *= gain;
-                    }
-                    crate::audio::apply_tanh_limiter(&mut resampled, 0.75, 0.95);
-                }
+                let resampled = crate::audio::resample(&mono, src_rate, 16000);
 
                 stream.accept_waveform(16000, &resampled);
                 if let Ok(guard) = RECOGNIZER.lock() {
@@ -420,7 +398,14 @@ pub async fn transcribe_nemotron(
             recognizer.decode(&stream);
         }
 
-        // Flush tail tokens with zero-padded final frames
+        // Comfort tail silence padding (1.0s = 16000 samples @ 16kHz) to fully flush FastConformer chunks
+        let tail_silence = vec![0.0f32; 16000];
+        stream.accept_waveform(16000, &tail_silence);
+        while recognizer.is_ready(&stream) {
+            recognizer.decode(&stream);
+        }
+
+        // Flush tail tokens with final frames
         stream.input_finished();
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
