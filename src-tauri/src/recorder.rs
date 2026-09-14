@@ -425,12 +425,18 @@ impl Recorder {
                     &settings.ai_prompt_format,
                 )
             };
+            let vocab_hints = {
+                let dict = dictionary.lock().unwrap();
+                dict.vocabulary_hints.clone()
+            };
+            let base_with_vocab = append_vocabulary_hints(base_prompt, &vocab_hints);
+
             // Base prompt + the never-refuse contract + the user's cross-profile style
             // modifiers (Tone / Formatting / Custom Instructions). The modifiers land last so an
             // explicit setting overrides the profile's built-in style, but they can never
             // loosen the contract.
             let system_prompt = ai_postprocess::build_system_prompt(
-                base_prompt,
+                &base_with_vocab,
                 &settings.ai_tone,
                 &settings.ai_format,
                 &settings.ai_custom_instructions,
@@ -573,6 +579,36 @@ fn choose_final(llm: Option<String>, fallback: String) -> String {
     match llm {
         Some(s) if !s.trim().is_empty() => s,
         _ => fallback,
+    }
+}
+
+/// Inject user dictionary hints and built-in speech-to-text / developer terms into the base prompt
+/// so that phonetic mis-hearings (e.g. "separate, and this bar" -> "Parakeet and Whisper",
+/// "hand of" -> "handoff", "open code" -> "OpenCode", "Shift plus Pix" -> "Shift+A") are accurately corrected by the LLM.
+pub fn append_vocabulary_hints(base_prompt: &str, user_hints: &[String]) -> String {
+    let mut terms: Vec<String> = vec![
+        "Parakeet".into(),
+        "Whisper".into(),
+        "Nemotron".into(),
+        "OpenCode".into(),
+        "Orca".into(),
+        "handoff".into(),
+        "screenshot".into(),
+    ];
+    for hint in user_hints {
+        let trimmed = hint.trim();
+        if !trimmed.is_empty() && !terms.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+            terms.push(trimmed.to_string());
+        }
+    }
+    if !terms.is_empty() {
+        format!(
+            "{}\n\nRecognized Vocabulary & Technical Terms:\nThe user and codebase frequently use the following terms. When speech-to-text produces phonetically similar words or garbled fragments, prioritize matching against these terms:\n{}",
+            base_prompt,
+            terms.join(", ")
+        )
+    } else {
+        base_prompt.to_string()
     }
 }
 
@@ -885,5 +921,27 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let guarded = guard_ai_output(ai.to_string(), pre, "cleanup", &temp_dir);
         assert_eq!(guarded, None);
+    }
+
+    #[test]
+    fn test_append_vocabulary_hints() {
+        let base = "Base prompt content.";
+        let user_hints = vec!["customTerm".to_string(), "whisper".to_string(), "  ".to_string()];
+        let augmented = append_vocabulary_hints(base, &user_hints);
+
+        assert!(augmented.starts_with("Base prompt content."));
+        assert!(augmented.contains("Recognized Vocabulary & Technical Terms:"));
+        assert!(augmented.contains("Parakeet"));
+        assert!(augmented.contains("Whisper"));
+        assert!(augmented.contains("Nemotron"));
+        assert!(augmented.contains("OpenCode"));
+        assert!(augmented.contains("Orca"));
+        assert!(augmented.contains("handoff"));
+        assert!(augmented.contains("screenshot"));
+        assert!(augmented.contains("customTerm"));
+
+        // Case-insensitive de-duplication: "whisper" in user_hints should not duplicate "Whisper"
+        let count_whisper = augmented.to_lowercase().matches("whisper").count();
+        assert_eq!(count_whisper, 1);
     }
 }

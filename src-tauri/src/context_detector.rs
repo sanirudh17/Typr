@@ -256,7 +256,7 @@ pub fn resolve_category(
         | "pycharm64.exe" | "webstorm64.exe" | "rider64.exe" | "clion64.exe"
         | "goland64.exe" | "zed.exe" | "windsurf.exe"
         | "conemu64.exe" | "hyper.exe" | "tabby.exe" | "mintty.exe"
-        | "putty.exe" | "kitty.exe" | "ghostty.exe" => return ContextCategory::Developer,
+        | "putty.exe" | "kitty.exe" | "ghostty.exe" | "orca.exe" | "opencode.exe" => return ContextCategory::Developer,
 
         // Professional
         "winword.exe" | "excel.exe" | "powerpnt.exe" | "notion.exe"
@@ -508,7 +508,7 @@ mod tests {
             "pycharm64.exe", "webstorm64.exe", "rider64.exe",
             "clion64.exe", "goland64.exe", "zed.exe", "windsurf.exe",
             "conemu64.exe", "hyper.exe", "tabby.exe", "mintty.exe",
-            "putty.exe", "kitty.exe", "ghostty.exe",
+            "putty.exe", "kitty.exe", "ghostty.exe", "orca.exe", "opencode.exe",
         ] {
             let app = ForegroundApp { process_name: proc.into(), window_title: String::new() };
             assert_eq!(
