@@ -67,13 +67,20 @@ pub async fn transcribe_groq(
         groq_model_id(model)
     );
 
-    let mut parts: Vec<(String, bool)> = Vec::with_capacity(chunks.len());
-    for chunk in &chunks {
+    // Fire all chunk requests concurrently: sequential round-trips made total latency the
+    // SUM of every chunk (a 40s dictation = 2-3 chunks x retry cycle = the reported 4-5s;
+    // parallel it's the slowest chunk alone). Order is preserved for merge_chunk_texts.
+    let futures = chunks.iter().map(|chunk| async move {
         let chunk_bytes = crate::audio_chunker::samples_to_wav_bytes(chunk.samples, sample_rate)?;
         let chunk_text = post_groq_chunk(api_key, chunk_bytes, model).await?;
-        let trimmed = chunk_text.trim().to_string();
+        Ok::<(String, bool), String>((chunk_text.trim().to_string(), chunk.overlaps_previous))
+    });
+    let results = futures_util::future::join_all(futures).await;
+    let mut parts: Vec<(String, bool)> = Vec::with_capacity(results.len());
+    for result in results {
+        let (trimmed, overlaps_previous) = result?;
         if !trimmed.is_empty() {
-            parts.push((trimmed, chunk.overlaps_previous));
+            parts.push((trimmed, overlaps_previous));
         }
     }
 

@@ -79,6 +79,23 @@ pub fn strip_filler_words(text: &str) -> String {
     if text.trim().is_empty() {
         return text.to_string();
     }
+    // Line-by-line so AI-produced bullets and paragraph breaks survive this pass — a
+    // whole-text split_whitespace() would flatten every newline to a single space and
+    // destroy the layout the AI pass just produced.
+    if text.contains('\n') {
+        return text
+            .split('\n')
+            .map(strip_filler_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    strip_filler_line(text)
+}
+
+fn strip_filler_line(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
     const SINGLE_FILLER: &[&str] = &["um", "uh", "er", "ah", "hmm", "erm", "uhm"];
     let raw_tokens: Vec<&str> = text.split_whitespace().collect();
     let mut kept: Vec<String> = Vec::new();
@@ -152,6 +169,22 @@ pub fn deduplicate_text(text: &str) -> String {
     if text.trim().is_empty() {
         return text.to_string();
     }
+    // Line-by-line: newline structure from the AI pass must survive, and a stutter never
+    // spans a line break anyway.
+    if text.contains('\n') {
+        return text
+            .split('\n')
+            .map(deduplicate_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    deduplicate_line(text)
+}
+
+fn deduplicate_line(text: &str) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
     let tokens: Vec<&str> = text.split_whitespace().collect();
     if tokens.len() <= 1 {
         return text.to_string();
@@ -215,6 +248,56 @@ fn last_token_is_verbatim(s: &str) -> bool {
         Some(tok) => tok.contains('@') || tok.contains("://"),
         None => false,
     }
+}
+
+/// Drop a trailing close/stop marker from the finished transcript. When the user whispers
+/// an end-of-session cue ("stop", "end session") right as they release the hotkey, that
+/// audio still reaches the engine — it is a signal to the recorder, not content, and must
+/// never be pasted into the target window. Markers are matched on the very end of the text
+/// (with optional trailing sentence punctuation); anything else is left untouched.
+pub fn strip_trailing_stop_phrase(text: &str) -> String {
+    const SESSION_MARKERS: &[&str] = &[
+        "stop recording",
+        "stop dictation",
+        "stop listening",
+        "end recording",
+        "end a session",
+        "end session",
+        "close a session",
+        "close session",
+    ];
+    // Ordinary English phrases that double as a whispered cue. They are stripped only from
+    // a very short utterance ("stop", "okay stop") — never from dictated content that merely
+    // happens to end with them ("...We should stop." must keep its "stop"; silently deleting
+    // content is worse than pasting one stray cue word).
+    const AMBIGUOUS_MARKERS: &[&str] = &["that's all", "that's it", "stop"];
+    const MAX_WORDS_FOR_AMBIGUOUS: usize = 2;
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+    // ASCII lowercasing preserves byte offsets, so cuts on `lower` index `trimmed` safely.
+    let lower = trimmed.to_ascii_lowercase();
+    let body = lower.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?' | ',' | ';' | ':'));
+    let try_strip = |markers: &[&str]| -> Option<String> {
+        for marker in markers {
+            if let Some(rest) = body.strip_suffix(marker) {
+                if rest.is_empty() || rest.ends_with(' ') || rest.ends_with('\n') {
+                    return Some(body[..rest.len()].trim_end().to_string());
+                }
+            }
+        }
+        None
+    };
+    if let Some(stripped) = try_strip(SESSION_MARKERS) {
+        return stripped;
+    }
+    if body.split_whitespace().count() <= MAX_WORDS_FOR_AMBIGUOUS {
+        if let Some(stripped) = try_strip(AMBIGUOUS_MARKERS) {
+            return stripped;
+        }
+    }
+    text.to_string()
 }
 
 #[cfg(test)]
@@ -390,6 +473,59 @@ mod tests {
         assert_eq!(
             strip_filler_words("it was you know great"),
             "it was great"
+        );
+    }
+
+    /// AI-produced bullets and paragraphs must survive the deterministic passes — the whole
+    /// point of "make it a list" / Auto-mode formatting is lost if newlines are flattened.
+    #[test]
+    fn test_filler_and_dedup_preserve_newlines() {
+        let bullets = "- um buy milk\n- buy eggs";
+        assert_eq!(strip_filler_words(bullets), "- buy milk\n- buy eggs");
+        assert_eq!(
+            deduplicate_text("hello hello\nworld world"),
+            "hello\nworld"
+        );
+        // Dedup never crosses a line boundary.
+        assert_eq!(deduplicate_text("hello\nhello"), "hello\nhello");
+        // Single-line behavior is unchanged.
+        assert_eq!(strip_filler_words("um buy milk"), "buy milk");
+    }
+
+    #[test]
+    fn test_strip_trailing_stop_phrase() {
+        // The whispered close cue never reaches the target window (short utterance).
+        assert_eq!(strip_trailing_stop_phrase("hello stop."), "hello");
+        assert_eq!(strip_trailing_stop_phrase("okay stop"), "okay");
+        assert_eq!(strip_trailing_stop_phrase("stop"), "");
+        assert_eq!(strip_trailing_stop_phrase("fix the bug end session"), "fix the bug");
+        // The bug report's own wording: "when I whisper to close a session".
+        assert_eq!(strip_trailing_stop_phrase("okay close a session"), "okay");
+        assert_eq!(strip_trailing_stop_phrase("done, end a session"), "done,");
+        // Data-loss guard: real dictated content that merely ends with an ambiguous cue word
+        // must keep it. (Manual test run: "This is a test running plus 12 decimals. We should
+        // stop." was pasted as "...We should" — the strip ate the content word "stop".)
+        assert_eq!(
+            strip_trailing_stop_phrase("This is a test running plus 12 decimals. We should stop."),
+            "This is a test running plus 12 decimals. We should stop."
+        );
+        assert_eq!(
+            strip_trailing_stop_phrase("close the modal stop"),
+            "close the modal stop"
+        );
+        // Markers in the middle or followed by content are ordinary words.
+        assert_eq!(
+            strip_trailing_stop_phrase("press the stop button"),
+            "press the stop button"
+        );
+        assert_eq!(
+            strip_trailing_stop_phrase("we will stop soon"),
+            "we will stop soon"
+        );
+        // Nothing to strip.
+        assert_eq!(
+            strip_trailing_stop_phrase("ship the release"),
+            "ship the release"
         );
     }
 }

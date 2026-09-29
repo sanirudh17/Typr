@@ -186,6 +186,23 @@ fn hotkey_candidates(preferred: &str) -> Vec<String> {
     candidates
 }
 
+/// Re-sync tao's cached visibility flag with the real window (bug #12).
+///
+/// tao tracks visibility in an internal flag and only calls ShowWindow when that flag
+/// *changes* — `apply_diff` early-returns on an empty diff. A second process re-showing
+/// the window with raw Win32 (`try_focus_existing_window`) leaves the window really
+/// visible while tao's flag still says hidden. From then on:
+/// - close (`set_visible(false)`) no-ops — the button "flashes red" but nothing hides;
+/// - any *other* flag change (maximize/minimize/style) reaches the
+///   `!new.contains(VISIBLE) → ShowWindow(SW_HIDE)` branch and the window vanishes.
+/// Re-asserting `set_visible(true)` while the window is really visible forces tao's
+/// flag back in sync; when already in sync it is a cheap no-op.
+fn resync_visibility(w: &tauri::WebviewWindow) {
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.show();
+    }
+}
+
 /// Shows the main window once the frontend DOM has committed and painted its initial frame.
 /// Keeps the window invisible during cold-start WebView2 initialization to avoid the black/blank flash.
 #[tauri::command]
@@ -194,11 +211,26 @@ fn show_main_window(app: tauri::AppHandle) {
         return;
     }
     if let Some(w) = app.get_webview_window("main") {
+        resync_visibility(&w);
         if !w.is_visible().unwrap_or(false) {
             let _ = w.center();
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
+        }
+    }
+}
+
+/// Frontend maximize button. Resyncs visibility first: without it, toggling maximize on a
+/// window whose cached VISIBLE flag is stale hides the window instead (bug #12).
+#[tauri::command]
+fn toggle_app_maximize(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        resync_visibility(&w);
+        if w.is_maximized().unwrap_or(false) {
+            let _ = w.unmaximize();
+        } else {
+            let _ = w.maximize();
         }
     }
 }
@@ -943,6 +975,9 @@ async fn handle_close_requested(app: &tauri::AppHandle) {
     if background {
         // Hide to tray, keep running so the hotkey still works.
         if let Some(w) = app.get_webview_window("main") {
+            // Re-sync tao's cached VISIBLE flag first — otherwise hide() silently no-ops
+            // on a stale flag and the window never closes (bug #12).
+            resync_visibility(&w);
             let _ = w.hide();
         }
         if !FIRST_HIDE_NOTIFIED.swap(true, Ordering::SeqCst) {
@@ -1050,6 +1085,7 @@ fn main() {
             remove_app_rule,
             show_main_window,
             request_app_close,
+            toggle_app_maximize,
         ])
         .setup(move |app| {
             // Build the main window here, not in tauri.conf: only the builder can
@@ -1144,12 +1180,23 @@ fn main() {
 
                     let app_handle = app.handle().clone();
                     window.on_window_event(move |event| {
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            api.prevent_close();
-                            let h = app_handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                handle_close_requested(&h).await;
-                            });
+                        match event {
+                            tauri::WindowEvent::CloseRequested { api, .. } => {
+                                api.prevent_close();
+                                let h = app_handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    handle_close_requested(&h).await;
+                                });
+                            }
+                            // Heal the moment a window re-gains focus (e.g. it was restored
+                            // behind Tauri's back by a second process): re-syncing here means
+                            // close/maximize work no matter how the window got re-shown.
+                            tauri::WindowEvent::Focused(true) => {
+                                if let Some(w) = app_handle.get_webview_window("main") {
+                                    resync_visibility(&w);
+                                }
+                            }
+                            _ => {}
                         }
                     });
                 }

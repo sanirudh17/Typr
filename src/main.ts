@@ -322,15 +322,23 @@ const maximizeIcon = document.getElementById("maximize-icon")!;
 const restoreIcon = document.getElementById("restore-icon")!;
 
 minimizeBtn.addEventListener("click", () => {
-  appWindow.minimize();
+  appWindow.minimize().catch((err) => console.error("[Typr] minimize failed:", err));
 });
 
 maximizeBtn.addEventListener("click", () => {
-  appWindow.toggleMaximize();
+  // Routed through Rust: tao's cached visibility flag is resynced before the toggle,
+  // otherwise toggling maximize on a stale flag hides the window entirely (bug #12).
+  invoke("toggle_app_maximize").catch((err) => console.error("[Typr] maximize failed:", err));
 });
 
+let closeInFlight = false;
 closeBtn.addEventListener("click", () => {
-  invoke("request_app_close");
+  // Debounce: a no-op close used to queue a burst of requests (and spam the log).
+  if (closeInFlight) return;
+  closeInFlight = true;
+  invoke("request_app_close")
+    .catch((err) => console.error("[Typr] close failed:", err))
+    .finally(() => setTimeout(() => (closeInFlight = false), 500));
 });
 
 async function updateMaximizeIcon() {

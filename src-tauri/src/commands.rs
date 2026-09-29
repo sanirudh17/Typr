@@ -36,9 +36,46 @@ pub fn apply_commands(text: &str) -> String {
     out_lines.join("\n")
 }
 
+/// Whether a matched trigger at word `i` is a false positive in this position and must be
+/// emitted literally instead of applied.
+///
+/// Editing phrases ("scratch that", "delete last word") and "make it a list" are
+/// unambiguous multi-word commands whose entire purpose is mid-dictation correction, so
+/// they fire anywhere. Layout triggers ("new line", "new paragraph", "new bullet") also fire
+/// mid-utterance — voice commands are documented as spoken mid-sentence — with two prose
+/// exceptions: when the trigger heads a noun phrase ("a new line of credit", "launching a new
+/// line of products"), the following word "of" marks ordinary speech; and when the trigger is
+/// the "lane" mis-transcription preceded by an article ("adding a new lane to the highway"),
+/// which can only be a real lane, never the command (commands are spoken bare: "new lane").
+fn is_gated_prose(
+    kind: &Kind,
+    words: &[&str],
+    i: usize,
+    len: usize,
+    is_start_of_utterance: bool,
+    prev_was_command: bool,
+) -> bool {
+    if is_start_of_utterance || prev_was_command {
+        return false;
+    }
+    if !matches!(kind, Kind::NewLine | Kind::NewParagraph | Kind::Bullet) {
+        return false;
+    }
+    let next = words.get(i + len).map(|w| norm(w));
+    if matches!(next.as_deref(), Some("of")) {
+        return true;
+    }
+    // Article before the "lane" homophone: prose noun phrase.
+    if i > 0 && words.get(i + 1).map(|w| norm(w)).as_deref() == Some("lane") {
+        let prev = norm(words[i - 1]);
+        return matches!(prev.as_str(), "a" | "an" | "the");
+    }
+    false
+}
+
 /// Apply the commands within one line. Blank lines pass through untouched so paragraph breaks
-/// survive. Layout and edit triggers fire ONLY when unambiguous (at the start of the utterance
-/// or immediately after a previously applied command); casing and symbol triggers fire anywhere.
+/// survive. Casing and symbol triggers fire anywhere; layout and edit triggers fire anywhere
+/// except inside a prose noun phrase — see `is_gated_prose`.
 fn apply_commands_to_line(
     text: &str,
     mut is_start_of_utterance: bool,
@@ -53,8 +90,7 @@ fn apply_commands_to_line(
     while i < words.len() {
         match match_trigger(&words, i) {
             Some(Trigger { len, kind }) => {
-                let is_unambiguous = is_start_of_utterance || prev_was_command;
-                if kind.is_layout_or_edit() && !is_unambiguous {
+                if is_gated_prose(&kind, &words, i, len, is_start_of_utterance, prev_was_command) {
                     out.push_word(words[i]);
                     i += 1;
                     is_start_of_utterance = false;
@@ -203,21 +239,6 @@ enum Kind {
     MakeList,
 }
 
-impl Kind {
-    fn is_layout_or_edit(&self) -> bool {
-        matches!(
-            self,
-            Kind::NewLine
-                | Kind::NewParagraph
-                | Kind::Bullet
-                | Kind::Scratch
-                | Kind::ClearAll
-                | Kind::DeleteWords(_)
-                | Kind::MakeList
-        )
-    }
-}
-
 /// Lowercase a word and keep only alphanumerics — used for trigger matching and casing parts,
 /// so a cleanup-capitalized "ID." normalizes to "id".
 fn norm(w: &str) -> String {
@@ -344,7 +365,12 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
             ("snake", "case") => return Some(Trigger { len: 2, kind: Kind::Case(Casing::Snake) }),
             ("constant", "case") => return Some(Trigger { len: 2, kind: Kind::Case(Casing::Constant) }),
             ("kebab", "case") => return Some(Trigger { len: 2, kind: Kind::Case(Casing::Kebab) }),
-            ("new", "line") => return Some(Trigger { len: 2, kind: Kind::NewLine }),
+            // "lane" is the local engines' frequent mis-transcription of "line" (manual test:
+            // "This is a new test, new lane." never broke the line). Gated in prose by
+            // `is_gated_prose` below.
+            ("new", "line") | ("new", "lane") => {
+                return Some(Trigger { len: 2, kind: Kind::NewLine })
+            }
             ("new", "paragraph") => return Some(Trigger { len: 2, kind: Kind::NewParagraph }),
             ("new", "bullet") => return Some(Trigger { len: 2, kind: Kind::Bullet }),
             ("space", "bar") => return Some(Trigger { len: 2, kind: Kind::Space }),
@@ -429,8 +455,14 @@ pub fn contains_command(text: &str) -> bool {
     let mut prev_was_command = false;
     while i < words.len() {
         if let Some(trigger) = match_trigger(&words, i) {
-            let is_unambiguous = is_start_of_utterance || prev_was_command;
-            if trigger.kind.is_layout_or_edit() && !is_unambiguous {
+            if is_gated_prose(
+                &trigger.kind,
+                &words,
+                i,
+                trigger.len,
+                is_start_of_utterance,
+                prev_was_command,
+            ) {
                 i += 1;
                 is_start_of_utterance = false;
                 prev_was_command = false;
@@ -709,13 +741,14 @@ mod tests {
     #[test]
     fn test_new_line() {
         assert_eq!(apply_commands("new line first second"), "\nfirst second");
-        assert_eq!(apply_commands("first new line second"), "first new line second");
+        // Mid-utterance layout commands are documented as spoken mid-sentence.
+        assert_eq!(apply_commands("first new line second"), "first\nsecond");
     }
 
     #[test]
     fn test_new_paragraph() {
         assert_eq!(apply_commands("new paragraph first second"), "\n\nfirst second");
-        assert_eq!(apply_commands("first new paragraph second"), "first new paragraph second");
+        assert_eq!(apply_commands("first new paragraph second"), "first\n\nsecond");
     }
 
     #[test]
@@ -725,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_bullet_after_text_starts_new_line() {
-        assert_eq!(apply_commands("todo new bullet buy milk"), "todo new bullet buy milk");
+        assert_eq!(apply_commands("todo new bullet buy milk"), "todo\n- buy milk");
         assert_eq!(apply_commands("new bullet buy milk"), "- buy milk");
     }
 
@@ -838,16 +871,20 @@ mod tests {
 
     #[test]
     fn test_layout_triggers_in_prose_are_literal() {
-        // Layout triggers require being at the start of the utterance or immediately
-        // after an applied command. In prose, "a new line of credit" stays literal.
+        // The one prose exception: a layout trigger heading a noun phrase ("a new line of
+        // credit", "a new line of products") is ordinary speech and stays literal.
         assert_eq!(apply_commands("a new line of credit"), "a new line of credit");
+        assert_eq!(
+            apply_commands("we are launching a new line of products"),
+            "we are launching a new line of products"
+        );
     }
 
     // --- Transcription-robustness aliases (merged/split spellings from Whisper) ---
 
     #[test]
     fn test_newline_merged_spelling() {
-        assert_eq!(apply_commands("first newline second"), "first newline second");
+        assert_eq!(apply_commands("first newline second"), "first\nsecond");
         assert_eq!(apply_commands("newline first second"), "\nfirst second");
         assert_eq!(
             apply_commands("camel case get user by id newline done"),
@@ -856,8 +893,27 @@ mod tests {
     }
 
     #[test]
+    fn test_newlane_homophone() {
+        // Local engines mis-transcribe "line" as "lane" (manual test run: "This is a new
+        // test, new lane." never broke the line) — the bare command form still fires.
+        assert_eq!(apply_commands("first new lane second"), "first\nsecond");
+        assert_eq!(apply_commands("new lane first second"), "\nfirst second");
+        assert!(contains_command("this is a test right now, new lane"));
+        // A real lane noun phrase (article + lane) stays literal.
+        assert_eq!(
+            apply_commands("adding a new lane to the highway"),
+            "adding a new lane to the highway"
+        );
+        assert_eq!(
+            apply_commands("the new lane of traffic"),
+            "the new lane of traffic"
+        );
+        assert!(!contains_command("adding a new lane to the highway"));
+    }
+
+    #[test]
     fn test_newparagraph_merged_spelling() {
-        assert_eq!(apply_commands("first newparagraph second"), "first newparagraph second");
+        assert_eq!(apply_commands("first newparagraph second"), "first\n\nsecond");
         assert_eq!(apply_commands("newparagraph first second"), "\n\nfirst second");
     }
 
@@ -904,10 +960,10 @@ mod tests {
             apply_commands("camel case foo scratch that snake case bar"),
             "bar"
         );
-        // Mid-sentence prose is protected:
+        // Editing commands fire mid-dictation — that is their whole purpose.
         assert_eq!(
             apply_commands("we meet monday scratch that we meet tuesday"),
-            "we meet monday scratch that we meet tuesday"
+            "we meet tuesday"
         );
     }
 
@@ -919,13 +975,13 @@ mod tests {
     #[test]
     fn test_scratch_all_clears_everything() {
         assert_eq!(apply_commands("scratch all new plan"), "new plan");
-        assert_eq!(apply_commands("hello scratch all world"), "hello scratch all world");
+        assert_eq!(apply_commands("hello scratch all world"), "world");
     }
 
     #[test]
     fn test_delete_last_word() {
         assert_eq!(apply_commands("delete last word"), "");
-        assert_eq!(apply_commands("call him at five delete last word"), "call him at five delete last word");
+        assert_eq!(apply_commands("call him at five delete last word"), "call him at");
     }
 
     #[test]
@@ -938,13 +994,16 @@ mod tests {
 
     #[test]
     fn test_make_it_a_list() {
+        // No payload to list -> empty output (nothing to format).
         assert_eq!(
             apply_commands("make it a list"),
             ""
         );
+        // The documented example (index.html / README): the trigger at the END of the
+        // utterance converts the preceding phrase into bullets.
         assert_eq!(
             apply_commands("milk, eggs and bread make it a list"),
-            "milk, eggs and bread make it a list"
+            "- milk\n- eggs\n- bread"
         );
     }
 

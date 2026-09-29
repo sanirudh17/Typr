@@ -102,22 +102,18 @@ fn hint_matches(token_lower: &str, hint: &str) -> bool {
     if token_lower.contains('\'') && !hint_lower.contains('\'') {
         return false;
     }
-    // Phonetic gate, first-letter-insensitive: mis-hearings often drop or swap the
-    // first sound ("Ori"/"Hori" for "Tauri"), so a full-key match OR a match on the
-    // consonant-digit skeleton (key minus its leading letter) passes.
+    // Phonetic gate: the token must key to the same Soundex sound as the hint (a
+    // first-letter drop earns no extra tolerance — that was the "a syllable of a
+    // dictionary entry replaces the whole word" regression: "ori"/"hori" wiped out
+    // ordinary words because a skeleton-only match widened the edit budget to 3).
     let token_key = soundex(token_lower);
     let hint_key = soundex(&hint_lower);
-    if token_key.is_empty() || hint_key.is_empty() {
+    if token_key.is_empty() || hint_key.is_empty() || token_key != hint_key {
         return false;
     }
-    if token_key != hint_key && token_key[1..] != hint_key[1..] {
-        return false;
-    }
-    // A dropped/swapped first sound costs one edit, so a skeleton-only phonetic
-    // match (full keys differ) earns one extra edit of budget. Full-key matches
-    // keep the original tight threshold.
-    let budget = distance_threshold(hint_lower.len()) + usize::from(token_key != hint_key);
-    strsim::levenshtein(token_lower, &hint_lower) <= budget
+    // Tight edit budget only: a genuine mis-hearing differs by a letter or two
+    // ("kubernetis" -> "Kubernetes"), not by half the word.
+    strsim::levenshtein(token_lower, &hint_lower) <= distance_threshold(hint_lower.len())
 }
 
 /// Split a token into (leading non-alphanumerics, core, trailing non-alphanumerics),
@@ -168,6 +164,16 @@ pub fn correct_vocabulary(text: &str, hints: &[String]) -> String {
             }
             let core_lower = core.to_lowercase();
             for hint in hints {
+                // Case-only enforcement: the engine (or the AI pass) rendered the hint with
+                // the wrong case — "herdr"/"HERDR" for "Herdr". The spelling already matches,
+                // so snapping is safe; all-lowercase hints never rewrite (hint "claude" must
+                // not lowercase a proper "Claude").
+                if core != hint
+                    && core_lower == hint.to_lowercase()
+                    && hint.chars().any(|c| c.is_uppercase())
+                {
+                    return format!("{}{}{}", lead, hint, trail);
+                }
                 if hint_matches(&core_lower, hint) {
                     return format!("{}{}{}", lead, apply_casing(core, hint), trail);
                 }
@@ -224,7 +230,9 @@ mod tests {
             "Okay, let's move on to the branch"
         );
         // And the correction it exists to do still happens.
-        assert_eq!(correct_vocabulary("the ori framework", &hints), "the Tauri framework");
+        assert_eq!(correct_vocabulary("the tori framework", &hints), "the Tauri framework");
+        // A bare syllable of a hint is left alone (over-replacement regression guard).
+        assert_eq!(correct_vocabulary("the ori framework", &hints), "the ori framework");
     }
 
     #[test]
@@ -249,13 +257,29 @@ mod tests {
         assert!(!hint_matches("clod", "Claude"));
         // Same word (case-insensitively) is already correct → no match, no self-loop.
         assert!(!hint_matches("tauri", "Tauri"));
-        // First sound dropped/swapped by the engine — skeleton match rescues these.
-        assert!(hint_matches("ori", "Tauri"));
-        assert!(hint_matches("hori", "Tauri"));
+        // A bare syllable of the hint must never replace a whole word: skeleton-only
+        // matches earn no extra edit budget ("ori"/"hori" -> "Tauri" was the reported
+        // over-replacement).
+        assert!(!hint_matches("ori", "Tauri"));
+        assert!(!hint_matches("hori", "Tauri"));
         // Still safely blocked:
         assert!(!hint_matches("rory", "Tauri"));   // edit distance 4 — too far
         assert!(!hint_matches("ruse", "Rust"));    // skeletons differ (R200 vs R230)
         assert!(!hint_matches("wording", "whoring")); // common English word, never overwritten
+    }
+
+    #[test]
+    fn test_case_only_enforcement() {
+        // The exact "Herdr renders properly <25% of the time" symptom: the engine emits the
+        // right spelling with the wrong case, and the dictionary must snap it back.
+        let hints = vec!["Herdr".to_string(), "claude".to_string()];
+        assert_eq!(correct_vocabulary("the herdr agent docs", &hints), "the Herdr agent docs");
+        assert_eq!(correct_vocabulary("the HERDR agent docs", &hints), "the Herdr agent docs");
+        assert_eq!(correct_vocabulary("herdr", &hints), "Herdr");
+        // All-lowercase hints never rewrite casing — "Claude" stays a proper noun.
+        assert_eq!(correct_vocabulary("I love claude code", &hints), "I love claude code");
+        // Exact match untouched.
+        assert_eq!(correct_vocabulary("Herdr docs", &hints), "Herdr docs");
     }
 
     #[test]

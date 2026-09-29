@@ -31,7 +31,7 @@ All LLM prompts in `src-tauri/src/ai_postprocess.rs` must:
 - Format intelligently and automatically: long/multi-topic → short paragraphs (blank line), enumeration → `"- "` bullets. Do not force single paragraph, do not add bullets/headings to single thought. Each Auto profile (Messaging, Email, Professional, Developer) and `CLEANUP_PROMPT` + `PROMPT_MODE_NATURAL` carries its own variant — see tests `test_cleanup_prompt_guards_*`, `test_developer_prompt_guards_*`, `test_auto_prompts_all_guard_*`.
 - Preserve `NEVER_REFUSE_CLAUSE` ordering: `build_system_prompt(base, tone, format, custom)` = base + `NEVER_REFUSE_CLAUSE` + style suffix, contract before style.
 
-Tests: `cargo test --lib` must stay at 267+ passing (263 original + 4 new AI prompt guards). Do not weaken guards to make a prompt "shorter".
+Tests: `cargo test --lib` must stay at 329+ passing (prompt/command/dictionary/window guard tests included). Do not weaken guards to make a prompt "shorter".
 
 ## 3. Native `<select>` dropdowns are banned
 
@@ -45,5 +45,5 @@ All `<select>` elements must use the custom dark panel that matches `.app-picker
 
 - TypeScript: `C:\Users\sanir\Typr\node_modules\.bin\tsc.cmd --noEmit --project tsconfig.json` (or `npx tsc`) — must be clean.
 - Frontend: `vite build` — must succeed (catches `style.css` stray `}`).
-- Rust: `cargo test --lib` (needs dummy `src-tauri/binaries/*.dll` + `whisper-*.exe` placeholders if `tauri.conf.json` resources are missing). Current baseline: 267 passed.
+- Rust: `cargo test --lib` (needs dummy `src-tauri/binaries/*.dll` + `whisper-*.exe` placeholders if `tauri.conf.json` resources are missing). Current baseline: 329 passed.
 - Do not edit `package.json` manually for deps — use install command.

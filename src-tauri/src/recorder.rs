@@ -115,6 +115,7 @@ impl Recorder {
         // 2. Start audio stream holding the audio recorder lock briefly
         let start_res = {
             let mut recorder = self.audio_recorder.lock().unwrap();
+            recorder.set_meter_gain(input_gain_db);
             recorder.start(mic_name)
         };
 
@@ -359,9 +360,10 @@ impl Recorder {
 
         // Command-bearing dictations (casing/layout/symbols) go straight to the deterministic
         // path: the LLM would otherwise reword or half-apply the command phrases before the
-        // command pass runs. Prompt Mode is exempt — its whole job is to rewrite the utterance.
-        let bypass_ai_for_commands =
-            settings.ai_profile != "prompt" && commands::contains_command(&replaced);
+        // command pass runs. This includes Prompt Mode — an explicit voice command is a
+        // direct instruction whose reliability outweighs the rewrite, and the log showed the
+        // LLM deleting "Make it a list" before the command pass ever saw it.
+        let bypass_ai_for_commands = commands::contains_command(&replaced);
         if bypass_ai_for_commands {
             crate::debug_log::log(app_dir, "commands present -> raw text + command pass (skipping AI & prose cleanup)");
         }
@@ -520,11 +522,32 @@ impl Recorder {
         let final_text = crate::cleanup::deduplicate_text(&final_text);
         crate::debug_log::log(app_dir, &format!("STAGE 5 [dedup]: {}", final_text));
 
+        // Re-assert the dictionary after the AI pass: the LLM can silently revert a
+        // corrected spelling or snippet expansion on some runs but not others — exactly
+        // the "sometimes works, sometimes doesn't" dictionary symptom. Both steps are
+        // deterministic and idempotent, so running them again is safe.
+        let final_text = {
+            let dict = dictionary.lock().unwrap();
+            let corrected =
+                crate::vocab_correct::correct_vocabulary(&final_text, &dict.vocabulary_hints);
+            dict.apply_replacements(&corrected)
+        };
+        crate::debug_log::log(app_dir, &format!("STAGE 5.5 [dictionary re-assert]: {}", final_text));
+
         // Final deterministic pass: apply always-on voice commands (casing / layout / symbols).
         // Runs after cleanup and any AI pass so nothing downstream can undo it; identical
         // behavior whether AI is on or off.
         let final_text = commands::apply_commands(&final_text);
         crate::debug_log::log(app_dir, &format!("STAGE 6 [commands]: {}", final_text));
+
+        // A whispered trailing stop/close marker ("stop", "end session") is a signal to the
+        // recorder, not content — drop it so it never reaches the target window.
+        let final_text = crate::cleanup::strip_trailing_stop_phrase(&final_text);
+        // No trailing whitespace in the pasted payload: in a terminal a trailing newline
+        // acts as Enter and executes the last line (bug #2: "commands executed"), and in
+        // editors it leaves a stray blank line. Interior newlines from "new line" /
+        // bullets are untouched.
+        let final_text = final_text.trim_end().to_string();
 
         // Transcription + AI cleanup are done; clear the spinner now, then paste so the text
         // appears right as the overlay disappears. Resetting before paste also guarantees the
@@ -627,6 +650,9 @@ pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
     const REFUSAL_PATTERNS: &[&str] = &[
         "i'm sorry", "i am sorry", "i cannot", "i can't",
         "as an ai", "as a language model", "i am unable",
+        // Reply-shaped signatures: the model answering the user instead of transcribing
+        // (e.g. "That's not the purpose of a voice…").
+        "not the purpose", "i'm here to", "i am here to", "my purpose is",
     ];
     let ai_lower = ai_text.to_lowercase();
     let pre_lower = pre_text.to_lowercase();
@@ -674,7 +700,11 @@ pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
     let grounding = matched_count as f32 / target_len.max(1) as f32;
 
     let diverged = if pre_len <= 5.0 {
-        matched_count == 0
+        // Short dictations were the hole an "answered instead of transcribed" reply slipped
+        // through: one shared word used to defeat the guard. Require most content words to
+        // originate from the transcript and reject obvious length blowouts — a reply to a
+        // 5-word question ("Do you support computer use?") is both.
+        matched_count == 0 || grounding < 0.5 || ai_len > (pre_len * 1.7).max(pre_len + 3.0)
     } else {
         grounding < 0.25 || (ai_len > 15.0 && ai_len > pre_len * 1.7)
     };

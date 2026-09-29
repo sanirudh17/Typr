@@ -99,6 +99,9 @@ pub struct AudioRecorder {
     /// Slowly-adapting AGC peak: a stable normalization reference across FFT blocks so
     /// the bar shape doesn't re-scale to each block's own max (the shimmer source).
     agc_max: Arc<Mutex<f32>>,
+    /// Linear input-gain factor shown on the live amplitude meter, so the bar reflects
+    /// what the transcription chain will actually hear (set from settings before start).
+    meter_gain: Arc<Mutex<f32>>,
 }
 
 /// Asymmetric temporal EMA: fast attack (rising toward a higher target), slow release
@@ -146,7 +149,13 @@ impl AudioRecorder {
             frequency_bands: Arc::new(Mutex::new(vec![0.0; 16])),
             fft_callback_divider: Arc::new(Mutex::new(0)),
             agc_max: Arc::new(Mutex::new(0.0001)),
+            meter_gain: Arc::new(Mutex::new(1.0)),
         }
+    }
+
+    /// Set the live meter's gain factor from the user's input-gain setting (linear).
+    pub fn set_meter_gain(&self, gain_db: f32) {
+        *self.meter_gain.lock().unwrap() = 10f32.powf(gain_db / 20.0);
     }
 
     pub fn get_amplitude_ring(&self) -> Vec<f32> {
@@ -250,6 +259,7 @@ impl AudioRecorder {
         let frequency_bands = self.frequency_bands.clone();
         let fft_callback_divider = self.fft_callback_divider.clone();
         let agc_max = self.agc_max.clone();
+        let meter_gain = self.meter_gain.clone();
         let stream_errored = self.stream_errored.clone();
 
         let stream = device
@@ -260,7 +270,8 @@ impl AudioRecorder {
                     buf.extend_from_slice(data);
 
                     let rms = (data.iter().map(|&x| x * x).sum::<f32>() / data.len() as f32).sqrt();
-                    let normalized_amp = (rms * 8.0).min(1.0);
+                    let gain = *meter_gain.lock().unwrap();
+                    let normalized_amp = (rms * gain * 8.0).min(1.0);
 
                     let mut ring = amplitude_ring.lock().unwrap();
                     let mut idx = amplitude_index.lock().unwrap();
@@ -446,9 +457,14 @@ impl AudioRecorder {
             return Err("Audio too short".to_string());
         }
         
-        let total_energy: f32 = samples.iter().map(|&x| x * x).sum();
-        let total_rms = (total_energy / samples.len() as f32).sqrt();
-        if total_rms < 0.003 {
+        // The silence gate must judge the signal AFTER the user's input gain, not the raw
+        // mic level — otherwise quiet-but-intended speech with gain raised is rejected as
+        // "silent" before the gain ever applies (bug #3: gain felt like it did nothing).
+        // Two-condition gate (FluidVoice-style): mean AND max-frame must both be low, so a
+        // softly-spoken sentence inside a mostly-silent clip survives on its 20 ms frames
+        // even when the long-clip mean falls below the threshold.
+        let gain_factor = 10f32.powf(input_gain_db / 20.0);
+        if is_silent_capture(&samples, self.source_sample_rate, gain_factor) {
             return Err("Audio was silent".to_string());
         }
 
@@ -579,6 +595,46 @@ pub fn highpass_50hz(samples: &mut [f32], sample_rate: u32) {
         s2 = b2 * x - a2 * y;
         *s = y;
     }
+}
+
+/// Stop-time silence gate: was this capture effectively silent (nothing worth sending to
+/// the engine)? `gain_factor` is the user's input gain applied in the judgement so a
+/// raised gain rescues quiet speech.
+///
+/// Two conditions must BOTH hold to call it silent — the overall mean RMS over the whole
+/// clip AND the loudest 20 ms frame must be below threshold. A long clip that is mostly
+/// silence with one softly-spoken sentence has a mean dragged near zero, but its speech
+/// frames stand well above the frame threshold; requiring both keeps that speech while
+/// still rejecting true silence and steady low-level hiss. It errs toward keeping anything
+/// with a speech-energy frame — a missed utterance is a worse failure than an occasional
+/// noise burst. This mirrors FluidVoice's opt-in gate, which only skips a recording when
+/// `peak && rms && maxFrameRMS` are all under threshold.
+pub fn is_silent_capture(samples: &[f32], sample_rate: u32, gain_factor: f32) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let rms_of = |chunk: &[f32]| -> f32 {
+        let energy: f32 = chunk
+            .iter()
+            .map(|&x| {
+                let v = x * gain_factor;
+                v * v
+            })
+            .sum();
+        (energy / chunk.len() as f32).sqrt()
+    };
+    let total_rms = rms_of(samples);
+    if total_rms >= 0.003 {
+        return false;
+    }
+    // 20 ms frames: enough to catch a spoken word's energy, short enough that surrounding
+    // silence cannot average it away.
+    let frame = (sample_rate as usize / 50).max(1);
+    let max_frame_rms = samples
+        .chunks(frame)
+        .map(rms_of)
+        .fold(0.0f32, f32::max);
+    max_frame_rms < 0.006
 }
 
 pub fn measure_p95_frame_rms(samples: &[f32], sample_rate: u32) -> f32 {
@@ -1023,6 +1079,47 @@ mod tests {
 
         let p95 = measure_p95_frame_rms(&samples, 16000);
         assert!((p95 - 0.2).abs() < 0.01, "p95 was {}", p95);
+    }
+
+    #[test]
+    fn test_silence_gate_rejects_true_silence() {
+        let silence = vec![0.0f32; 16000 * 2];
+        assert!(is_silent_capture(&silence, 16000, 1.0));
+        // Gain must not resurrect an all-zero clip.
+        assert!(is_silent_capture(&silence, 16000, 4.0));
+        // Steady hiss below both thresholds is silent too.
+        let hiss = vec![0.0008f32; 16000 * 2];
+        assert!(is_silent_capture(&hiss, 16000, 1.0));
+    }
+
+    #[test]
+    fn test_silence_gate_keeps_quiet_speech_in_long_clip() {
+        // Mostly silence with one softly-spoken sentence: the whole-clip mean RMS falls
+        // under the mean threshold (the old single-condition gate rejected this as
+        // "silent"), but the speech's 20 ms frames stand well above the frame threshold.
+        let mut samples = vec![0.0f32; 16000 * 40];
+        let tone: Vec<f32> = (0..6400)
+            .map(|i| 0.02 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+            .collect();
+        samples.extend(tone);
+
+        let gain = 10f32.powf(0.0 / 20.0); // unity: no input gain helping
+        assert!(!is_silent_capture(&samples, 16000, gain), "quiet speech must be captured");
+    }
+
+    #[test]
+    fn test_silence_gate_gain_rescues_sustained_quiet_speech() {
+        // Sustained very quiet speech: both mean and frame RMS sit under threshold at
+        // unity gain, but +12 dB of user input gain lifts the mean over the gate — this is
+        // the "input gain does nothing" bug (gate ran before gain).
+        let quiet: Vec<f32> = (0..16000 * 2)
+            .map(|i| 0.002 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16000.0).sin())
+            .collect();
+        assert!(is_silent_capture(&quiet, 16000, 1.0), "baseline: too quiet at unity gain");
+        assert!(
+            !is_silent_capture(&quiet, 16000, 4.0),
+            "input gain must lift quiet speech past the gate"
+        );
     }
 
     #[test]
