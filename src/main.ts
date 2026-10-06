@@ -16,7 +16,6 @@ interface Settings {
   cloudModel: string;
   parakeetModel: string;
   nemotronModel: string;
-  inputGainDb: number;
   aiEnabled: boolean;
   aiModel: string;
   aiProfile: string;
@@ -162,8 +161,6 @@ const aiFormatNatural = document.getElementById("ai-format-natural")!;
 const aiFormatStructured = document.getElementById("ai-format-structured")!;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
-const inputGainSlider = document.getElementById("input-gain-slider") as HTMLInputElement;
-const inputGainValue = document.getElementById("input-gain-value") as HTMLElement;
 const hotkeyDisplay = document.getElementById("hotkey-display") as HTMLElement;
 const hotkeyChangeBtn = document.getElementById("hotkey-change-btn") as HTMLButtonElement;
 const hotkeyResetBtn = document.getElementById("hotkey-reset-btn") as HTMLButtonElement;
@@ -399,7 +396,6 @@ async function loadSettings() {
 
   // Recording mode
   setRecordingMode(currentSettings.recordingMode);
-  setInputGain(currentSettings.inputGainDb ?? 0);
 
   // Hotkey
   hotkeyDisplay.textContent = currentSettings.hotkey.replace("CmdOrCtrl", "Cmd");
@@ -698,12 +694,6 @@ function setRecordingMode(mode: string) {
   modePtt.classList.toggle("active", mode === "push-to-talk");
 }
 
-function setInputGain(gainDb: number) {
-  const rounded = Math.round(gainDb);
-  inputGainSlider.value = String(rounded);
-  inputGainValue.textContent = `${rounded > 0 ? "+" : ""}${rounded} dB`;
-}
-
 async function checkModelStatus() {
   const downloaded = await invoke<boolean>("check_model_downloaded", {
     modelSize: modelSelect.value,
@@ -724,7 +714,6 @@ async function saveSettings() {
   // triggered by some other control from writing back a stale value.
   syncGroqKeyInputs(currentSettings.groqApiKey);
   currentSettings.aiCustomInstructions = aiCustomInstructions.value;
-  currentSettings.inputGainDb = Number(inputGainSlider.value);
   await invoke("save_settings", { settings: currentSettings });
 }
 
@@ -1002,15 +991,6 @@ modeToggle.addEventListener("click", () => {
 
 modePtt.addEventListener("click", () => {
   setRecordingMode("push-to-talk");
-  saveSettings();
-});
-
-inputGainSlider.addEventListener("input", () => {
-  const val = Number(inputGainSlider.value);
-  inputGainValue.textContent = `${val > 0 ? "+" : ""}${val} dB`;
-});
-
-inputGainSlider.addEventListener("change", () => {
   saveSettings();
 });
 

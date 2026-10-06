@@ -283,7 +283,8 @@ pub fn strip_trailing_stop_phrase(text: &str) -> String {
         for marker in markers {
             if let Some(rest) = body.strip_suffix(marker) {
                 if rest.is_empty() || rest.ends_with(' ') || rest.ends_with('\n') {
-                    return Some(body[..rest.len()].trim_end().to_string());
+                    // Slice the ORIGINAL text, not the lowercased copy, so the kept words keep their case.
+                    return Some(trimmed[..rest.len()].trim_end().to_string());
                 }
             }
         }
@@ -490,6 +491,16 @@ mod tests {
         assert_eq!(deduplicate_text("hello\nhello"), "hello\nhello");
         // Single-line behavior is unchanged.
         assert_eq!(strip_filler_words("um buy milk"), "buy milk");
+    }
+
+    #[test]
+    fn test_strip_trailing_stop_phrase_preserves_case() {
+        assert_eq!(
+            strip_trailing_stop_phrase("Fix the bug in Parser.rs. End session."),
+            "Fix the bug in Parser.rs."
+        );
+        assert_eq!(strip_trailing_stop_phrase("Send it to John. Stop recording"), "Send it to John.");
+        assert_eq!(strip_trailing_stop_phrase("Okay Stop."), "Okay");
     }
 
     #[test]

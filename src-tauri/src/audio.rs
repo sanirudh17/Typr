@@ -4,7 +4,7 @@ use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 static CLIPPING_TOAST_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static QUIET_TOAST_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -190,6 +190,11 @@ impl AudioRecorder {
         }
         let slice = buf[start..aligned_len].to_vec();
         (slice, aligned_len, self.source_sample_rate, self.source_channels)
+    }
+
+    /// Release the raw capture buffer. Called by the recorder after the engine is done with it.
+    pub fn clear_samples(&self) {
+        self.samples.lock().unwrap().clear();
     }
 
     #[cfg(test)]
@@ -437,7 +442,6 @@ impl AudioRecorder {
     pub fn stop_and_save(
         &mut self,
         output_path: &PathBuf,
-        input_gain_db: f32,
         app: Option<&AppHandle>,
     ) -> Result<(PathBuf, f32), String> {
         // Pause the stream (mic off between records); the device stays activated so the
@@ -457,13 +461,13 @@ impl AudioRecorder {
             return Err("Audio too short".to_string());
         }
         
-        // The silence gate must judge the signal AFTER the user's input gain, not the raw
-        // mic level — otherwise quiet-but-intended speech with gain raised is rejected as
-        // "silent" before the gain ever applies (bug #3: gain felt like it did nothing).
-        // Two-condition gate (FluidVoice-style): mean AND max-frame must both be low, so a
-        // softly-spoken sentence inside a mostly-silent clip survives on its 20 ms frames
-        // even when the long-clip mean falls below the threshold.
-        let gain_factor = 10f32.powf(input_gain_db / 20.0);
+        // The silence gate judges the signal AFTER the fixed native input gain, not the
+        // raw mic level — otherwise quiet-but-intended speech is rejected as "silent"
+        // before the gain ever applies. Two-condition gate (FluidVoice-style): mean AND
+        // max-frame must both be low, so a softly-spoken sentence inside a mostly-silent
+        // clip survives on its 20 ms frames even when the long-clip mean falls below
+        // the threshold.
+        let gain_factor = 10f32.powf(FIXED_INPUT_GAIN_DB / 20.0);
         if is_silent_capture(&samples, self.source_sample_rate, gain_factor) {
             return Err("Audio was silent".to_string());
         }
@@ -480,30 +484,35 @@ impl AudioRecorder {
         };
 
         let mut resampled = resample(&mono, self.source_sample_rate, 16000);
-        let diagnostics = process_speech_audio_chain(&mut resampled, 16000, input_gain_db);
+        let diagnostics = process_speech_audio_chain(&mut resampled, 16000, FIXED_INPUT_GAIN_DB);
+        // Measured BEFORE the padding below: how loud is the last 150 ms of what was actually
+        // captured, relative to the clip's speech level? ~1.0x = the capture ended mid-speech
+        // (cut off at the source); ~0.1x or lower = the last word was captured in full.
+        let tail_150 = tail_rms(&resampled, 16000, 150);
+        let tail_ratio = if diagnostics.post_rms > 1e-6 { tail_150 / diagnostics.post_rms } else { 0.0 };
         // Tail comfort silence padding: append 400ms (6400 samples @ 16kHz) of silence
         // so that conformer lookahead, RNNT joiner, and Whisper attention have acoustic
         // closure and future context frames. Prevents dropping the last 2-3 words.
         let tail_silence_samples = (16000.0 * 0.400) as usize;
         resampled.extend(std::iter::repeat(0.0f32).take(tail_silence_samples));
         println!(
-            "[Typr] Audio preprocessed: resampled to {} samples @ 16kHz, pre-p95: {:.4}, post-p95: {:.4}, clips: {}",
-            resampled.len(), diagnostics.p95_rms, diagnostics.post_rms, diagnostics.clip_count
+            "[Typr] Audio preprocessed: resampled to {} samples @ 16kHz, pre-p95: {:.4}, post-p95: {:.4}, clips: {}, tail150: {:.4} ({:.2}x speech level)",
+            resampled.len(), diagnostics.p95_rms, diagnostics.post_rms, diagnostics.clip_count, tail_150, tail_ratio
         );
 
         if diagnostics.clipping_detected && !CLIPPING_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             if let Some(app) = app {
-                let _ = app.emit(
-                    "show-toast",
-                    "Microphone audio is clipping — try lowering the Input Gain or speaking further from the mic.",
+                crate::recorder::notify_user(
+                    app,
+                    "Microphone audio is clipping — try speaking further from the mic.",
                 );
             }
         }
         if diagnostics.is_quiet && !QUIET_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             if let Some(app) = app {
-                let _ = app.emit(
-                    "show-toast",
-                    "Microphone audio is very quiet — try increasing the Input Gain or speaking closer to the mic.",
+                crate::recorder::notify_user(
+                    app,
+                    "Microphone audio is very quiet — try speaking closer to the mic.",
                 );
             }
         }
@@ -523,7 +532,12 @@ impl AudioRecorder {
         writer.finalize().map_err(|e| e.to_string())?;
 
         drop(samples);
-        self.samples.lock().unwrap().clear();
+        // NOTE: the raw sample buffer is intentionally NOT cleared here. The Nemotron live
+        // session drains its final unread samples from this buffer in `finish()`, which runs
+        // AFTER this method; clearing here turned that drain into a silent no-op and dropped
+        // up to one 150 ms poll interval of audio. `start()` clears the buffer at the beginning
+        // of the next recording, and `Recorder::stop_and_transcribe` calls `clear_samples()`
+        // once the engine has finished with it.
 
         println!("[Typr] WAV saved to {:?}", output_path);
         Ok((output_path.clone(), duration_secs))
@@ -538,6 +552,16 @@ pub struct PreprocessDiagnostics {
     pub post_rms: f32,
     pub is_quiet: bool,
 }
+
+/// Fixed native input gain applied to every capture before transcription (+12 dB = ~4x).
+///
+/// There is deliberately no user-facing control for this: the chain below already
+/// normalizes speech to a target RMS (up to 20x) and caps peaks with a soft limiter,
+/// so a fixed strong gain is strictly better than a slider users must discover. +12 dB
+/// lifts quiet speech well clear of the silence gate with headroom to spare; the slider's
+/// +18 dB maximum is avoided because on typical loud microphones it hard-clips before the
+/// limiter, and clipped distortion hurts accuracy more than low volume ever did.
+pub const FIXED_INPUT_GAIN_DB: f32 = 12.0;
 
 pub fn apply_gain_db(samples: &mut [f32], gain_db: f32) {
     if gain_db.abs() < 1e-4 || samples.is_empty() {
@@ -666,6 +690,18 @@ pub fn measure_p95_frame_rms(samples: &[f32], sample_rate: u32) -> f32 {
     rms_values[idx.min(rms_values.len() - 1)]
 }
 
+/// RMS of the final `ms` milliseconds of `samples`. Diagnostic for end-of-dictation
+/// truncation: a tail near the clip's speech level means capture ended mid-speech; a tail
+/// near the noise floor means the last word was captured in full.
+pub fn tail_rms(samples: &[f32], sample_rate: u32, ms: u32) -> f32 {
+    let n = ((sample_rate as u64 * ms as u64) / 1000) as usize;
+    let tail = &samples[samples.len().saturating_sub(n)..];
+    if tail.is_empty() {
+        return 0.0;
+    }
+    (tail.iter().map(|&x| x * x).sum::<f32>() / tail.len() as f32).sqrt()
+}
+
 pub fn normalize_target_rms(samples: &mut [f32], sample_rate: u32, target_rms: f32, max_gain: f32) -> f32 {
     let p95 = measure_p95_frame_rms(samples, sample_rate);
     if p95 < 1e-5 {
@@ -708,12 +744,14 @@ pub fn process_speech_audio_chain(
         };
     }
 
-    // 1. User input gain adjustment
-    apply_gain_db(samples, input_gain_db);
-
-    // 2. Clipping detection
+    // 1. Clipping detection on the RAW capture, before any gain. Clipping happens at the
+    // device, not after our own boost: measured post-gain, any peak above ~0.25 would read
+    // as "clipping" under the fixed +12 dB and fire a false "speak further away" toast.
     let clip_count = samples.iter().filter(|&&s| s.abs() >= 0.999).count();
     let clipping_detected = clip_count > 0;
+
+    // 2. Native input gain
+    apply_gain_db(samples, input_gain_db);
 
     // 3. DC offset removal
     remove_dc_offset(samples);
@@ -742,6 +780,171 @@ pub fn process_speech_audio_chain(
     }
 }
 
+
+// ---------------------------------------------------------------------------------------
+// Streaming (chunk-by-chunk) preprocessing for the Nemotron live path.
+//
+// The batch chain above (`process_speech_audio_chain`) needs the whole clip: it measures the
+// p95 frame RMS over everything before choosing a gain. The Nemotron live session feeds the
+// recognizer ~150 ms at a time while the user is still speaking, so it cannot wait. Since
+// v0.2.0 that path received the RAW microphone signal (no DC removal, no high-pass, no level
+// normalization, no limiter) while every other engine received the processed signal.
+// `StreamingPreprocessor` gives the live path the same stages, computed causally:
+//   fixed pre-gain -> 50 Hz high-pass (stateful) -> speech-level tracking -> smoothly ramped
+//   gain toward the same 0.08 target RMS -> the same soft-knee tanh limiter (0.75 / 0.95).
+// The gain is interpolated per SAMPLE across each chunk (never stepped at a chunk boundary),
+// which is what the earlier per-chunk-gain attempt got wrong ("streaming distortion").
+// ---------------------------------------------------------------------------------------
+const STREAM_TARGET_RMS: f32 = 0.08; // same as TARGET_RMS in process_speech_audio_chain
+const STREAM_MAX_GAIN: f32 = 20.0; // same as MAX_GAIN in process_speech_audio_chain
+const STREAM_MIN_GAIN: f32 = 0.05;
+/// A chunk whose loudest 20 ms frame (after pre-gain and high-pass) is below this is treated
+/// as silence/noise and does not move the tracked speech level.
+const STREAM_GATE_RMS: f32 = 0.01;
+
+/// Direct-form-II-transposed biquad coefficients [b0, b1, b2, a1, a2] of the same 2nd-order
+/// 50 Hz Butterworth high-pass used by `highpass_50hz`.
+fn highpass_50hz_coeffs(sample_rate: u32) -> Option<[f32; 5]> {
+    if sample_rate < 100 {
+        return None;
+    }
+    let fc = 50.0f64;
+    let fs = sample_rate as f64;
+    if fc >= fs / 2.0 {
+        return None;
+    }
+    let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+    let cos_w0 = w0.cos();
+    let sin_w0 = w0.sin();
+    let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
+    let b0 = (1.0 + cos_w0) / 2.0;
+    let b1 = -(1.0 + cos_w0);
+    let b2 = (1.0 + cos_w0) / 2.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_w0;
+    let a2 = 1.0 - alpha;
+    Some([
+        (b0 / a0) as f32,
+        (b1 / a0) as f32,
+        (b2 / a0) as f32,
+        (a1 / a0) as f32,
+        (a2 / a0) as f32,
+    ])
+}
+
+/// RMS of the loudest 20 ms frame in `chunk` (frames shorter than half a frame are ignored,
+/// matching `measure_p95_frame_rms`). Returns 0.0 when the chunk is too short to hold one.
+fn loudest_frame_rms(chunk: &[f32], frame: usize) -> f32 {
+    if frame == 0 {
+        return 0.0;
+    }
+    let mut best = 0.0f32;
+    for f in chunk.chunks(frame) {
+        if f.len() >= (frame / 2).max(1) {
+            let sum_sq: f64 = f.iter().map(|&x| (x as f64) * (x as f64)).sum();
+            let rms = (sum_sq / f.len() as f64).sqrt() as f32;
+            if rms > best {
+                best = rms;
+            }
+        }
+    }
+    best
+}
+
+pub struct StreamingPreprocessor {
+    pre_gain: f32,
+    hp: Option<[f32; 5]>,
+    z1: f32,
+    z2: f32,
+    primed: bool,
+    /// Tracked speech level (RMS of the loudest recent frames); 0.0 until speech is seen.
+    level: f32,
+    /// Gain applied at the end of the previous chunk.
+    gain: f32,
+    frame: usize,
+}
+
+impl StreamingPreprocessor {
+    /// `sample_rate` is the rate of the chunks that will be passed to `process` (16000 for
+    /// the Nemotron path). `pre_gain_db` is the fixed native input gain (FIXED_INPUT_GAIN_DB).
+    pub fn new(sample_rate: u32, pre_gain_db: f32) -> Self {
+        Self {
+            pre_gain: 10f32.powf(pre_gain_db / 20.0),
+            hp: highpass_50hz_coeffs(sample_rate),
+            z1: 0.0,
+            z2: 0.0,
+            primed: false,
+            level: 0.0,
+            gain: 1.0,
+            frame: ((sample_rate as f32) * 0.020).round() as usize,
+        }
+    }
+
+    /// Stateful 50 Hz high-pass. The filter state is pre-loaded on the first sample so a DC
+    /// offset (or any non-zero first sample) does not produce a start-up transient.
+    fn highpass(&mut self, chunk: &mut [f32]) {
+        let Some([b0, b1, b2, a1, a2]) = self.hp else {
+            return;
+        };
+        if chunk.is_empty() {
+            return;
+        }
+        if !self.primed {
+            let x0 = chunk[0];
+            self.z1 = -b0 * x0;
+            self.z2 = b2 * x0;
+            self.primed = true;
+        }
+        for s in chunk.iter_mut() {
+            let x = *s;
+            let y = b0 * x + self.z1;
+            self.z1 = b1 * x - a1 * y + self.z2;
+            self.z2 = b2 * x - a2 * y;
+            *s = y;
+        }
+    }
+
+    /// Process one chunk in place. Chunks may be any length; state carries across calls.
+    pub fn process(&mut self, chunk: &mut [f32]) {
+        if chunk.is_empty() {
+            return;
+        }
+        if self.pre_gain != 1.0 {
+            for s in chunk.iter_mut() {
+                *s *= self.pre_gain;
+            }
+        }
+        self.highpass(chunk);
+
+        let loudest = loudest_frame_rms(chunk, self.frame);
+        let first_speech = self.level == 0.0;
+        if loudest >= STREAM_GATE_RMS {
+            self.level = if first_speech {
+                loudest
+            } else if loudest > self.level {
+                self.level + 0.5 * (loudest - self.level) // fast attack
+            } else {
+                self.level + 0.1 * (loudest - self.level) // slow release
+            };
+        }
+        let target_gain = if self.level > 0.0 {
+            (STREAM_TARGET_RMS / self.level).clamp(STREAM_MIN_GAIN, STREAM_MAX_GAIN)
+        } else {
+            1.0
+        };
+        // The very first speech chunk adopts its target gain immediately: the preceding audio
+        // is noise-floor, so the step is inaudible. Afterwards the gain ramps per sample.
+        let start_gain = if first_speech && self.level > 0.0 { target_gain } else { self.gain };
+        let n = chunk.len() as f32;
+        for (i, s) in chunk.iter_mut().enumerate() {
+            let g = start_gain + (target_gain - start_gain) * ((i + 1) as f32 / n);
+            *s *= g;
+        }
+        self.gain = target_gain;
+
+        apply_tanh_limiter(chunk, 0.75, 0.95);
+    }
+}
 
 #[allow(dead_code)]
 const NORM_TARGET_PEAK: f32 = 0.95;
@@ -1040,6 +1243,19 @@ mod tests {
     }
 
     #[test]
+    fn test_fixed_input_gain_lifts_quiet_speech_fourfold() {
+        // The native fixed gain replaces the removed slider: +12 dB must equal ~4x
+        // amplitude, lifting quiet speech clear of the silence gate with headroom
+        // left before the limiter (the slider's +18 dB maximum clipped loud mics).
+        assert!((FIXED_INPUT_GAIN_DB - 12.0).abs() < 1e-6);
+        let mut s = vec![0.05f32, -0.05, 0.1];
+        apply_gain_db(&mut s, FIXED_INPUT_GAIN_DB);
+        let expected = 10f32.powf(12.0 / 20.0); // ~3.98x
+        assert!((s[0] - 0.05 * expected).abs() < 1e-6, "first sample was {}", s[0]);
+        assert!((s[2] - 0.1 * expected).abs() < 1e-6, "third sample was {}", s[2]);
+    }
+
+    #[test]
     fn test_remove_dc_offset() {
         let mut s = vec![1.2f32, 1.4, 0.8, 1.0];
         remove_dc_offset(&mut s);
@@ -1173,6 +1389,215 @@ mod tests {
         let quiet_diag = process_speech_audio_chain(&mut quiet_samples, 16000, 0.0);
         assert!(quiet_diag.is_quiet);
         assert!(!quiet_diag.clipping_detected);
+    }
+
+    #[test]
+    fn test_clipping_is_judged_on_raw_capture_not_after_gain() {
+        // A loud-but-unclipped mic (peak 0.5) becomes 1.99 after +12 dB. That is our boost,
+        // not mic clipping, and must not raise the clipping flag.
+        let mut loud = tone(400.0, 16000, 1.0);
+        for s in loud.iter_mut() {
+            *s *= 0.5;
+        }
+        let d = process_speech_audio_chain(&mut loud, 16000, FIXED_INPUT_GAIN_DB);
+        assert!(!d.clipping_detected, "false clipping from our own gain");
+        assert_eq!(d.clip_count, 0);
+
+        // A genuinely clipped capture is still caught with the gain applied.
+        let mut clipped = tone(400.0, 16000, 1.0);
+        clipped[100] = 1.0;
+        let d = process_speech_audio_chain(&mut clipped, 16000, FIXED_INPUT_GAIN_DB);
+        assert!(d.clipping_detected);
+        assert!(d.clip_count >= 1);
+    }
+
+    #[test]
+    fn test_tail_rms() {
+        let mut s = vec![0.0f32; 16000];
+        for x in s[8000..].iter_mut() {
+            *x = 0.5;
+        }
+        assert!((tail_rms(&s, 16000, 150) - 0.5).abs() < 1e-6); // tail inside the loud part
+        let mut quiet_end = s.clone();
+        quiet_end.extend(std::iter::repeat(0.0f32).take(3200)); // 200 ms of silence appended
+        assert_eq!(tail_rms(&quiet_end, 16000, 150), 0.0);
+        assert_eq!(tail_rms(&[], 16000, 150), 0.0);
+        assert!((tail_rms(&[0.3, 0.3], 16000, 150) - 0.3).abs() < 1e-6); // shorter than window
+    }
+
+    #[test]
+    fn test_stop_and_save_keeps_samples_for_live_drain() {
+        // Regression: stop_and_save used to clear the raw buffer, so the Nemotron session's
+        // final `get_raw_samples_from(last_read)` drain (which runs afterwards) returned
+        // nothing and the last poll interval of audio never reached the live stream.
+        let mut rec = AudioRecorder::new();
+        rec.set_source_format_for_test(16000, 1);
+        let pushed = tone(300.0, 16000, 1.0);
+        rec.push_raw_samples_for_test(&pushed);
+        let out = std::env::temp_dir().join("typr_test_live_drain.wav");
+        let res = rec.stop_and_save(&out, None);
+        let _ = std::fs::remove_file(&out);
+        assert!(res.is_ok(), "stop_and_save failed: {:?}", res.err());
+
+        let (tail, end, rate, ch) = rec.get_raw_samples_from(0);
+        assert_eq!(tail.len(), pushed.len(), "raw buffer must survive stop_and_save");
+        assert_eq!(end, pushed.len());
+        assert_eq!((rate, ch), (16000, 1));
+        // The unread tail after a partial read is still retrievable.
+        let (rest, _, _, _) = rec.get_raw_samples_from(12000);
+        assert_eq!(rest.len(), pushed.len() - 12000);
+
+        rec.clear_samples();
+        assert!(rec.get_raw_samples_from(0).0.is_empty());
+    }
+
+    fn stream_rms(v: &[f32]) -> f32 {
+        (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
+    fn stream_run(p: &mut StreamingPreprocessor, input: &[f32], chunk: usize) -> Vec<f32> {
+        let mut out = input.to_vec();
+        for c in out.chunks_mut(chunk) {
+            p.process(c);
+        }
+        out
+    }
+
+    #[test]
+    fn test_streaming_highpass_matches_batch_highpass() {
+        // Starting from a zero first sample the stateful filter must equal the batch filter
+        // exactly, no matter how the signal is chunked.
+        let mut sig = tone(180.0, 16000, 1.0);
+        sig[0] = 0.0;
+        let mut batch = sig.clone();
+        highpass_50hz(&mut batch, 16000);
+        for chunk in [1usize, 37, 320, 2400, 16000] {
+            let mut p = StreamingPreprocessor::new(16000, 0.0);
+            let mut live = sig.clone();
+            for c in live.chunks_mut(chunk) {
+                p.highpass(c);
+            }
+            let maxdiff = batch.iter().zip(&live).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(maxdiff < 1e-5, "chunk {chunk}: max diff {maxdiff}");
+        }
+    }
+
+    #[test]
+    fn test_streaming_removes_dc_offset_from_the_first_sample() {
+        let mut p = StreamingPreprocessor::new(16000, 0.0);
+        let mut dc = vec![0.1f32; 2400];
+        p.highpass(&mut dc);
+        let worst = dc.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "DC leaked through: {worst}");
+    }
+
+    #[test]
+    fn test_streaming_converges_to_target_level() {
+        // A quiet tone (RMS ~0.0212) must be brought to the batch target RMS of 0.08.
+        let mut sig = tone(500.0, 16000, 3.0);
+        for s in sig.iter_mut() {
+            *s *= 0.03;
+        }
+        let mut p = StreamingPreprocessor::new(16000, 0.0);
+        let out = stream_run(&mut p, &sig, 2400);
+        let last = &out[out.len() - 16000..];
+        let r = stream_rms(last);
+        assert!((0.075..=0.085).contains(&r), "steady-state RMS {r}");
+    }
+
+    #[test]
+    fn test_streaming_attenuates_loud_input_and_never_exceeds_ceiling() {
+        let mut sig = tone(500.0, 16000, 2.0);
+        for s in sig.iter_mut() {
+            *s *= 0.9;
+        }
+        let mut p = StreamingPreprocessor::new(16000, FIXED_INPUT_GAIN_DB);
+        let out = stream_run(&mut p, &sig, 2400);
+        let peak = out.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(peak <= 0.95 + 1e-6, "peak {peak} exceeds limiter ceiling");
+        assert!(out.iter().all(|x| x.is_finite()));
+        let r = stream_rms(&out[out.len() - 8000..]);
+        assert!(r < 0.2, "loud input not brought down toward target: {r}");
+    }
+
+    #[test]
+    fn test_streaming_is_transparent_at_chunk_boundaries() {
+        // After convergence the gain is constant, so a chunk boundary must not introduce any
+        // jump larger than the signal's own sample-to-sample movement.
+        let mut sig = tone(300.0, 16000, 4.0);
+        for s in sig.iter_mut() {
+            *s *= 0.05;
+        }
+        let chunk = 2400;
+        let mut p = StreamingPreprocessor::new(16000, 0.0);
+        let out = stream_run(&mut p, &sig, chunk);
+        let mut interior = 0.0f32;
+        let mut boundary = 0.0f32;
+        for i in (chunk * 8)..(out.len() - 1) {
+            let d = (out[i + 1] - out[i]).abs();
+            if (i + 1) % chunk == 0 {
+                boundary = boundary.max(d);
+            } else {
+                interior = interior.max(d);
+            }
+        }
+        assert!(boundary <= interior * 1.05, "boundary jump {boundary} vs interior {interior}");
+    }
+
+    #[test]
+    fn test_streaming_output_is_independent_of_chunk_size() {
+        let mut sig = tone(400.0, 16000, 3.0);
+        for s in sig.iter_mut() {
+            *s *= 0.02;
+        }
+        let mut levels = vec![];
+        for chunk in [160usize, 2400, 6400] {
+            let mut p = StreamingPreprocessor::new(16000, 0.0);
+            let out = stream_run(&mut p, &sig, chunk);
+            levels.push(stream_rms(&out[out.len() - 16000..]));
+        }
+        let (lo, hi) = levels.iter().fold((f32::MAX, 0.0f32), |(l, h), &v| (l.min(v), h.max(v)));
+        assert!(hi / lo < 1.1, "chunk-size dependence: {levels:?}");
+    }
+
+    #[test]
+    fn test_streaming_silence_never_raises_gain_or_initialises_level() {
+        // Noise-only input (below the gate after pre-gain) must stay at unity gain...
+        let mut p = StreamingPreprocessor::new(16000, FIXED_INPUT_GAIN_DB);
+        let mut seed = 99u32;
+        let noise: Vec<f32> = (0..32000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (((seed >> 8) as f32 / 16777216.0) * 2.0 - 1.0) * 0.0015
+            })
+            .collect();
+        let _ = stream_run(&mut p, &noise, 2400);
+        assert_eq!(p.level, 0.0);
+        assert_eq!(p.gain, 1.0);
+
+        // ...and silence AFTER speech must hold the speech-derived gain, not pump it upward.
+        let mut p = StreamingPreprocessor::new(16000, 0.0);
+        let mut speech = tone(500.0, 16000, 1.0);
+        for s in speech.iter_mut() {
+            *s *= 0.05;
+        }
+        let _ = stream_run(&mut p, &speech, 2400);
+        let gain_after_speech = p.gain;
+        let _ = stream_run(&mut p, &vec![0.0f32; 32000], 2400);
+        assert!((p.gain - gain_after_speech).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_streaming_handles_empty_and_tiny_chunks() {
+        let mut p = StreamingPreprocessor::new(16000, FIXED_INPUT_GAIN_DB);
+        p.process(&mut []);
+        let mut tiny = [0.2f32, -0.1, 0.05];
+        p.process(&mut tiny);
+        assert!(tiny.iter().all(|x| x.is_finite()));
+        let mut none = StreamingPreprocessor::new(50, 0.0); // rate too low for the filter
+        let mut c = [0.3f32; 10];
+        none.process(&mut c);
+        assert!(c.iter().all(|x| x.is_finite()));
     }
 
     #[test]

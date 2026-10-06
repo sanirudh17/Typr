@@ -42,9 +42,10 @@ pub fn apply_commands(text: &str) -> String {
 /// Editing phrases ("scratch that", "delete last word") and "make it a list" are
 /// unambiguous multi-word commands whose entire purpose is mid-dictation correction, so
 /// they fire anywhere. Layout triggers ("new line", "new paragraph", "new bullet") also fire
-/// mid-utterance — voice commands are documented as spoken mid-sentence — with two prose
+/// mid-utterance — voice commands are documented as spoken mid-sentence — with prose
 /// exceptions: when the trigger heads a noun phrase ("a new line of credit", "launching a new
-/// line of products"), the following word "of" marks ordinary speech; and when the trigger is
+/// line of products", "make a list of groceries"), the following word "of" marks ordinary
+/// speech; and when the trigger is
 /// the "lane" mis-transcription preceded by an article ("adding a new lane to the highway"),
 /// which can only be a real lane, never the command (commands are spoken bare: "new lane").
 fn is_gated_prose(
@@ -55,14 +56,20 @@ fn is_gated_prose(
     is_start_of_utterance: bool,
     prev_was_command: bool,
 ) -> bool {
+    let next_is_of =
+        || matches!(words.get(i + len).map(|w| norm(w)).as_deref(), Some("of"));
+    // Make-list: "…make a list of groceries" is a noun phrase, and a leading
+    // "make a list of …" has no payload to list anyway — pass it through as prose.
+    if matches!(kind, Kind::MakeList) && next_is_of() {
+        return true;
+    }
     if is_start_of_utterance || prev_was_command {
         return false;
     }
     if !matches!(kind, Kind::NewLine | Kind::NewParagraph | Kind::Bullet) {
         return false;
     }
-    let next = words.get(i + len).map(|w| norm(w));
-    if matches!(next.as_deref(), Some("of")) {
+    if next_is_of() {
         return true;
     }
     // Article before the "lane" homophone: prose noun phrase.
@@ -336,7 +343,7 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
     // 4-word triggers (checked first so "make it a list" wins over shorter matches).
     if let (Some(a), Some(b), Some(c), Some(d)) = (&w0, &w1, &w2, &w3) {
         let (a, b, c, d) = (a.as_str(), b.as_str(), c.as_str(), d.as_str());
-        if a == "make" && (b == "it" || b == "that") && c == "a" && d == "list" {
+        if a == "make" && (b == "it" || b == "that" || b == "this") && c == "a" && d == "list" {
             return Some(Trigger { len: 4, kind: Kind::MakeList });
         }
     }
@@ -344,6 +351,9 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
     // 3-word triggers (must be tried before "snake case").
     if let (Some(a), Some(b), Some(c)) = (&w0, &w1, &w2) {
         match (a.as_str(), b.as_str(), c.as_str()) {
+            // Local engines routinely drop the pronoun: "…my name is Aniruth. Make a
+            // list" came back as "Make a list" and silently skipped the command.
+            ("make", "a", "list") => return Some(Trigger { len: 3, kind: Kind::MakeList }),
             ("screaming", "snake", "case") | ("upper", "snake", "case") => {
                 return Some(Trigger { len: 3, kind: Kind::Case(Casing::Constant) });
             }
@@ -623,12 +633,20 @@ impl OutBuilder {
     /// "make it a list" — replace the preceding phrase with `- item` lines.
     fn make_list(&mut self) {
         self.trim_trailing_ws();
-        let start = self
+        // When the command follows a finished sentence ("...my name is Aniruth. Make it
+        // a list"), the text after the last terminator is empty and the naive slice
+        // below would list nothing — silently swallowing the command. Step over the
+        // trailing terminator and list the last sentence instead (or the whole buffer
+        // when there is only one sentence). Byte-safe: the cut is on ASCII chars.
+        let end = self
             .buf
+            .trim_end_matches(|c| c == '.' || c == '!' || c == '?')
+            .len();
+        let start = self.buf[..end]
             .rfind(|c| c == '.' || c == '!' || c == '?' || c == '\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let phrase = self.buf[start..].trim().to_string();
+        let phrase = self.buf[start..end].trim().to_string();
         if phrase.is_empty() {
             return;
         }
@@ -1005,6 +1023,44 @@ mod tests {
             apply_commands("milk, eggs and bread make it a list"),
             "- milk\n- eggs\n- bread"
         );
+        // Regression: the command after a finished sentence listed nothing (the slice
+        // after the last terminator is empty), swallowing the command silently.
+        assert_eq!(
+            apply_commands("Hello everyone, my name is Aniruth. Make it a list"),
+            "- Hello everyone\n- my name is Aniruth"
+        );
+        assert_eq!(apply_commands("Wow! Make it a list"), "- Wow");
+        // Multi-sentence content lists the last sentence (same as without the period).
+        assert_eq!(
+            apply_commands("First do X. Then do Y. Make it a list"),
+            "First do X.\n- Then do Y"
+        );
+        assert_eq!(
+            apply_commands("First do X. Then do Y make it a list"),
+            "First do X.\n- Then do Y"
+        );
+    }
+
+    /// The engines drop the pronoun ("…my name is Aniruth. Make a list") often enough
+    /// that it must be a trigger of its own, and "make this a list" is the same command.
+    #[test]
+    fn test_make_list_without_pronoun() {
+        assert_eq!(
+            apply_commands("Hello everyone, my name is Aniruth. Make a list"),
+            "- Hello everyone\n- my name is Aniruth"
+        );
+        assert_eq!(
+            apply_commands("milk, eggs and bread make a list"),
+            "- milk\n- eggs\n- bread"
+        );
+        assert_eq!(apply_commands("Wow! Make a list"), "- Wow");
+        assert_eq!(apply_commands("make this a list"), "");
+        assert_eq!(
+            apply_commands("milk, eggs make this a list"),
+            "- milk\n- eggs"
+        );
+        // Same trigger, so it is detected as a command too.
+        assert!(contains_command("…my name is Aniruth. Make a list"));
     }
 
     #[test]
@@ -1021,6 +1077,17 @@ mod tests {
         assert_eq!(apply_commands("please delete the file"), "please delete the file");
         assert_eq!(apply_commands("make it around five"), "make it around five");
         assert_eq!(apply_commands("a list of names"), "a list of names");
+        // "make a list of …" heads a noun phrase (and a leading one has no payload):
+        // prose, not the command.
+        assert_eq!(
+            apply_commands("I need to make a list of groceries"),
+            "I need to make a list of groceries"
+        );
+        assert_eq!(
+            apply_commands("make a list of groceries"),
+            "make a list of groceries"
+        );
+        assert!(!contains_command("I need to make a list of groceries"));
     }
 
     #[test]

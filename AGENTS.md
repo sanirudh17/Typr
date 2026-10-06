@@ -45,5 +45,16 @@ All `<select>` elements must use the custom dark panel that matches `.app-picker
 
 - TypeScript: `C:\Users\sanir\Typr\node_modules\.bin\tsc.cmd --noEmit --project tsconfig.json` (or `npx tsc`) — must be clean.
 - Frontend: `vite build` — must succeed (catches `style.css` stray `}`).
-- Rust: `cargo test --lib` (needs dummy `src-tauri/binaries/*.dll` + `whisper-*.exe` placeholders if `tauri.conf.json` resources are missing). Current baseline: 329 passed.
+- Rust: `cargo test --lib` (needs dummy `src-tauri/binaries/*.dll` + `whisper-*.exe` placeholders if `tauri.conf.json` resources are missing). Current baseline: 352 passed.
 - Do not edit `package.json` manually for deps — use install command.
+
+## 5. The lib must not link `tauri-plugin-notification`
+
+Failure toasts must reach the user even when the main window is hidden (background/tray
+dictation), so they are mirrored to a system notification — but the plugin call lives in
+the **binary** (`src-tauri/src/main.rs` setup listens for the `show-notification` event and
+calls `app.notification()...show()`), never in the lib. Linking the plugin (its Windows
+`tauri-winrt-notification` backend) into the lib breaks the **unit-test binary at process
+load** (`STATUS_ENTRYPOINT_NOT_FOUND`, no test even runs; bisected 2026-10-06). The lib
+(`recorder.rs::notify_user`, `audio.rs` warnings) only emits `show-toast` /
+`show-notification` events.

@@ -940,7 +940,7 @@ async fn do_toggle_recording(
                 .join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
             state
                 .recorder
-                .start_recording(app, &mic, session_override, &settings.engine, Some(&nemotron_dir), settings.input_gain_db)?;
+                .start_recording(app, &mic, session_override, &settings.engine, Some(&nemotron_dir))?;
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
@@ -1265,6 +1265,22 @@ fn main() {
                 typr_lib::overlay::mark_overlay_ready(&handle_for_overlay);
             });
 
+            // Mirror dictation-failure messages to a system notification: the in-app toast
+            // renders in the main window, which is hidden while dictating from the tray.
+            // This lives in the binary (not the lib): linking tauri-plugin-notification
+            // into the lib breaks the unit-test binary at load (STATUS_ENTRYPOINT_NOT_FOUND).
+            let handle_for_notify = app.handle().clone();
+            app.listen_any("show-notification", move |event| {
+                if let Ok(msg) = serde_json::from_str::<String>(event.payload()) {
+                    let _ = handle_for_notify
+                        .notification()
+                        .builder()
+                        .title("Typr")
+                        .body(msg)
+                        .show();
+                }
+            });
+
 
             let handle = app.handle().clone();
 
@@ -1383,7 +1399,6 @@ fn main() {
                                             session_override,
                                             &settings.engine,
                                             Some(&nemotron_dir),
-                                            settings.input_gain_db,
                                         ) {
                                             Ok(_) => println!("[Typr] Recording started"),
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),

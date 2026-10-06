@@ -19,8 +19,6 @@ pub struct Settings {
     pub parakeet_model: String,
     #[serde(rename = "nemotronModel", default = "default_nemotron_model")]
     pub nemotron_model: String,
-    #[serde(rename = "inputGainDb", default = "default_input_gain_db")]
-    pub input_gain_db: f32,
     #[serde(rename = "cloudModel", default = "default_cloud_model")]
     pub cloud_model: String,
     #[serde(rename = "aiEnabled", default)]
@@ -69,10 +67,6 @@ fn default_parakeet_model() -> String {
 
 fn default_nemotron_model() -> String {
     "v3_5".to_string()
-}
-
-fn default_input_gain_db() -> f32 {
-    0.0
 }
 
 fn default_cloud_model() -> String {
@@ -125,7 +119,6 @@ impl Default for Settings {
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
             parakeet_model: "v3".to_string(),
             nemotron_model: "v3_5".to_string(),
-            input_gain_db: 0.0,
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
             ai_model: "qwen/qwen3.8-27b".to_string(),
@@ -538,19 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn test_input_gain_roundtrips() {
-        let mut s = Settings::default();
-        s.input_gain_db = 6.0;
-        let json = serde_json::to_string(&s).unwrap();
-        let loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.input_gain_db, 6.0);
-        assert!(json.contains("\"inputGainDb\":6.0"));
-    }
-
-    #[test]
-    fn test_legacy_config_without_input_gain_defaults_to_zero() {
-        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space"}"#;
+    fn test_legacy_config_with_input_gain_key_still_loads() {
+        // The gain slider was removed in favor of a fixed native gain; old configs
+        // carrying "inputGainDb" must still deserialize (the key is ignored).
+        let json = r#"{"microphone":"default","engine":"local","whisperModel":"small","groqApiKey":"","recordingMode":"toggle","hotkey":"CmdOrCtrl+Shift+Space","inputGainDb":18.0}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.input_gain_db, 0.0);
+        assert_eq!(s.microphone, "default");
+        let roundtripped = serde_json::to_string(&s).unwrap();
+        assert!(!roundtripped.contains("inputGainDb"));
     }
 }

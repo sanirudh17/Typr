@@ -113,7 +113,18 @@ fn hint_matches(token_lower: &str, hint: &str) -> bool {
     }
     // Tight edit budget only: a genuine mis-hearing differs by a letter or two
     // ("kubernetis" -> "Kubernetes"), not by half the word.
-    strsim::levenshtein(token_lower, &hint_lower) <= distance_threshold(hint_lower.len())
+    if strsim::levenshtein(token_lower, &hint_lower) > distance_threshold(hint_lower.len()) {
+        return false;
+    }
+    // Fragment guard: the token must not be much shorter than the hint. A 3-letter
+    // fragment of ordinary speech ("tur" for "turn") keys and edits close to a longer
+    // hint ("Tauri") and would be snapped into a confidently-wrong word — worse than
+    // leaving the fragment for the AI pass ("tur on dark theme" -> "turn on ...").
+    // Genuine mis-hearings ("tori", "sonet") are at most one character short.
+    if token_lower.chars().count() + 1 < hint_lower.chars().count() {
+        return false;
+    }
+    true
 }
 
 /// Split a token into (leading non-alphanumerics, core, trailing non-alphanumerics),
@@ -233,6 +244,12 @@ mod tests {
         assert_eq!(correct_vocabulary("the tori framework", &hints), "the Tauri framework");
         // A bare syllable of a hint is left alone (over-replacement regression guard).
         assert_eq!(correct_vocabulary("the ori framework", &hints), "the ori framework");
+        // The observed failure: "tur on dark theme" kept its fragment for the AI pass
+        // instead of becoming the confidently-wrong "Tauri on dark theme".
+        assert_eq!(
+            correct_vocabulary("tur on dark theme", &hints),
+            "tur on dark theme"
+        );
     }
 
     #[test]
@@ -262,6 +279,10 @@ mod tests {
         // over-replacement).
         assert!(!hint_matches("ori", "Tauri"));
         assert!(!hint_matches("hori", "Tauri"));
+        // A short fragment of ordinary speech must not snap to a longer hint even when
+        // it keys and edits close: "tur" (for "turn") became "Tauri" mid-dictation.
+        assert!(!hint_matches("tur", "Tauri"));
+        assert!(hint_matches("tori", "Tauri")); // one character short still corrects
         // Still safely blocked:
         assert!(!hint_matches("rory", "Tauri"));   // edit distance 4 — too far
         assert!(!hint_matches("ruse", "Rust"));    // skeletons differ (R200 vs R230)
