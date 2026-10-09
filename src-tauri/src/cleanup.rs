@@ -4,11 +4,20 @@ pub fn cleanup_text(text: &str) -> String {
         return String::new();
     }
 
-    // Normalize multiple spaces to single space
-    let normalized: String = trimmed
-        .split_whitespace()
-        .collect::<Vec<&str>>()
-        .join(" ");
+    // Normalize ordinary spaces without flattening paragraph/list breaks or
+    // literal tabs from snippets. This is also the fallback when AI is rejected.
+    let mut normalized = String::new();
+    let mut space = false;
+    for ch in trimmed.chars() {
+        if ch == '\r' { continue; }
+        if ch.is_whitespace() && ch != '\n' && ch != '\t' {
+            if !space { normalized.push(' '); }
+            space = true;
+        } else {
+            normalized.push(ch);
+            space = false;
+        }
+    }
     let chars: Vec<char> = normalized.chars().collect();
 
     // Capitalize first letter of each sentence
@@ -28,6 +37,7 @@ pub fn cleanup_text(text: &str) -> String {
             capitalize_next = false;
         } else {
             result.push(ch);
+            if ch == '\n' { capitalize_next = true; }
             if ch == '.' || ch == '!' || ch == '?' {
                 // Only trigger sentence capitalization if the punctuation is followed
                 // by whitespace or is at the end. This prevents capitalized letters
@@ -134,8 +144,11 @@ fn strip_filler_line(text: &str) -> String {
                 prev_kept_lower.as_deref(),
                 Some("do") | Some("did") | Some("does") | Some("dont") | Some("don't") | Some("let") | Some("if") | Some("to") | Some("as") | Some("would")
             );
-            let is_you_know = trimmed == "you" && next_trimmed == "know" && !followed_by_what && !preceded_by_verb;
-            let is_i_mean = trimmed == "i" && next_trimmed == "mean";
+            let comma_delimited = next.trim_end_matches(['"', '\'']).ends_with(',');
+            let interrupts_predicate = matches!(prev_kept_lower.as_deref(), Some("was" | "is" | "are" | "were" | "be" | "been"));
+            let is_you_know = trimmed == "you" && next_trimmed == "know"
+                && !followed_by_what && !preceded_by_verb && (comma_delimited || interrupts_predicate);
+            let is_i_mean = trimmed == "i" && next_trimmed == "mean" && comma_delimited;
             if is_you_know || is_i_mean {
                 i += 2;
                 continue;
@@ -306,6 +319,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn filler_removal_keeps_meaningful_phrases() {
+        assert_eq!(strip_filler_words("You know the answer."), "You know the answer.");
+        assert_eq!(strip_filler_words("I mean the second model."), "I mean the second model.");
+        assert_eq!(strip_filler_words("I mean, use the second model."), "use the second model.");
+        assert_eq!(strip_filler_words("um\n\n- you know the answer"), "\n\n- you know the answer");
+    }
+
+    #[test]
     fn test_trim_whitespace() {
         assert_eq!(cleanup_text("  hello world  "), "Hello world.");
     }
@@ -313,6 +334,15 @@ mod tests {
     #[test]
     fn test_normalize_spaces() {
         assert_eq!(cleanup_text("hello    world"), "Hello world.");
+    }
+
+    #[test]
+    fn deterministic_cleanup_preserves_paragraphs_lists_and_tabs() {
+        assert_eq!(cleanup_text("hello  world\n\n- keep  this\n- keep that"),
+            "Hello world\n\n- Keep this\n- Keep that.");
+        assert_eq!(cleanup_text("hello\r\n\r\nsecond  paragraph"),
+            "Hello\n\nSecond paragraph.");
+        assert_eq!(cleanup_text("one\ttwo"), "One\ttwo.");
     }
 
     #[test]

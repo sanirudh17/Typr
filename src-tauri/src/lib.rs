@@ -10,6 +10,7 @@ pub mod paste;
 pub mod recorder;
 pub mod downloader;
 pub mod history;
+pub mod data_cleanup;
 pub mod dictionary;
 pub mod whisper_server;
 pub mod ai_postprocess;

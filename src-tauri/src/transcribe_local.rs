@@ -33,6 +33,16 @@ fn post_timeout_for(audio_secs: f64) -> Duration {
     Duration::from_secs_f64((audio_secs * 3.0 + 15.0).clamp(20.0, 180.0))
 }
 
+fn sidecar_backend_args(sidecar_name: &str) -> Vec<String> {
+    if sidecar_name.contains("cuda") {
+        vec!["-dev".into(), "0".into(), "-fa".into()]
+    } else {
+        // CPU and CUDA sidecars can be the same dynamic-backend CLI. Force CPU
+        // on the recovery path rather than attempting the failed GPU again.
+        vec!["-ng".into()]
+    }
+}
+
 /// Non-speech markers whisper.cpp prints for segments it decodes as silence or noise.
 ///
 /// These surfaced once `--no-timestamps` was removed — that flag had been suppressing them —
@@ -130,6 +140,17 @@ pub fn normalize_transcript(raw: &str) -> String {
         }
     }
     out
+}
+
+fn checked_transcript(raw: &str, samples: &[f32], sample_rate: u32) -> Result<String, String> {
+    let text = normalize_transcript(raw);
+    // A successful decoder exit is not proof that it transcribed the chunk.
+    // Reject an empty audible chunk before merging, so another backend can
+    // recover it rather than pasting the other chunks as a complete dictation.
+    if text.is_empty() && !crate::audio::is_silent_capture(samples, sample_rate, 1.0) {
+        return Err("Whisper returned empty text for audible audio; refusing partial transcription".into());
+    }
+    Ok(text)
 }
 
 /// Transcribe with the local Whisper model.
@@ -269,9 +290,13 @@ pub async fn transcribe_local(
                     text: String,
                 }
                 if let Ok(inf_res) = response.json::<InferenceResponse>().await {
-                    let text = normalize_transcript(&inf_res.text);
-                    if !text.is_empty() {
-                        parts.push((text, chunk.overlaps_previous));
+                    match checked_transcript(&inf_res.text, chunk.samples, sample_rate) {
+                        Ok(text) => parts.push((text, chunk.overlaps_previous)),
+                        Err(e) => {
+                            println!("[Typr] Incomplete Whisper server chunk: {e}");
+                            server_chunks_succeeded = false;
+                            break;
+                        }
                     }
                 } else {
                     server_chunks_succeeded = false;
@@ -337,7 +362,7 @@ pub async fn transcribe_local(
             .await
             .map(|output| {
                 if output.status.success() {
-                    Ok(normalize_transcript(&String::from_utf8_lossy(&output.stdout)))
+                    checked_transcript(&String::from_utf8_lossy(&output.stdout), &samples, sample_rate)
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     Err(format!("Exit status: {:?}, Stderr: {}", output.status, stderr))
@@ -383,7 +408,7 @@ pub async fn transcribe_local(
     let started_cpu = Instant::now();
 
     let cpu_result = if chunks.len() <= 1 {
-        let cpu_cmd_args = vec![
+        let mut cpu_cmd_args = vec![
             "-m".to_string(),
             model_path.to_str().unwrap().to_string(),
             "-f".to_string(),
@@ -398,6 +423,7 @@ pub async fn transcribe_local(
             "-l".to_string(),
             "en".to_string(),
         ];
+        cpu_cmd_args.extend(sidecar_backend_args("whisper-cpp"));
         app.shell()
             .sidecar("whisper-cpp")
             .map_err(|e| format!("Failed to create sidecar command: {}", e))?
@@ -407,7 +433,7 @@ pub async fn transcribe_local(
             .await
             .map(|output| {
                 if output.status.success() {
-                    Ok(normalize_transcript(&String::from_utf8_lossy(&output.stdout)))
+                    checked_transcript(&String::from_utf8_lossy(&output.stdout), &samples, sample_rate)
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     Err(format!("whisper.cpp CPU fallback failed with exit status: {:?}. Stderr: {}", output.status, stderr))
@@ -474,11 +500,7 @@ async fn run_sidecar_chunks(
             "-l".to_string(),
             "en".to_string(),
         ];
-        if sidecar_name.contains("cuda") {
-            args.push("-dev".to_string());
-            args.push("0".to_string());
-            args.push("-fa".to_string());
-        }
+        args.extend(sidecar_backend_args(sidecar_name));
 
         let res = app
             .shell()
@@ -493,10 +515,8 @@ async fn run_sidecar_chunks(
 
         match res {
             Ok(output) if output.status.success() => {
-                let text = normalize_transcript(&String::from_utf8_lossy(&output.stdout));
-                if !text.is_empty() {
-                    parts.push((text, chunk.overlaps_previous));
-                }
+                let text = checked_transcript(&String::from_utf8_lossy(&output.stdout), chunk.samples, sample_rate)?;
+                parts.push((text, chunk.overlaps_previous));
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -528,6 +548,28 @@ pub fn model_download_url(model_size: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_audible_chunk_cannot_be_accepted_as_partial_success() {
+        let mut audio = vec![0.0; 16_000 * 25];
+        // Even one short word among long silence must not disappear silently.
+        audio[16_000 * 24..16_000 * 24 + 1_600].fill(0.02);
+        assert!(checked_transcript("", &audio, 16_000).is_err());
+        assert!(checked_transcript(" [BLANK_AUDIO]", &audio, 16_000).is_err());
+        assert_eq!(checked_transcript(" keep the last word", &audio, 16_000).unwrap(), "keep the last word");
+    }
+
+    #[test]
+    fn truly_quiet_empty_chunk_is_allowed() {
+        assert_eq!(checked_transcript(" [BLANK_AUDIO]", &vec![0.0; 16_000], 16_000).unwrap(), "");
+        assert_eq!(checked_transcript(" last word", &vec![0.0; 16_000], 16_000).unwrap(), "last word");
+    }
+
+    #[test]
+    fn cpu_recovery_disables_gpu_and_cuda_path_keeps_flash_attention() {
+        assert_eq!(sidecar_backend_args("whisper-cpp"), vec!["-ng"]);
+        assert_eq!(sidecar_backend_args("whisper-cpp-cuda"), vec!["-dev", "0", "-fa"]);
+    }
 
     #[test]
     fn test_model_filename() {

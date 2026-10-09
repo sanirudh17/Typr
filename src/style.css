@@ -992,6 +992,79 @@ input[type="password"]::placeholder {
   cursor: default;
 }
 
+/* Destructive confirmation shares the app's live light/dark theme tokens. */
+.clear-data-action {
+  color: var(--red);
+}
+
+#clear-data-status {
+  color: var(--text);
+}
+
+.clear-data-action:hover:not(:disabled) {
+  color: var(--red);
+  /* Keep small red labels above AA contrast in both themes when hovered. */
+  background: color-mix(in srgb, var(--red) 3%, var(--surface));
+  border-color: var(--red);
+}
+
+.data-dialog {
+  width: min(448px, calc(100vw - 40px));
+  max-height: calc(100vh - 64px);
+  margin: auto;
+  padding: 24px;
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.3);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.data-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.data-dialog h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.data-dialog p + p {
+  margin-top: 12px;
+}
+
+.data-dialog-error {
+  color: var(--red);
+}
+
+.data-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.data-dialog .btn-secondary {
+  color: var(--text);
+}
+
+.data-dialog button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.data-dialog button:focus-visible,
+#clear-data-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 /* ── Model Row ──────────────────────────────────────── */
 
 .model-row {

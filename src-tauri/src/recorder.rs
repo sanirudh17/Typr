@@ -53,6 +53,8 @@ pub struct Recorder {
     session_context: Arc<Mutex<Option<(crate::context_detector::ForegroundApp, String)>>>,
     // Live streaming session for Nemotron transducer to ingest and decode chunks during speech
     nemotron_session: Arc<Mutex<Option<crate::transcribe_nemotron::NemotronLiveSession>>>,
+    parakeet_session: Arc<Mutex<Option<crate::transcribe_parakeet::ParakeetLiveSession>>>,
+    review_saves: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 impl Recorder {
@@ -63,6 +65,8 @@ impl Recorder {
             session_override: Arc::new(Mutex::new(None)),
             session_context: Arc::new(Mutex::new(None)),
             nemotron_session: Arc::new(Mutex::new(None)),
+            parakeet_session: Arc::new(Mutex::new(None)),
+            review_saves: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -89,6 +93,20 @@ impl Recorder {
         self.state.lock().unwrap().clone()
     }
 
+    /// Prevent a hotkey from starting capture during a local-data operation.
+    pub fn run_when_idle<T>(&self, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let state = self.state.lock().unwrap();
+        if *state != RecordingState::Ready {
+            return Err("Finish your current dictation before clearing data.".into());
+        }
+        // A completed dictation may still be saving opt-in review audio. Join
+        // before deleting, so no background writer recreates data after Clear.
+        for save in self.review_saves.lock().unwrap().drain(..) {
+            let _ = save.join();
+        }
+        operation()
+    }
+
     pub fn get_amplitude(&self) -> Vec<f32> {
         self.audio_recorder.lock().unwrap().get_amplitude_ring()
     }
@@ -104,6 +122,7 @@ impl Recorder {
         session_override: Option<String>,
         engine: &str,
         nemotron_model_dir: Option<&std::path::Path>,
+        parakeet_model_dir: Option<&std::path::Path>,
     ) -> Result<(), String> {
         // 1. Transition state to Recording while holding the state lock briefly
         {
@@ -142,6 +161,7 @@ impl Recorder {
                 *self.session_override.lock().unwrap() = None;
                 *self.session_context.lock().unwrap() = None;
                 *self.nemotron_session.lock().unwrap() = None;
+                *self.parakeet_session.lock().unwrap() = None;
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
@@ -171,6 +191,23 @@ impl Recorder {
             }
         } else {
             *self.nemotron_session.lock().unwrap() = None;
+        }
+
+        *self.parakeet_session.lock().unwrap() = None;
+        // Keep the measured accuracy path as the default. Buffered streaming
+        // removes most post-stop work, but the reference clip has additional
+        // internal model omissions under chunk-local level normalization.
+        if engine == "parakeet" && std::env::var("TYPR_PARAKEET_BUFFERED").map(|v| v == "1").unwrap_or(false) {
+            if let Some(model_dir) = parakeet_model_dir.filter(|dir|
+                dir.file_name().is_some_and(|name| name == transcribe_parakeet::model_dir_name("v3"))) {
+                match transcribe_parakeet::start_live_session(model_dir, self.audio_recorder.clone()) {
+                    Ok(session) => {
+                        *self.parakeet_session.lock().unwrap() = Some(session);
+                        println!("[Typr] Started Parakeet v3 buffered streaming session");
+                    }
+                    Err(e) => eprintln!("[Typr] Parakeet buffered start failed; retaining batch path: {e}"),
+                }
+            }
         }
 
         Ok(())
@@ -208,7 +245,18 @@ impl Recorder {
         let effective_settings = apply_session_override(settings, session_override);
         let settings = &effective_settings;
 
+        // Delimit this capture for stage logs and asynchronous comparison output.
+        let capture_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos();
+        crate::debug_log::log(app_dir, &format!(
+            "PERF capture={capture_id} release engine={} ai={} ai_model={}",
+            settings.engine, settings.ai_enabled, settings.ai_model));
+
         let temp_path = app_dir.join("temp_recording.wav");
+        let parakeet_model_dir = app_dir.join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+        let parakeet_live = settings.engine == "parakeet" && self.parakeet_session.lock().unwrap()
+            .as_ref().is_some_and(|session| session.model_dir == parakeet_model_dir);
+        let mut wav_requested = settings.engine != "nemotron" && !parakeet_live;
 
         // Release grace: keep capturing for 400ms after the stop request. The cpal stream is
         // NOT paused during this sleep (stop_and_save pauses it afterwards), so every sample
@@ -220,15 +268,20 @@ impl Recorder {
         // "Audio preprocessed" log line: ~1.0x means capture still ends mid-speech.
         tokio::time::sleep(Duration::from_millis(400)).await;
 
-        // Save audio
+        // Live Nemotron needs only the stopped raw buffer. Defer WAV preparation
+        // until we know whether a batch decode is necessary.
         let save_started_at = Instant::now();
         let save_result = {
             let mut recorder = self.audio_recorder.lock().unwrap();
-            recorder.stop_and_save(&temp_path, Some(app))
+            if !wav_requested {
+                recorder.stop_capture()
+            } else {
+                recorder.stop_and_save(&temp_path, Some(app)).map(|(_, duration)| duration)
+            }
         };
         
         let duration_secs = match save_result {
-            Ok((_, duration)) => duration,
+            Ok(duration) => duration,
             Err(e) => {
                 // Capture failures used to die silently (no log line, no toast): a quick
                 // "D"/"hi" tap that falls under the 0.4 s minimum or the silence gate
@@ -243,15 +296,51 @@ impl Recorder {
                 let mut state = self.state.lock().unwrap();
                 *state = RecordingState::Ready;
                 *self.nemotron_session.lock().unwrap() = None;
+                *self.parakeet_session.lock().unwrap() = None;
+                self.audio_recorder.lock().unwrap().clear_samples();
+                if wav_requested { let _ = std::fs::remove_file(&temp_path); }
                 let _ = app.emit("recording-state", RecordingState::Ready);
                 update_overlay(app, &RecordingState::Ready, false);
                 return Err(e);
             }
         };
-        println!(
-            "[Typr] Audio save and preprocessing completed in {:?}",
-            save_started_at.elapsed()
-        );
+        crate::debug_log::log(app_dir, &format!(
+            "PERF capture={capture_id} audio_ms={} capture_secs={duration_secs:.3} release_elapsed_ms={}",
+            save_started_at.elapsed().as_millis(), transcription_started_at.elapsed().as_millis()));
+
+        // Explicit local-only diagnostics. Off by default; useful when normal
+        // and fast speech need replaying through exactly the same engines.
+        if review_audio_enabled() {
+            let review_started_at = Instant::now();
+            let capture = self.audio_recorder.lock().unwrap().review_capture();
+            crate::debug_log::log(app_dir, &format!(
+                "PERF capture={capture_id} review_snapshot_ms={}", review_started_at.elapsed().as_millis()));
+            let review_dir = app_dir.join("review-audio");
+            let path = review_dir.join(format!("{capture_id}.wav"));
+            let log_dir = app_dir.clone();
+            let worker = std::thread::Builder::new().name("typr-review-save".into()).spawn(move || {
+                let started = Instant::now();
+                let result = std::fs::create_dir_all(&review_dir).map_err(|e| e.to_string())
+                    .and_then(|_| capture.save(&path));
+                match result {
+                    Ok(()) => crate::debug_log::log(&log_dir, &format!(
+                        "REVIEW AUDIO capture={capture_id} raw_wav={path:?}")),
+                    Err(e) => crate::debug_log::log(&log_dir, &format!(
+                        "REVIEW AUDIO capture={capture_id} save failed: {e}")),
+                }
+                crate::debug_log::log(&log_dir, &format!(
+                    "PERF capture={capture_id} review_save_ms={} background=true", started.elapsed().as_millis()));
+            });
+            match worker {
+                Ok(worker) => {
+                    let mut saves = self.review_saves.lock().unwrap();
+                    saves.retain(|save| !save.is_finished());
+                    saves.push(worker);
+                },
+                Err(e) => crate::debug_log::log(app_dir, &format!(
+                    "REVIEW AUDIO capture={capture_id} could not start save: {e}")),
+            }
+        }
 
         // Transcribe
         let prompt = {
@@ -259,6 +348,7 @@ impl Recorder {
             dict.get_bias_prompt()
         };
 
+        let engine_started_at = Instant::now();
         let transcribe_result = match settings.engine.as_str() {
             "local" => {
                 let model_path = app_dir.join(transcribe_local::model_filename(&settings.whisper_model));
@@ -268,116 +358,192 @@ impl Recorder {
                 transcribe_groq::transcribe_groq(&settings.groq_api_key, &temp_path, &prompt, &settings.cloud_model).await
             }
             "parakeet" => {
-                let model_dir = app_dir
-                    .join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+                let model_dir = parakeet_model_dir;
                 // No prompt: transducer models have no equivalent of Whisper's prompt window,
                 // so the dictionary bias the other two engines receive has nowhere to go here.
-                transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
+                let session = self.parakeet_session.lock().unwrap().take();
+                let live_result = if let Some(session) = session.filter(|s| s.model_dir == model_dir) {
+                    Some(tokio::task::spawn_blocking(move || session.finish()).await
+                        .map_err(|e| format!("Parakeet finish task failed: {e}")).and_then(|result| result))
+                } else { None };
+                match live_result {
+                    Some(Ok(result)) => {
+                        crate::debug_log::log(app_dir, &format!(
+                            "PERF capture={capture_id} parakeet_path=Buffered completed_chunks={} tail_decode_ms={} wav_saved=false",
+                            result.completed_chunks, result.tail_ms));
+                        Ok(result.text)
+                    }
+                    other => {
+                        if let Some(Err(error)) = other {
+                            crate::debug_log::log(app_dir, &format!("Parakeet buffered recovery: {error}"));
+                        }
+                        async {
+                            if !wav_requested {
+                                wav_requested = true;
+                                self.audio_recorder.lock().unwrap().save_capture(&temp_path, Some(app))?;
+                            }
+                            transcribe_parakeet::transcribe_parakeet(&model_dir, &temp_path).await
+                        }.await
+                    }
+                }
             }
             "nemotron" => {
                 let live_session = self.nemotron_session.lock().unwrap().take();
+                let compare = std::env::var("TYPR_NEMOTRON_COMPARE")
+                    .map(|v| v == "1").unwrap_or(false);
+                let batch_primary = duration_secs <= NEMOTRON_SHORT_CLIP_SECS
+                    && nemotron_batch_verify_enabled() && !compare;
+                let mut short_session = None;
                 let live_text = if let Some(session) = live_session {
-                    match session.finish() {
-                        Ok(text) if !text.trim().is_empty() => Some(text),
-                        Ok(_) => None,
-                        Err(e) => {
-                            eprintln!("[Typr] Nemotron live streaming error: {}, falling back to batch", e);
-                            None
+                    if batch_primary {
+                        // Join without decoding a tail we normally discard. Retain
+                        // the stream in case the processed-WAV decode fails.
+                        match session.pause() {
+                            Ok(session) => short_session = Some(session),
+                            Err(e) => eprintln!("[Typr] Nemotron worker failed: {e}; using batch"),
+                        }
+                        None
+                    } else {
+                        match session.finish() {
+                            Ok(text) if !text.trim().is_empty() => Some(text),
+                            Ok(_) => None,
+                            Err(e) => {
+                                eprintln!("[Typr] Nemotron live streaming error: {}, falling back to batch", e);
+                                None
+                            }
                         }
                     }
                 } else {
                     None
                 };
 
-                // Opt-in diagnostic (TYPR_NEMOTRON_COMPARE=1): decode the SAME processed WAV with
-                // the batch path in the background and log both transcripts, so live-vs-batch
-                // accuracy can be compared on real dictations. The pasted text is unaffected.
-                // Note: the background decode takes the shared recognizer lock, so a dictation
-                // started while it is still running can be delayed. Diagnostic use only.
-                if let Some(ref live) = live_text {
-                    if std::env::var("TYPR_NEMOTRON_COMPARE").map(|v| v == "1").unwrap_or(false) {
-                        let cmp_path = temp_path.with_extension("cmp.wav");
-                        if std::fs::copy(&temp_path, &cmp_path).is_ok() {
-                            let model_dir = app_dir
-                                .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
-                            let live_clone = live.clone();
-                            let log_dir = app_dir.clone();
-                            tokio::spawn(async move {
-                                let batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &cmp_path).await;
-                                let _ = std::fs::remove_file(&cmp_path);
-                                crate::debug_log::log(
-                                    &log_dir,
-                                    &format!("NEMOTRON COMPARE live: {:?} | batch: {:?}", live_clone, batch),
-                                );
-                            });
-                        }
-                    }
-                }
-
                 let live_wps = live_text
                     .as_ref()
                     .map(|t| t.split_whitespace().count() as f32 / duration_secs.max(0.1))
                     .unwrap_or(0.0);
+                let path = nemotron_decode_path(duration_secs, live_text.is_some(),
+                    live_wps, nemotron_batch_verify_enabled());
+                crate::debug_log::log(app_dir, &format!(
+                    "PERF capture={capture_id} nemotron_path={path:?} live_wps={live_wps:.2} compare={compare}"));
 
-                let path = nemotron_decode_path(
-                    duration_secs,
-                    live_text.is_some(),
-                    live_wps,
-                    nemotron_batch_verify_enabled(),
-                );
-                match path {
-                    NemotronDecodePath::BatchPrimary | NemotronDecodePath::BatchVerify => {
-                        let model_dir = app_dir
-                            .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
-                        if path == NemotronDecodePath::BatchVerify {
-                            println!(
-                                "[Typr] Nemotron live transcript sparse ({:.2} wps for {:.1}s), checking batch fallback",
-                                live_wps, duration_secs
-                            );
-                        } else {
-                            println!(
-                                "[Typr] Nemotron short dictation ({:.1}s): single batch decode instead of live + verify",
-                                duration_secs
-                            );
+                let wav_result = if nemotron_needs_wav(path, compare) {
+                    wav_requested = true;
+                    let wav_started = Instant::now();
+                    let result = self.audio_recorder.lock().unwrap().save_capture(&temp_path, Some(app));
+                    crate::debug_log::log(app_dir, &format!(
+                        "PERF capture={capture_id} wav_ms={} wav_saved={}",
+                        wav_started.elapsed().as_millis(), result.is_ok()));
+                    result
+                } else {
+                    self.audio_recorder.lock().unwrap().notify_capture_levels(app);
+                    crate::debug_log::log(app_dir, &format!(
+                        "PERF capture={capture_id} wav_ms=0 wav_saved=false"));
+                    Ok(())
+                };
+                match wav_result {
+                    Err(e) => Err(e),
+                    Ok(()) => {
+
+                        // Opt-in diagnostic (TYPR_NEMOTRON_COMPARE=1): decode the SAME processed WAV with
+                        // the batch path in the background and log both transcripts, so live-vs-batch
+                        // accuracy can be compared on real dictations. The pasted text is unaffected.
+                        // Note: the background decode takes the shared recognizer lock, so a dictation
+                        // started while it is still running can be delayed. Diagnostic use only.
+                        if let Some(ref live) = live_text {
+                            if background_nemotron_compare(compare, path) {
+                                let cmp_path = app_dir.join(format!("nemotron-compare-{capture_id}.wav"));
+                                if std::fs::copy(&temp_path, &cmp_path).is_ok() {
+                                    let model_dir = app_dir
+                                        .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                                    let live_clone = live.clone();
+                                    let log_dir = app_dir.clone();
+                                    tokio::spawn(async move {
+                                        let batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &cmp_path).await;
+                                        let _ = std::fs::remove_file(&cmp_path);
+                                        crate::debug_log::log(
+                                            &log_dir,
+                                            &format!("NEMOTRON COMPARE capture={capture_id} live: {:?} | batch: {:?}", live_clone, batch),
+                                        );
+                                    });
+                                }
+                            }
                         }
-                        let mut batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await;
-                        let live = live_text.unwrap_or_default();
-                        // Total failure (batch empty AND live empty) pastes nothing — the
-                        // "second try nothing pasted" report. One retry: a transient
-                        // engine flake recovers, a deterministic empty costs one extra
-                        // decode on a dictation that already failed. Never retry when we
-                        // already hold a transcript — that would only add latency.
-                        if should_retry_empty_batch(
-                            !matches!(&batch, Ok(t) if !t.trim().is_empty()),
-                            live.trim().is_empty(),
-                        ) {
-                            println!("[Typr] Nemotron decode came back empty, retrying batch once");
-                            batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await;
+
+                        match path {
+                            NemotronDecodePath::BatchPrimary | NemotronDecodePath::BatchVerify => {
+                                let model_dir = app_dir
+                                    .join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                                if path == NemotronDecodePath::BatchVerify {
+                                    println!(
+                                        "[Typr] Nemotron live transcript sparse ({:.2} wps for {:.1}s), checking batch fallback",
+                                        live_wps, duration_secs
+                                    );
+                                } else {
+                                    println!(
+                                        "[Typr] Nemotron short dictation ({:.1}s): single batch decode instead of live + verify",
+                                        duration_secs
+                                    );
+                                }
+                                let mut batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await;
+                                let mut live = live_text.unwrap_or_default();
+                                if compare {
+                                    crate::debug_log::log(app_dir, &format!(
+                                        "NEMOTRON COMPARE capture={capture_id} live: {live:?} | batch: {batch:?}"));
+                                }
+                                if !matches!(&batch, Ok(t) if !t.trim().is_empty()) {
+                                    if let Some(session) = short_session.take() {
+                                        match session.finish() {
+                                            Ok(text) => live = text,
+                                            Err(e) => eprintln!("[Typr] Nemotron recovery failed: {e}"),
+                                        }
+                                    }
+                                }
+                                // Total failure (batch empty AND live empty) pastes nothing — the
+                                // "second try nothing pasted" report. One retry: a transient
+                                // engine flake recovers, a deterministic empty costs one extra
+                                // decode on a dictation that already failed. Never retry when we
+                                // already hold a transcript — that would only add latency.
+                                if should_retry_empty_batch(
+                                    !matches!(&batch, Ok(t) if !t.trim().is_empty()),
+                                    live.trim().is_empty(),
+                                ) {
+                                    println!("[Typr] Nemotron decode came back empty, retrying batch once");
+                                    batch = transcribe_nemotron::transcribe_nemotron(&model_dir, &temp_path).await;
+                                }
+                                match (path, batch) {
+                                    // Batch is the primary decode: one pass over the whole clip, so
+                                    // take it unless it came back empty.
+                                    (NemotronDecodePath::BatchPrimary, Ok(batch_text))
+                                        if !batch_text.trim().is_empty() => Ok(batch_text),
+                                    // Verify: only take batch when it recovered more words.
+                                    (NemotronDecodePath::BatchVerify, Ok(batch_text))
+                                        if batch_text.split_whitespace().count()
+                                            > live.split_whitespace().count() => Ok(batch_text),
+                                    (_, Err(e)) if live.trim().is_empty() => Err(e),
+                                    _ => Ok(live),
+                                }
+                            }
+                            NemotronDecodePath::LiveOnly => Ok(live_text.unwrap_or_default()),
                         }
-                        Ok(match (path, batch) {
-                            // Batch is the primary decode: one pass over the whole clip, so
-                            // take it unless it came back empty.
-                            (NemotronDecodePath::BatchPrimary, Ok(batch_text))
-                                if !batch_text.trim().is_empty() => batch_text,
-                            // Verify: only take batch when it recovered more words.
-                            (NemotronDecodePath::BatchVerify, Ok(batch_text))
-                                if batch_text.split_whitespace().count()
-                                    > live.split_whitespace().count() => batch_text,
-                            _ => live,
-                        })
                     }
-                    NemotronDecodePath::LiveOnly => Ok(live_text.unwrap_or_default()),
                 }
             }
             _ => Err(format!("Unknown engine: {}", settings.engine)),
         };
+        crate::debug_log::log(app_dir, &format!(
+            "PERF capture={capture_id} engine_ms={} release_elapsed_ms={}",
+            engine_started_at.elapsed().as_millis(), transcription_started_at.elapsed().as_millis()));
 
-        // The engine is done with the raw capture buffer (Nemotron's live session already
-        // drained it in `finish()`): release it now instead of holding it until the next start().
+        // Join any unused worker after an engine/model change, BEFORE clearing
+        // capture samples. Workers must never read the next session's buffer.
+        *self.nemotron_session.lock().unwrap() = None;
+        *self.parakeet_session.lock().unwrap() = None;
+        // The engine is done and live workers have been joined: release the
+        // raw capture buffer instead of holding it until the next start().
         self.audio_recorder.lock().unwrap().clear_samples();
 
         // Cleanup temp file
-        let _ = std::fs::remove_file(&temp_path);
+        if wav_requested { let _ = std::fs::remove_file(&temp_path); }
 
         // Keep the overlay in its "processing" state through dictionary replacement and the
         // AI cleanup pass below; we only reset to Ready just before pasting, so the spinner
@@ -465,7 +631,7 @@ impl Recorder {
             crate::debug_log::log(app_dir, "commands present -> raw text + command pass (skipping AI & prose cleanup)");
         }
 
-        // Optional Groq LLM cleanup with a hard 2.5s budget. On off/offline/slow/error we
+        // Optional Groq LLM cleanup with a profile-specific budget. On off/offline/slow/error we
         // paste the deterministic result instead, so a dictation is never blocked.
         let final_text = if bypass_ai_for_commands {
             // Command/code dictation: skip prose cleanup too (no forced capitalization or
@@ -546,30 +712,34 @@ impl Recorder {
                 Duration::from_millis(budget),
                 ai_postprocess::postprocess_with_fallback(
                     &settings.groq_api_key,
-                    &replaced,
+                    &replaced_stripped,
                     &settings.ai_model,
                     &system_prompt,
                 ),
             )
             .await
             {
-                Ok(Ok((clean, used_model))) => {
+                Ok(Ok(result)) => {
                     // Metadata only: timing/model/profile, never the dictated text itself.
-                    // `used_model` is the model that produced this text, which is not always the
+                    // The result's model produced this text, which is not always the
                     // one selected in settings — a fallback retry must be visible in the log.
-                    crate::debug_log::log(
+                    let guarded = guard_ai_output(result.text, &replaced_stripped, &settings.ai_profile, app_dir);
+                    if guarded.is_some() { crate::debug_log::log(
                         app_dir,
                         &format!(
-                            "AI ok {}ms model={} profile={}",
+                            "AI ok {}ms model={} profile={} recovered={} retried={}",
                             ai_started_at.elapsed().as_millis(),
-                            used_model,
+                            result.model,
                             settings.ai_profile,
+                            result.recovered,
+                            result.retried,
                         ),
-                    );
-                    guard_ai_output(clean, &replaced, &settings.ai_profile, app_dir)
+                    ); }
+                    guarded
                 }
                 Ok(Err(e)) => {
-                    crate::debug_log::log(app_dir, &format!("AI skipped (error): {}", e));
+                    crate::debug_log::log(app_dir, &format!("AI skipped {}ms (error): {}",
+                        ai_started_at.elapsed().as_millis(), e));
                     None
                 }
                 Err(_) => {
@@ -588,6 +758,16 @@ impl Recorder {
                     None
                 }
             };
+            if llm.is_none() {
+                // AI-on must not silently look like AI-off when a service or
+                // preservation failure occurs. Preserve the complete dictation
+                // and surface the actual outcome, including when hidden to tray.
+                notify_user(app, if terminal_focus_once {
+                    "AI processing couldn't be applied. Your literal dictation was kept."
+                } else {
+                    "AI processing couldn't be applied. Your dictation was kept with basic cleanup."
+                });
+            }
             // Terminal surface: on any LLM miss (slow/offline/error/empty) paste the raw
             // transcription rather than the prose-formatted cleanup. Everything else keeps
             // the deterministic result. When strip_filler is on, the raw fallback is the
@@ -646,22 +826,28 @@ impl Recorder {
         // bullets are untouched.
         let final_text = final_text.trim_end().to_string();
 
-        // Transcription + AI cleanup are done; clear the spinner now, then paste so the text
-        // appears right as the overlay disappears. Resetting before paste also guarantees the
-        // overlay clears even if paste_text errors below.
-        self.reset_ready(app);
+        // Hide the overlay before paste, but remain busy until history is saved.
+        // Otherwise Clear data could succeed and an in-flight paste would then
+        // put the old transcript straight back into the supposedly empty history.
+        let processing_ms = transcription_started_at.elapsed().as_millis();
+        update_overlay(app, &RecordingState::Ready, false);
 
         // Auto-paste and record history
         if !final_text.is_empty() {
-            paste_text(&final_text)?;
+            if let Err(e) = paste_text(&final_text) {
+                self.reset_ready(app);
+                return Err(e);
+            }
             let _ = history.lock().unwrap().add_item(final_text.clone(), duration_secs, app_dir);
             let _ = app.emit("history-updated", ());
         }
 
-        println!(
-            "[Typr] Full stop-to-text pipeline completed in {:?}",
-            transcription_started_at.elapsed()
-        );
+        let total_ms = transcription_started_at.elapsed().as_millis();
+        crate::debug_log::log(app_dir, &format!(
+            "PERF capture={capture_id} processing_ms={processing_ms} total_ms={} paste_and_history_ms={}",
+            total_ms, total_ms.saturating_sub(processing_ms)));
+
+        self.reset_ready(app);
 
         Ok(final_text)
     }
@@ -710,6 +896,7 @@ pub fn append_vocabulary_hints(base_prompt: &str, user_hints: &[String]) -> Stri
         "Parakeet".into(),
         "Whisper".into(),
         "Nemotron".into(),
+        "FluidVoice".into(),
         "OpenCode".into(),
         "Orca".into(),
         "handoff".into(),
@@ -723,7 +910,7 @@ pub fn append_vocabulary_hints(base_prompt: &str, user_hints: &[String]) -> Stri
     }
     if !terms.is_empty() {
         format!(
-            "{}\n\nRecognized Vocabulary & Technical Terms:\nThe user and codebase frequently use the following terms. When speech-to-text produces phonetically similar words or garbled fragments, prioritize matching against these terms:\n{}",
+            "{}\n\nRecognized Vocabulary & Technical Terms:\nUse these exact spellings only when the transcript clearly refers to the term. Do not replace an ordinary word or invent a term merely because it appears in this list:\n{}",
             base_prompt,
             terms.join(", ")
         )
@@ -761,6 +948,18 @@ pub enum NemotronDecodePath {
 
 /// Clip length up to which a single batch decode replaces live streaming.
 const NEMOTRON_SHORT_CLIP_SECS: f32 = 8.0;
+
+fn background_nemotron_compare(compare: bool, path: NemotronDecodePath) -> bool {
+    compare && path == NemotronDecodePath::LiveOnly
+}
+
+fn nemotron_needs_wav(path: NemotronDecodePath, compare: bool) -> bool {
+    compare || path != NemotronDecodePath::LiveOnly
+}
+
+fn review_audio_enabled() -> bool {
+    std::env::var("TYPR_REVIEW_AUDIO").map(|v| v == "1").unwrap_or(false)
+}
 
 pub fn nemotron_decode_path(
     duration_secs: f32,
@@ -868,7 +1067,7 @@ pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
 
     let grounding = matched_count as f32 / target_len.max(1) as f32;
 
-    // Truncation: the AI returned the transcript minus exactly its final word. Word-set
+    // Truncation: the AI returned only a prefix, dropping one or more final words. Word-set
     // grounding cannot see this (every surviving word is grounded), yet a silently dropped last
     // word is the one failure the user cannot spot and cannot recover from. A trailing filler
     // or courtesy word is a legitimate removal and is not flagged.
@@ -876,11 +1075,26 @@ pub fn check_ai_divergence(pre_text: &str, ai_text: &str) -> (f32, f32, bool) {
         "um", "uh", "er", "ah", "hmm", "erm", "uhm", "like", "okay", "ok", "right", "so",
         "yeah", "please", "thanks", "basically", "actually", "literally", "just",
     ];
-    if ai_tokens.len() + 1 == pre_tokens.len() && pre_tokens[..ai_tokens.len()] == ai_tokens[..] {
-        let dropped = pre_tokens[pre_tokens.len() - 1].as_str();
-        if dropped.len() >= 3 && !TAIL_FILLER.contains(&dropped) {
+    if ai_tokens.len() < pre_tokens.len() && pre_tokens[..ai_tokens.len()] == ai_tokens[..] {
+        let tail = &pre_tokens[ai_tokens.len()..];
+        if tail.iter().any(|dropped| dropped.len() >= 3 && !TAIL_FILLER.contains(&dropped.as_str())) {
             return (grounding, len_delta, true);
         }
+    }
+
+    // Grounding in the output alone accepts an arbitrary subset of a long
+    // transcript. Reject severe omissions as well as invented additions.
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "the", "and", "or", "to", "of", "in", "on", "at", "for", "with",
+        "is", "are", "was", "were", "be", "been", "it", "that", "this", "i", "you",
+        "we", "they", "me", "my", "our", "your", "um", "uh", "er", "please",
+    ];
+    let source_content = pre_tokens.iter().filter(|t| !STOP_WORDS.contains(&t.as_str())).count();
+    let retained = pre_tokens.iter().filter(|t| {
+        !STOP_WORDS.contains(&t.as_str()) && ai_tokens.contains(t)
+    }).count();
+    if source_content >= 8 && retained * 2 < source_content {
+        return (grounding, len_delta, true);
     }
 
     // Merge/split correction: for short dictations, accept an output that is a close spelling
@@ -948,12 +1162,50 @@ pub fn apply_session_override(base: &Settings, session_override: Option<String>)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_decode_skips_wav_but_batch_and_comparison_keep_it() {
+        use super::{nemotron_needs_wav, NemotronDecodePath::*};
+        assert!(!nemotron_needs_wav(LiveOnly, false));
+        for path in [LiveOnly, BatchPrimary, BatchVerify] {
+            assert!(nemotron_needs_wav(path, true));
+        }
+        assert!(nemotron_needs_wav(BatchPrimary, false));
+        assert!(nemotron_needs_wav(BatchVerify, false));
+    }
     use super::*;
 
     #[test]
     fn test_initial_state_is_ready() {
         let recorder = Recorder::new();
         assert_eq!(recorder.get_state(), RecordingState::Ready);
+    }
+
+    #[test]
+    fn local_data_operations_require_idle_recorder() {
+        let recorder = Recorder::new();
+        assert_eq!(recorder.run_when_idle(|| Ok(42)), Ok(42));
+        for busy in [RecordingState::Recording, RecordingState::Transcribing] {
+            *recorder.state.lock().unwrap() = busy;
+            let mut called = false;
+            assert!(recorder.run_when_idle(|| { called = true; Ok(()) }).is_err());
+            assert!(!called);
+        }
+    }
+
+    #[test]
+    fn local_data_operations_wait_for_background_review_save() {
+        let recorder = Recorder::new();
+        let saved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_saved = saved.clone();
+        let worker = std::thread::spawn(move || {
+            worker_saved.store(true, std::sync::atomic::Ordering::Release);
+        });
+        recorder.review_saves.lock().unwrap().push(worker);
+        recorder.run_when_idle(|| {
+            assert!(saved.load(std::sync::atomic::Ordering::Acquire));
+            Ok(())
+        }).unwrap();
+        assert!(recorder.review_saves.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1237,6 +1489,14 @@ mod tests {
         assert_eq!(nemotron_decode_path(30.0, true, 0.3, false), LiveOnly);
         // With verification off and no live text, batch is still the only option.
         assert_eq!(nemotron_decode_path(30.0, false, 0.0, false), BatchPrimary);
+    }
+
+    #[test]
+    fn comparison_reuses_batch_when_the_main_path_already_decodes_it() {
+        assert!(background_nemotron_compare(true, NemotronDecodePath::LiveOnly));
+        assert!(!background_nemotron_compare(false, NemotronDecodePath::LiveOnly));
+        assert!(!background_nemotron_compare(true, NemotronDecodePath::BatchPrimary));
+        assert!(!background_nemotron_compare(true, NemotronDecodePath::BatchVerify));
     }
 
     #[test]

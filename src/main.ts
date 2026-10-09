@@ -128,6 +128,103 @@ const autostartOn = document.getElementById("autostart-on")!;
 const themeLight = document.getElementById("theme-light")!;
 const themeDark = document.getElementById("theme-dark")!;
 const themeSystem = document.getElementById("theme-system")!;
+const clearDataBtn = document.getElementById("clear-data-btn") as HTMLButtonElement;
+const clearDataStatus = document.getElementById("clear-data-status")!;
+const clearDataDialog = document.getElementById("clear-data-dialog") as HTMLDialogElement;
+const clearDataCancel = document.getElementById("clear-data-cancel") as HTMLButtonElement;
+const clearDataConfirm = document.getElementById("clear-data-confirm") as HTMLButtonElement;
+const clearDataError = document.getElementById("clear-data-error")!;
+let clearingData = false;
+let currentRecordingState = "Ready";
+
+interface ClearDataReport {
+  history_items: number;
+  files_removed: number;
+  bytes_freed: number;
+  warnings: string[];
+}
+
+function syncClearDataState() {
+  clearDataBtn.disabled = clearingData || currentRecordingState !== "Ready";
+  if (currentRecordingState !== "Ready") {
+    clearDataStatus.textContent = "Finish your current dictation before clearing data.";
+  } else {
+    clearDataStatus.textContent = "Remove transcription history, logs, and saved recordings.";
+  }
+}
+
+clearDataBtn.addEventListener("click", () => {
+  clearDataError.textContent = "";
+  clearDataError.classList.add("hidden");
+  closeAllCustomSelects();
+  clearDataDialog.showModal();
+  clearDataCancel.focus();
+});
+clearDataCancel.addEventListener("click", () => clearDataDialog.close());
+clearDataDialog.addEventListener("cancel", (event) => {
+  if (clearingData) event.preventDefault();
+});
+clearDataDialog.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  // Keep keyboard focus inside the destructive confirmation, including when
+  // Shift+Tab would otherwise escape to the WebView's host chrome.
+  const buttons = [clearDataCancel, clearDataConfirm].filter(button => !button.disabled);
+  event.preventDefault();
+  if (!buttons.length) return;
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const next = (current + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[next].focus();
+});
+clearDataDialog.addEventListener("click", (event) => {
+  if (clearingData || event.target !== clearDataDialog) return;
+  const rect = clearDataDialog.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right
+      || event.clientY < rect.top || event.clientY > rect.bottom) clearDataDialog.close();
+});
+clearDataDialog.addEventListener("close", () => {
+  if (!clearDataBtn.disabled) clearDataBtn.focus();
+});
+clearDataConfirm.addEventListener("click", async () => {
+  if (clearingData) return;
+  clearingData = true;
+  clearDataDialog.setAttribute("aria-busy", "true");
+  clearDataConfirm.disabled = clearDataCancel.disabled = true;
+  clearDataConfirm.textContent = "Clearing…";
+  clearDataError.classList.add("hidden");
+  syncClearDataState();
+  try {
+    const report = await invoke<ClearDataReport>("clear_local_data");
+    // Retire delayed delete/undo handlers and in-flight reads of the old history.
+    historyEpoch += 1;
+    historyLoadGeneration += 1;
+    document.querySelectorAll(".undo-toast").forEach(toast => toast.remove());
+    cachedHistory = { items: [] };
+    await loadHistory(false);
+    // Clearing has already succeeded. A failed refresh must not report that the
+    // destructive operation failed, and new dictations should still appear.
+    loadHistory().catch(error => console.error("History refresh after clearing failed:", error));
+    const message = report.warnings.length
+      ? `History cleared. Some files could not be removed: ${report.warnings.join("; ")}`
+      : "Local data cleared.";
+    clearDataDialog.close();
+    showToast(message, report.warnings.length ? 10000 : 4000);
+  } catch (error) {
+    clearDataError.textContent = `Could not clear data. ${String(error)}`;
+    clearDataError.classList.remove("hidden");
+  } finally {
+    clearingData = false;
+    clearDataDialog.removeAttribute("aria-busy");
+    clearDataConfirm.disabled = clearDataCancel.disabled = false;
+    clearDataConfirm.textContent = "Clear data";
+    syncClearDataState();
+    if (!clearDataDialog.open && !clearDataBtn.disabled) clearDataBtn.focus();
+    else if (clearDataDialog.open) clearDataCancel.focus();
+  }
+});
+invoke<string>("get_recording_state").then(state => {
+  currentRecordingState = state;
+  syncClearDataState();
+}).catch(() => {});
 const aiModelSelect = document.getElementById("ai-model-select") as HTMLSelectElement;
 const aiProfileCleanup = document.getElementById("ai-profile-cleanup")!;
 const aiProfilePrompt = document.getElementById("ai-profile-prompt")!;
@@ -1281,6 +1378,8 @@ listen<{ device: string; fellBack: boolean }>("mic-changed", (event) => {
 // Listen for recording state changes
 listen<string>("recording-state", (event) => {
   const state = event.payload;
+  currentRecordingState = state;
+  syncClearDataState();
   statusDot.className = "";
   statusIndicator.className = "";
   // A real state transition takes authority over any pending mic notice.
@@ -1343,6 +1442,8 @@ listen<string>("show-toast", (event) => {
 
 let visibleHistoryCount = 50;
 let cachedHistory: History | null = null;
+let historyEpoch = 0;
+let historyLoadGeneration = 0;
 
 interface Correction { find: string; replace: string; }
 
@@ -1514,7 +1615,10 @@ function highlightMatches(text: string, query: string): string {
 
 async function loadHistory(forceFetch = true) {
   if (forceFetch || !cachedHistory) {
-    cachedHistory = await invoke<History>("get_history");
+    const generation = ++historyLoadGeneration;
+    const fetched = await invoke<History>("get_history");
+    if (generation !== historyLoadGeneration) return;
+    cachedHistory = fetched;
     visibleHistoryCount = 50;
   }
 
@@ -1632,6 +1736,7 @@ async function loadHistory(forceFetch = true) {
       delBtn.className = "btn-secondary feed-item-del-btn";
       delBtn.textContent = "Delete";
       delBtn.onclick = () => {
+        const epoch = historyEpoch;
         const items2 = cachedHistory!.items;
         const idx = items2.findIndex(i => i.id === item.id);
         if (idx === -1) return;
@@ -1640,10 +1745,12 @@ async function loadHistory(forceFetch = true) {
         showUndoToast(
           "Transcription deleted",
           () => {
+            if (epoch !== historyEpoch) return;
             cachedHistory!.items.splice(idx, 0, removed);
             loadHistory(false);
           },
           () => {
+            if (epoch !== historyEpoch) return;
             invoke("delete_transcription", { id: removed.id }).catch(err => console.error(err));
           },
         );

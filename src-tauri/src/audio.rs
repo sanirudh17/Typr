@@ -197,6 +197,10 @@ impl AudioRecorder {
         self.samples.lock().unwrap().clear();
     }
 
+    pub fn source_sample_rate(&self) -> u32 {
+        self.source_sample_rate
+    }
+
     #[cfg(test)]
     pub fn push_raw_samples_for_test(&self, data: &[f32]) {
         self.samples.lock().unwrap().extend_from_slice(data);
@@ -444,6 +448,14 @@ impl AudioRecorder {
         output_path: &PathBuf,
         app: Option<&AppHandle>,
     ) -> Result<(PathBuf, f32), String> {
+        let duration = self.stop_capture()?;
+        self.save_capture(output_path, app)?;
+        Ok((output_path.clone(), duration))
+    }
+
+    /// Stop and validate without preparing a second copy of audio that a live
+    /// recognizer has already consumed. Keep raw samples for its final drain.
+    pub fn stop_capture(&mut self) -> Result<f32, String> {
         // Pause the stream (mic off between records); the device stays activated so the
         // next start() is a fast play with no dropped audio.
         if let Some(ref s) = self.stream {
@@ -468,11 +480,27 @@ impl AudioRecorder {
         // clip survives on its 20 ms frames even when the long-clip mean falls below
         // the threshold.
         let gain_factor = 10f32.powf(FIXED_INPUT_GAIN_DB / 20.0);
-        if is_silent_capture(&samples, self.source_sample_rate, gain_factor) {
+        // Samples are interleaved: a 20 ms frame includes all device channels.
+        if is_silent_capture(&samples,
+            self.source_sample_rate * self.source_channels as u32, gain_factor) {
             return Err("Audio was silent".to_string());
         }
 
         println!("[Typr] Captured {} raw samples", samples.len());
+        Ok(duration_secs)
+    }
+
+    /// Prepare the stopped capture only when batch recognition or diagnostics
+    /// needs a WAV. Must be called after stop_capture, before clear_samples.
+    pub fn save_capture(
+        &self,
+        output_path: &PathBuf,
+        app: Option<&AppHandle>,
+    ) -> Result<(), String> {
+        let samples = self.samples.lock().unwrap();
+        if samples.is_empty() {
+            return Err("No audio captured".to_string());
+        }
 
         let mono: Vec<f32> = if self.source_channels > 1 {
             samples
@@ -540,7 +568,72 @@ impl AudioRecorder {
         // once the engine has finished with it.
 
         println!("[Typr] WAV saved to {:?}", output_path);
-        Ok((output_path.clone(), duration_secs))
+        Ok(())
+    }
+
+    /// Live dictation still reports input problems without running the whole
+    /// batch filter. These levels are measured on the microphone signal.
+    pub fn notify_capture_levels(&self, app: &AppHandle) {
+        let samples = self.samples.lock().unwrap();
+        let clipped = samples.iter().any(|s| s.abs() >= 0.999);
+        let quiet = measure_p95_frame_rms(&samples,
+            self.source_sample_rate * self.source_channels as u32)
+            * 10f32.powf(FIXED_INPUT_GAIN_DB / 20.0) < 0.010;
+        if clipped && !CLIPPING_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::recorder::notify_user(app,
+                "Microphone audio is clipping — try speaking further from the mic.");
+        }
+        if quiet && !QUIET_TOAST_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::recorder::notify_user(app,
+                "Microphone audio is very quiet — try speaking closer to the mic.");
+        }
+    }
+
+    /// Opt-in review artifact: exact interleaved device samples, before gain,
+    /// filtering, or resampling. Never overwrite another recording.
+    pub fn save_review_capture(&self, output_path: &PathBuf) -> Result<(), String> {
+        self.review_capture().save(output_path)
+    }
+
+    /// Take a short in-memory snapshot so disk I/O never holds the live worker's
+    /// sample lock or delays paste. Only called when review recording is enabled.
+    pub fn review_capture(&self) -> ReviewCapture {
+        ReviewCapture {
+            channels: self.source_channels,
+            sample_rate: self.source_sample_rate,
+            samples: self.samples.lock().unwrap().clone(),
+        }
+    }
+}
+
+pub struct ReviewCapture {
+    channels: u16,
+    sample_rate: u32,
+    samples: Vec<f32>,
+}
+
+impl ReviewCapture {
+    pub fn save(&self, output_path: &PathBuf) -> Result<(), String> {
+        let file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(output_path).map_err(|e| e.to_string())?;
+        let result = (|| {
+            // WavWriter::new does not add buffering. A bare File turned each
+            // four-byte sample into a Windows write and delayed long dictations
+            // by seconds, even when live decoding was already complete.
+            let buffered = std::io::BufWriter::with_capacity(256 * 1024, file);
+            let mut writer = WavWriter::new(buffered, WavSpec {
+                channels: self.channels,
+                sample_rate: self.sample_rate,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            }).map_err(|e| e.to_string())?;
+            for &sample in self.samples.iter() {
+                writer.write_sample(sample).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())
+        })();
+        if result.is_err() { let _ = std::fs::remove_file(output_path); }
+        result
     }
 }
 
@@ -553,14 +646,11 @@ pub struct PreprocessDiagnostics {
     pub is_quiet: bool,
 }
 
-/// Fixed native input gain applied to every capture before transcription (+12 dB = ~4x).
-///
-/// There is deliberately no user-facing control for this: the chain below already
-/// normalizes speech to a target RMS (up to 20x) and caps peaks with a soft limiter,
-/// so a fixed strong gain is strictly better than a slider users must discover. +12 dB
-/// lifts quiet speech well clear of the silence gate with headroom to spare; the slider's
-/// +18 dB maximum is avoided because on typical loud microphones it hard-clips before the
-/// limiter, and clipped distortion hurts accuracy more than low volume ever did.
+/// Digital pre-gain shared by capture validation, batch audio, live Nemotron,
+/// and the meter (+12 dB = ~3.98x amplitude). This is not a hardware mic setting.
+/// Automatic level normalization follows it, raising quiet speech or attenuating
+/// loud speech before the limiter. Float multiplication here does not hard-clip;
+/// clipping already present in the device samples cannot be repaired by gain.
 pub const FIXED_INPUT_GAIN_DB: f32 = 12.0;
 
 pub fn apply_gain_db(samples: &mut [f32], gain_db: f32) {
@@ -798,9 +888,11 @@ pub fn process_speech_audio_chain(
 const STREAM_TARGET_RMS: f32 = 0.08; // same as TARGET_RMS in process_speech_audio_chain
 const STREAM_MAX_GAIN: f32 = 20.0; // same as MAX_GAIN in process_speech_audio_chain
 const STREAM_MIN_GAIN: f32 = 0.05;
-/// A chunk whose loudest 20 ms frame (after pre-gain and high-pass) is below this is treated
-/// as silence/noise and does not move the tracked speech level.
-const STREAM_GATE_RMS: f32 = 0.01;
+/// Minimum loudest-frame RMS for live level tracking, after pre-gain/filtering.
+/// The old 0.01 floor missed quiet speech already accepted by the capture gate
+/// (mean >= 0.003): e.g. a 0.002-amplitude voice at +12 dB has RMS ~0.0056.
+/// Keep a floor above low-level noise so it cannot drive automatic gain upward.
+const STREAM_GATE_RMS: f32 = 0.005;
 
 /// Direct-form-II-transposed biquad coefficients [b0, b1, b2, a1, a2] of the same 2nd-order
 /// 50 Hz Butterworth high-pass used by `highpass_50hz`.
@@ -865,6 +957,10 @@ pub struct StreamingPreprocessor {
 }
 
 impl StreamingPreprocessor {
+    /// Continuous filter for chunk-boundary planning without changing decoder
+    /// gain. Keeping DC out of the energy scan prevents missed real pauses.
+    pub(crate) fn highpass_only(&mut self, samples: &mut [f32]) { self.highpass(samples); }
+
     /// `sample_rate` is the rate of the chunks that will be passed to `process` (16000 for
     /// the Nemotron path). `pre_gain_db` is the fixed native input gain (FIXED_INPUT_GAIN_DB).
     pub fn new(sample_rate: u32, pre_gain_db: f32) -> Self {
@@ -983,14 +1079,30 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     // Anti-aliasing only matters when downsampling: decimating 48 kHz -> 16 kHz without a
     // low-pass first folds all 8-24 kHz energy back into the 0-8 kHz speech band as noise the
     // model then has to hear through. Upsampling can't fold anything in, so it is left alone.
-    let filtered;
-    let src: &[f32] = if from_rate > to_rate {
+    let kernel = if from_rate > to_rate {
         // Cutoff just under the OUTPUT Nyquist, expressed in cycles per INPUT sample.
         let fc = 0.5 * (to_rate as f64 / from_rate as f64) * 0.90;
-        filtered = lowpass(samples, fc, RESAMPLE_LOWPASS_TAPS);
-        &filtered
+        Some(lowpass_kernel(fc, RESAMPLE_LOWPASS_TAPS))
     } else {
-        samples
+        None
+    };
+    // Evaluate the same FIR only at positions used by interpolation. At 48 kHz
+    // -> 16 kHz, two thirds of the old filtered samples were thrown away.
+    // Preserve accumulation order and f32 rounding so the waveform is identical.
+    let filtered_at = |index: usize| -> f32 {
+        if let Some(kernel) = &kernel {
+            let half = (kernel.len() / 2) as isize;
+            let mut acc = 0.0f64;
+            for (j, &weight) in kernel.iter().enumerate() {
+                let source = index as isize + j as isize - half;
+                if source >= 0 && (source as usize) < samples.len() {
+                    acc += samples[source as usize] as f64 * weight;
+                }
+            }
+            acc as f32
+        } else {
+            samples[index]
+        }
     };
 
     // Unchanged from before: linear interpolation to the target rate. The output length formula
@@ -1004,10 +1116,12 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
         let idx = src_idx as usize;
         let frac = src_idx - idx as f64;
 
-        let sample = if idx + 1 < src.len() {
-            src[idx] as f64 * (1.0 - frac) + src[idx + 1] as f64 * frac
+        let sample = if idx + 1 < samples.len() {
+            let a = filtered_at(idx);
+            let b = if frac == 0.0 { a } else { filtered_at(idx + 1) };
+            a as f64 * (1.0 - frac) + b as f64 * frac
         } else {
-            src[idx.min(src.len() - 1)] as f64
+            filtered_at(idx.min(samples.len() - 1)) as f64
         };
 
         output.push(sample as f32);
@@ -1020,7 +1134,26 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// `fc` is the cutoff in cycles per sample (0..0.5). The kernel is built once (a handful of
 /// transcendentals), then the convolution is pure multiply-add — so this is fast even in a
 /// debug build. Edges are handled by treating out-of-range input as zero.
+#[cfg(test)]
 fn lowpass(samples: &[f32], fc: f64, taps: usize) -> Vec<f32> {
+    let kernel = lowpass_kernel(fc, taps);
+    let half = (kernel.len() / 2) as isize;
+    let n = samples.len() as isize;
+    let mut out = vec![0.0f32; samples.len()];
+    for (i, output) in out.iter_mut().enumerate() {
+        let mut acc = 0.0f64;
+        for (j, &kv) in kernel.iter().enumerate() {
+            let src = i as isize + j as isize - half;
+            if src >= 0 && src < n {
+                acc += samples[src as usize] as f64 * kv;
+            }
+        }
+        *output = acc as f32;
+    }
+    out
+}
+
+fn lowpass_kernel(fc: f64, taps: usize) -> Vec<f64> {
     let taps = taps | 1; // force odd for a symmetric, integer-delay filter
     let m = (taps - 1) as f64;
     let mut kernel = vec![0.0f64; taps];
@@ -1041,25 +1174,153 @@ fn lowpass(samples: &[f32], fc: f64, taps: usize) -> Vec<f32> {
         *k /= sum; // unity gain at DC — the filter must not change loudness
     }
 
-    let half = (taps / 2) as isize;
-    let n = samples.len() as isize;
-    let mut out = vec![0.0f32; samples.len()];
-    for i in 0..samples.len() {
-        let mut acc = 0.0f64;
-        for (j, &kv) in kernel.iter().enumerate() {
-            let src = i as isize + j as isize - half;
-            if src >= 0 && src < n {
-                acc += samples[src as usize] as f64 * kv;
-            }
-        }
-        out[i] = acc as f32;
+    kernel
+}
+
+/// Continuous equivalent of `resample`: retain the FIR history, lookahead, and
+/// fractional sample position across microphone reads. Restarting the batch
+/// filter every 150 ms zero-pads artificial edges and loses fractional samples.
+pub struct StreamingResampler {
+    ratio: f64,
+    kernel: Vec<f64>,
+    samples: Vec<f32>,
+    base: usize,
+    total: usize,
+    next_output: usize,
+}
+
+impl StreamingResampler {
+    pub fn new(from_rate: u32, to_rate: u32) -> Self {
+        assert!(from_rate > 0 && to_rate > 0);
+        let kernel = if from_rate > to_rate {
+            lowpass_kernel(0.45 * to_rate as f64 / from_rate as f64, RESAMPLE_LOWPASS_TAPS)
+        } else {
+            vec![1.0]
+        };
+        Self { ratio: from_rate as f64 / to_rate as f64, kernel,
+            samples: Vec::new(), base: 0, total: 0, next_output: 0 }
     }
-    out
+
+    pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.samples.extend_from_slice(samples);
+        self.total += samples.len();
+        self.drain(false)
+    }
+
+    /// Flush only the true end of the recording with zero boundary conditions.
+    pub fn finish(&mut self) -> Vec<f32> {
+        self.drain(true)
+    }
+
+    fn filtered(&self, index: usize) -> f32 {
+        let half = self.kernel.len() as isize / 2;
+        self.kernel.iter().enumerate().map(|(j, &weight)| {
+            let source = index as isize + j as isize - half;
+            if source < 0 || source as usize >= self.total { 0.0 }
+            else { self.samples[source as usize - self.base] as f64 * weight }
+        }).sum::<f64>() as f32
+    }
+
+    fn drain(&mut self, finished: bool) -> Vec<f32> {
+        let output_len = (self.total as f64 / self.ratio) as usize;
+        let half = self.kernel.len() / 2;
+        let mut output = Vec::new();
+        while self.next_output < output_len {
+            let position = self.next_output as f64 * self.ratio;
+            let index = position as usize;
+            if !finished && index + half + 1 >= self.total { break; }
+            let a = self.filtered(index.min(self.total - 1));
+            let fraction = position - index as f64;
+            let b = if fraction == 0.0 { a }
+                else { self.filtered((index + 1).min(self.total - 1)) };
+            output.push((a as f64 * (1.0 - fraction) + b as f64 * fraction) as f32);
+            self.next_output += 1;
+        }
+        let next_index = (self.next_output as f64 * self.ratio) as usize;
+        let retain_from = next_index.saturating_sub(half).min(self.total);
+        let discard = retain_from.saturating_sub(self.base);
+        self.samples.drain(..discard);
+        self.base += discard;
+        output
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+        if from_rate == to_rate || samples.is_empty() { return samples.to_vec(); }
+        let filtered = if from_rate > to_rate {
+            lowpass(samples, 0.5 * (to_rate as f64 / from_rate as f64) * 0.90, RESAMPLE_LOWPASS_TAPS)
+        } else { samples.to_vec() };
+        let ratio = from_rate as f64 / to_rate as f64;
+        (0..(samples.len() as f64 / ratio) as usize).map(|i| {
+            let position = i as f64 * ratio;
+            let index = position as usize;
+            let fraction = position - index as f64;
+            if index + 1 < filtered.len() {
+                (filtered[index] as f64 * (1.0 - fraction)
+                    + filtered[index + 1] as f64 * fraction) as f32
+            } else { filtered[index.min(filtered.len() - 1)] }
+        }).collect()
+    }
+
+    #[test]
+    fn optimized_resampler_is_bit_identical_to_previous_filter() {
+        for from_rate in [8_000, 16_000, 22_050, 44_100, 48_000, 96_000] {
+            for to_rate in [16_000, 22_050, 48_000] {
+                for len in [0, 1, 2, 17, 133, 8191] {
+                    let samples: Vec<_> = (0..len).map(|i| (i as f32 * 0.037).sin() * 0.4).collect();
+                    let expected = legacy_resample(&samples, from_rate, to_rate);
+                    let actual = resample(&samples, from_rate, to_rate);
+                    assert_eq!(actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        "from={from_rate} to={to_rate} len={len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual latency measurement; no CI timing threshold"]
+    fn benchmark_resample_without_waveform_changes() {
+        let samples: Vec<_> = (0..48_000 * 80).map(|i| (i as f32 * 0.037).sin() * 0.4).collect();
+        let started = std::time::Instant::now();
+        let expected = legacy_resample(&samples, 48_000, 16_000);
+        let old_ms = started.elapsed().as_millis();
+        let started = std::time::Instant::now();
+        let actual = resample(&samples, 48_000, 16_000);
+        let new_ms = started.elapsed().as_millis();
+        assert_eq!(actual, expected);
+        println!("80s audio @48kHz: legacy FIR={old_ms}ms, optimized FIR={new_ms}ms; identical samples");
+    }
+
+    #[test]
+    fn streaming_resampling_matches_whole_audio_at_arbitrary_boundaries() {
+        for from_rate in [8_000, 16_000, 44_100, 48_000] {
+            let samples: Vec<_> = (0..10_031).map(|i| {
+                let t = i as f32 / from_rate as f32;
+                (t * 997.0 * 2.0 * std::f32::consts::PI).sin() * 0.3
+                    + (t * 11_003.0 * 2.0 * std::f32::consts::PI).sin() * 0.1
+            }).collect();
+            let expected = resample(&samples, from_rate, 16_000);
+            for chunk_size in [1, 17, 1023, 2399] {
+                let mut resampler = StreamingResampler::new(from_rate, 16_000);
+                let mut actual = Vec::new();
+                for chunk in samples.chunks(chunk_size) {
+                    actual.extend(resampler.process(chunk));
+                    assert!(resampler.samples.len() <= RESAMPLE_LOWPASS_TAPS * 2 + 4);
+                }
+                actual.extend(resampler.finish());
+                assert_eq!(actual.len(), expected.len(), "rate={from_rate}, chunk={chunk_size}");
+                for (a, b) in actual.iter().zip(&expected) {
+                    assert!((a - b).abs() < 1e-6, "rate={from_rate}, chunk={chunk_size}: {a} != {b}");
+                }
+                assert!(resampler.finish().is_empty());
+            }
+        }
+    }
 
     #[test]
     fn test_smooth_band() {
@@ -1246,7 +1507,7 @@ mod tests {
     fn test_fixed_input_gain_lifts_quiet_speech_fourfold() {
         // The native fixed gain replaces the removed slider: +12 dB must equal ~4x
         // amplitude, lifting quiet speech clear of the silence gate with headroom
-        // left before the limiter (the slider's +18 dB maximum clipped loud mics).
+        // left in float samples for the later normalization/limiter stages.
         assert!((FIXED_INPUT_GAIN_DB - 12.0).abs() < 1e-6);
         let mut s = vec![0.05f32, -0.05, 0.1];
         apply_gain_db(&mut s, FIXED_INPUT_GAIN_DB);
@@ -1451,6 +1712,72 @@ mod tests {
         assert!(rec.get_raw_samples_from(0).0.is_empty());
     }
 
+    #[test]
+    fn stopped_capture_validates_keeps_tail_and_can_save_later() {
+        let mut rec = AudioRecorder::new();
+        rec.set_source_format_for_test(48000, 2);
+        assert_eq!(rec.stop_capture().unwrap_err(), "No audio captured");
+        rec.push_raw_samples_for_test(&vec![0.0; 48000 * 2]);
+        assert_eq!(rec.stop_capture().unwrap_err(), "Audio was silent");
+        rec.clear_samples();
+        let mono = tone(300.0, 48000, 1.0);
+        let stereo: Vec<_> = mono.iter().flat_map(|&x| [x, x]).collect();
+        rec.push_raw_samples_for_test(&stereo);
+        assert_eq!(rec.stop_capture().unwrap(), 1.0);
+        assert_eq!(rec.get_raw_samples_from(90000).0, stereo[90000..]);
+        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("typr-deferred-capture-{id}.wav"));
+        rec.save_capture(&path, None).unwrap();
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16000);
+        let actual: Vec<_> = reader.samples::<i16>().map(Result::unwrap).collect();
+        let mut expected = resample(&mono, 48000, 16000);
+        process_speech_audio_chain(&mut expected, 16000, FIXED_INPUT_GAIN_DB);
+        expected.extend(vec![0.0; 6400]);
+        assert_eq!(actual, expected.iter().map(|x| (x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect::<Vec<_>>());
+        drop(reader);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(rec.get_raw_samples_from(0).0, stereo);
+    }
+
+    #[test]
+    fn review_audio_round_trips_raw_device_samples_and_refuses_overwrite() {
+        let mut rec = AudioRecorder::new();
+        rec.set_source_format_for_test(44100, 2);
+        let samples: Vec<_> = (0..4410).map(|i| (i as f32 * 0.07).sin() * 0.1).collect();
+        rec.push_raw_samples_for_test(&samples);
+        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("typr-review-capture-{id}.wav"));
+        let capture = rec.review_capture();
+        rec.clear_samples();
+        capture.save(&path).unwrap();
+        assert!(rec.save_review_capture(&path).is_err());
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (44100, 2));
+        assert_eq!(reader.samples::<f32>().map(Result::unwrap).collect::<Vec<_>>(), samples);
+        drop(reader);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn review_audio_long_capture_uses_buffered_writes_without_changing_samples() {
+        let mut rec = AudioRecorder::new();
+        rec.set_source_format_for_test(48000, 2);
+        let samples: Vec<f32> = (0..(72 * 48000 * 2))
+            .map(|i| ((i % 1000) as f32 - 500.0) / 1000.0).collect();
+        rec.push_raw_samples_for_test(&samples);
+        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("typr-review-long-{id}.wav"));
+        let started = std::time::Instant::now();
+        rec.save_review_capture(&path).unwrap();
+        println!("REVIEW SAVE BENCH {} bytes in {}ms", std::fs::metadata(&path).unwrap().len(), started.elapsed().as_millis());
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+        assert_eq!(reader.samples::<f32>().map(Result::unwrap).collect::<Vec<_>>(), samples);
+        drop(reader);
+        std::fs::remove_file(&path).unwrap();
+    }
+
     fn stream_rms(v: &[f32]) -> f32 {
         (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
     }
@@ -1518,6 +1845,26 @@ mod tests {
         assert!(out.iter().all(|x| x.is_finite()));
         let r = stream_rms(&out[out.len() - 8000..]);
         assert!(r < 0.2, "loud input not brought down toward target: {r}");
+    }
+
+    #[test]
+    fn fixed_gain_quiet_speech_receives_level_normalization_in_batch_and_live() {
+        let quiet: Vec<_> = tone(220.0, 16000, 2.0).iter().map(|x| x * 0.002).collect();
+        let gain = 10f32.powf(FIXED_INPUT_GAIN_DB / 20.0);
+        assert!(!is_silent_capture(&quiet, 16000, gain));
+        let mut batch = quiet.clone();
+        let diagnostics = process_speech_audio_chain(&mut batch, 16000, FIXED_INPUT_GAIN_DB);
+        assert!(!diagnostics.clipping_detected);
+        assert!((0.075..=0.085).contains(&diagnostics.post_rms));
+        for chunk_size in [320, 2400, 6400] {
+            let mut pre = StreamingPreprocessor::new(16000, FIXED_INPUT_GAIN_DB);
+            let live = stream_run(&mut pre, &quiet, chunk_size);
+            assert!(pre.level > 0.0, "quiet speech ignored at chunk size {chunk_size}");
+            let final_rms = stream_rms(&live[live.len() - 16000..]);
+            assert!((0.075..=0.085).contains(&final_rms),
+                "quiet speech under-amplified: chunk={chunk_size}, rms={final_rms}");
+            assert!(live.iter().all(|x| x.is_finite() && x.abs() <= 0.95));
+        }
     }
 
     #[test]

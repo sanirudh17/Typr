@@ -305,7 +305,15 @@ The app runs `whisper.cpp` as a sidecar. `src-tauri/binaries/` is gitignored, so
 | `whisper-cpp-cuda.exe` | GPU direct |
 | `whisper-server-cuda.exe` | persistent HTTP server |
 
-All three entries may be the **same compiled binary** — the app selects the execution mode at runtime with command-line flags.
+The CPU and GPU entries can use the same `whisper-cli` executable. The persistent server requires the separate `whisper-server` executable.
+
+For Windows x64, prepare a complete official runtime in an empty `src-tauri/binaries/` directory:
+
+```powershell
+powershell -NoProfile -File scripts/prepare-whisper-runtime.ps1
+```
+
+This pins and checks the archive hash, copies all matching runtime DLLs, supplies Tauri's target-suffixed executable names, and verifies that the CLI loads. It refuses to replace existing binaries or write through a directory junction.
 
 *Build them:*
 
@@ -322,7 +330,7 @@ cp build/bin/whisper-server.exe ../Typr/src-tauri/binaries/whisper-server-cuda.e
 
 *Or download them* from the [whisper.cpp releases page](https://github.com/ggml-org/whisper.cpp/releases) and rename them as above.
 
-For GPU acceleration, also place `cublas64_12.dll`, `cublasLt64_12.dll`, and `ggml-cuda.dll` into `src-tauri/binaries/`.
+For manual builds, copy **all DLLs from the same build** into `src-tauri/binaries/`, including `whisper.dll`, `ggml.dll`, `ggml-base.dll`, the CPU backend, and the CUDA/cuBLAS runtime when enabled. Copying only the CUDA libraries can leave the executables unable to load. Append `-x86_64-pc-windows-msvc` before `.exe` in the three Windows sidecar filenames. The Tauri resource rule bundles every DLL in this directory.
 
 ### Run and build
 

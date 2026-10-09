@@ -14,9 +14,13 @@ fn common_words() -> &'static HashSet<&'static str> {
 
 /// True when `lower` (already lowercased) is an ordinary English word we must never
 /// overwrite with a correction.
-fn is_common_word(lower: &str) -> bool {
+pub(crate) fn is_common_word(lower: &str) -> bool {
     common_words().contains(lower)
 }
+
+// These proper names have no ordinary English reading. Keep this list separate
+// from common words such as Whisper and Parakeet, which can mean something else.
+const BUILTIN_NAMES: &[&str] = &["Nemotron", "FluidVoice"];
 
 /// American Soundex phonetic key: the first letter (uppercased) followed by three
 /// digits encoding the following consonants, zero-padded. Vowels separate repeated
@@ -161,16 +165,23 @@ fn apply_casing(original_core: &str, replacement: &str) -> String {
 /// Correct transcript words to their exact dictionary spellings. Whitespace-preserving:
 /// each whitespace-separated token is examined; its core is matched against the hints and,
 /// on a confident match, replaced while keeping surrounding punctuation and leading case.
-/// A no-op when `hints` is empty.
+/// Applies only the confirmed built-in spellings when `hints` is empty.
 pub fn correct_vocabulary(text: &str, hints: &[String]) -> String {
-    if hints.is_empty() {
-        return text.to_string();
-    }
+    let text = correct_compound_names(text, hints);
+    static TOKENS: OnceLock<regex::Regex> = OnceLock::new();
+    let tokens = TOKENS.get_or_init(|| regex::Regex::new(r"\S+").unwrap());
 
-    text.split(' ')
-        .map(|token| {
+    tokens.replace_all(&text, |caps: &regex::Captures| {
+            let token = &caps[0];
             let (lead, core, trail) = split_affixes(token);
             if core.is_empty() {
+                return token.to_string();
+            }
+            // Handles and separated path punctuation can sit in the affixes
+            // rather than the core. Keep them out of prose spelling correction.
+            if lead.ends_with(['@', '/', '\\', ':', '_'])
+                || trail.starts_with(['@', '/', '\\', ':', '_'])
+                || core.contains(['@', '/', '\\', ':', '_', '.']) {
                 return token.to_string();
             }
             let core_lower = core.to_lowercase();
@@ -189,15 +200,118 @@ pub fn correct_vocabulary(text: &str, hints: &[String]) -> String {
                     return format!("{}{}{}", lead, apply_casing(core, hint), trail);
                 }
             }
+            // An explicit dictionary spelling takes precedence over built-ins,
+            // including a lowercase spelling the user wants kept verbatim.
+            if hints.iter().any(|h| h.eq_ignore_ascii_case(core)) {
+                return token.to_string();
+            }
+            for &name in BUILTIN_NAMES {
+                let lower = name.to_lowercase();
+                // A close phonetic spelling or a single spurious leading letter
+                // (mnemotron) can be normalized without rewriting valid words.
+                let extra_initial = !is_common_word(&core_lower)
+                    && core_lower.chars().count() == lower.chars().count() + 1
+                    && core_lower.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && core_lower.get(1..) == Some(lower.as_str());
+                // Confirmed whole-name errors in the retained microphone WAVs,
+                // also reproduced by both Whisper engines. Keep these explicit;
+                // do not reopen the broad first-letter Soundex matching that
+                // previously replaced ordinary words and short fragments.
+                let confirmed_alias = name == "Nemotron"
+                    && matches!(core_lower.as_str(), "lemotron" | "limotron");
+                if core_lower == lower || hint_matches(&core_lower, name) || extra_initial || confirmed_alias {
+                    return format!("{}{}{}", lead, name, trail);
+                }
+            }
+            // A confirmed invalid-word error from the user's export, shared by
+            // all engines. Never spell-check arbitrary ordinary words or names.
+            if matches!(core_lower.as_str(), "accuries" | "acuracy")
+                && !hints.iter().any(|h| h.eq_ignore_ascii_case(core)) {
+                return format!("{}{}{}", lead, apply_casing(core, "accuracy"), trail);
+            }
             token.to_string()
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .into_owned()
+}
+
+/// Rejoin exact spoken parts of established product names or the user's explicit
+/// compound dictionary spellings. This is spelling normalization, not fuzzy
+/// phrase rewriting; ordinary phrases and line boundaries are left alone.
+fn correct_compound_names(text: &str, hints: &[String]) -> String {
+    let mut result = text.to_string();
+    for hint in std::iter::once("FluidVoice").chain(hints.iter().map(String::as_str)) {
+        if !hint.chars().all(|c| c.is_ascii_alphabetic()) { continue; }
+        let mut parts = Vec::new();
+        let mut start = 0;
+        for (i, c) in hint.char_indices().skip(1) {
+            if c.is_uppercase() && hint.as_bytes()[i - 1].is_ascii_lowercase() {
+                parts.push(&hint[start..i]);
+                start = i;
+            }
+        }
+        parts.push(&hint[start..]);
+        if parts.len() < 2 { continue; }
+        let pattern = format!(r"(?i)\b{}\b", parts.iter().map(|p| regex::escape(p)).collect::<Vec<_>>().join(r"[^\S\r\n]+"));
+        let Ok(re) = regex::Regex::new(&pattern) else { continue; };
+        result = re.replace_all(&result, |caps: &regex::Captures| {
+            let matched = caps.get(0).unwrap();
+            let structural = |c: char| matches!(c, '@' | '/' | '\\' | ':' | '_' | '.');
+            let before = result[..matched.start()].chars().next_back();
+            let after = result[matched.end()..].chars().next();
+            let filename_suffix = after == Some('.') && result[matched.end() + 1..]
+                .chars().next().is_some_and(|c| c.is_alphanumeric());
+            if before.is_some_and(structural) || filename_suffix || after.is_some_and(|c| structural(c) && c != '.') {
+                matched.as_str().to_string()
+            } else { hint.to_string() }
+        }).into_owned();
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_names_are_corrected_without_ai_or_user_hints() {
+        assert_eq!(correct_vocabulary("compare fluid voice with nimotron", &[]),
+            "compare FluidVoice with Nemotron");
+        assert_eq!(correct_vocabulary("mnemotron and nemotron", &[]), "Nemotron and Nemotron");
+        assert_eq!(correct_vocabulary("Lemotron and limotron", &[]), "Nemotron and Nemotron");
+        assert_eq!(correct_vocabulary("limotron", &["Limotron".into()]), "Limotron");
+        assert_eq!(correct_vocabulary("new tron, motron, limotron.rs and @lemotron", &[]),
+            "new tron, motron, limotron.rs and @lemotron");
+        assert_eq!(correct_vocabulary("fluent voice and fluid wise with a parakeet", &[]),
+            "fluent voice and fluid wise with a parakeet");
+        assert_eq!(correct_vocabulary("nimotron.rs @nimotron src/nimotron fluidvoice.c nemotron.h", &[]),
+            "nimotron.rs @nimotron src/nimotron fluidvoice.c nemotron.h");
+        assert_eq!(correct_vocabulary("nimotron", &["nimotron".into()]), "nimotron");
+        assert_eq!(correct_vocabulary("nimotron", &["Nimotron".into()]), "Nimotron");
+    }
+
+    #[test]
+    fn confirmed_spellings_work_without_ai_or_dictionary_configuration() {
+        assert_eq!(correct_vocabulary("Accuries improvisations and general fixes.", &[]), "Accuracy improvisations and general fixes.");
+        assert_eq!(correct_vocabulary("Acuracy improvisations.", &[]), "Accuracy improvisations.");
+        assert_eq!(correct_vocabulary("acuracy", &["Acuracy".into()]), "Acuracy");
+        assert_eq!(correct_vocabulary("acuracy.rs and @acuracy", &[]), "acuracy.rs and @acuracy");
+        assert_eq!(correct_vocabulary("compare fluid voice with Nemotron", &[]), "compare FluidVoice with Nemotron");
+        assert_eq!(correct_vocabulary("accuries.rs and me@accuries.dev", &[]), "accuries.rs and me@accuries.dev");
+        assert_eq!(correct_vocabulary("@accuries /accuries :accuries", &[]), "@accuries /accuries :accuries");
+        assert_eq!(correct_vocabulary("accuries/ accuries\\ accuries:", &[]), "accuries/ accuries\\ accuries:");
+        assert_eq!(correct_vocabulary("a picture of the team taking a shot", &[]), "a picture of the team taking a shot");
+    }
+
+    #[test]
+    fn dictionary_names_preserve_line_boundaries_and_only_join_exact_spelling() {
+        let hints = vec!["GitHub".into(), "Kubernetes".into(), "CAT".into()];
+        assert_eq!(correct_vocabulary("git hub\n\nkubernetis\tCAT", &hints), "GitHub\n\nKubernetes\tCAT");
+        assert_eq!(correct_vocabulary("git\nhub", &hints), "git\nhub");
+        assert_eq!(correct_vocabulary("quick overlay button", &hints), "quick overlay button");
+        assert_eq!(correct_vocabulary("src/fluid voice.txt", &hints), "src/fluid voice.txt");
+        assert_eq!(correct_vocabulary("fluid voice.rs", &hints), "fluid voice.rs");
+        assert_eq!(correct_vocabulary("fluid voice.", &hints), "FluidVoice.");
+    }
 
     #[test]
     fn test_soundex_known_values() {

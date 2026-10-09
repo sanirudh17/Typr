@@ -9893,3 +9893,8 @@ mediawiki
 configurations
 poison
 pouring
+decoding
+recoding
+improvisation
+improvisations
+curiosity

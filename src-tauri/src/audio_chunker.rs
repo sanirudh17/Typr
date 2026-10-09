@@ -50,6 +50,87 @@ const FORCED_OVERLAP_SECS: f32 = 3.0;
 /// Words compared when reconciling an overlapped seam.
 const MERGE_WINDOW_WORDS: usize = 12;
 
+#[derive(Clone, Debug)]
+pub(crate) struct TimedWord {
+    pub text: String,
+    pub start: f32,
+}
+
+pub(crate) struct TimedChunkText {
+    pub text: String,
+    pub words: Option<Vec<TimedWord>>,
+    pub overlaps_previous: bool,
+}
+
+fn timed_norm(word: &str) -> String {
+    let normalized = norm(word);
+    // Written/spoken ordinals refer to the same numbered item. Other digits
+    // are never fuzzy-matched, so item 1 and item 2 remain distinct.
+    match normalized.as_str() {
+        "first" | "1st" => "1st".into(), "second" | "2nd" => "2nd".into(),
+        "third" | "3rd" => "3rd".into(), "fourth" | "4th" => "4th".into(),
+        "fifth" | "5th" => "5th".into(), "sixth" | "6th" => "6th".into(),
+        "seventh" | "7th" => "7th".into(), "eighth" | "8th" => "8th".into(),
+        "ninth" | "9th" => "9th".into(), "tenth" | "10th" => "10th".into(),
+        _ => normalized,
+    }
+}
+
+/// Reconcile corroborated words at the same audio time. A word is not dropped
+/// merely because it occurs inside the replay window: unmatched words from
+/// either decode survive. Unreliable/missing alignment uses conservative text
+/// merging. No unconditional "trim first three seconds" is used.
+pub(crate) fn merge_timed_chunks(parts: &[TimedChunkText]) -> String {
+    let mut accumulated: Vec<TimedWord> = Vec::new();
+    for part in parts {
+        let Some(words) = &part.words else { return merge_chunk_texts(&fallback_and_rest(parts)); };
+        let previous = accumulated.clone();
+        let mut matched = vec![false; previous.len()];
+        for (index, word) in words.iter().enumerate() {
+            let same_time = |old: &TimedWord| (old.start - word.start).abs() <= 0.40;
+            let same_word = |old: &TimedWord| timed_norm(&old.text) == timed_norm(&word.text);
+            if part.overlaps_previous {
+                if let Some(position) = previous.iter().enumerate().rev().take(24)
+                    .find_map(|(position, old)| (!matched[position] && same_time(old) && same_word(old)).then_some(position)) {
+                    matched[position] = true;
+                    continue;
+                }
+            }
+            // A different recognition of the first seam word (speech/Beach)
+            // needs BOTH a time match and three exact following word anchors.
+            // Keep the earlier, longer-left-context hypothesis in that case.
+            let alternate = if part.overlaps_previous && index + 3 < words.len() && !seam_sensitive(&word.text) {
+                previous.iter().enumerate().find_map(|(position, old)| {
+                    (!matched[position] && same_time(old) && position + 3 < previous.len()
+                        && !seam_sensitive(&old.text)
+                        && (1..=3).all(|offset| {
+                            let (before, after) = (&previous[position + offset], &words[index + offset]);
+                            timed_norm(&before.text) == timed_norm(&after.text)
+                                && (before.start - after.start).abs() <= 0.40
+                        })).then_some(position)
+                })
+            } else { None };
+            if let Some(position) = alternate { matched[position] = true; continue; }
+            let position = accumulated.partition_point(|old| old.start <= word.start);
+            accumulated.insert(position, word.clone());
+        }
+    }
+    accumulated.iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" ")
+}
+
+fn seam_sensitive(word: &str) -> bool {
+    let word = timed_norm(word);
+    word.chars().any(|ch| ch.is_ascii_digit()) || matches!(word.as_str(),
+        "no" | "not" | "never" | "without" | "cannot" | "nothing" | "neither" | "nor"
+        | "dont" | "cant" | "wont" | "isnt" | "arent" | "wasnt" | "werent"
+        | "doesnt" | "didnt" | "shouldnt" | "wouldnt" | "couldnt" | "mustnt"
+        | "hasnt" | "havent" | "hadnt")
+}
+
+fn fallback_and_rest(parts: &[TimedChunkText]) -> Vec<(String, bool)> {
+    parts.iter().map(|part| (part.text.clone(), part.overlaps_previous)).collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum VoiceActivity {
     /// No speech yet observed — still calibrating on background noise.
@@ -116,6 +197,61 @@ pub struct Chunk<'a> {
     pub overlaps_previous: bool,
 }
 
+/// The same boundary planner can be advanced while audio arrives. Only complete
+/// 32 ms frames are inspected; unread frames and the final partial frame survive.
+pub(crate) struct ChunkPlanner {
+    frame: usize,
+    force_cut: usize,
+    arm: usize,
+    overlap: usize,
+    vad: AdaptiveVad,
+    start: usize,
+    pos: usize,
+    overlaps_previous: bool,
+    silence_run: usize,
+    finished: bool,
+}
+
+impl ChunkPlanner {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        Self { frame: ((FRAME_MS / 1000.0) * sr) as usize,
+            force_cut: (FORCE_CUT_SECS * sr) as usize,
+            arm: (SILENCE_ARM_SECS * sr) as usize,
+            overlap: (FORCED_OVERLAP_SECS * sr) as usize,
+            vad: AdaptiveVad::new(), start: 0, pos: 0,
+            overlaps_previous: false, silence_run: 0, finished: false }
+    }
+
+    pub(crate) fn advance(&mut self, samples: &[f32], finished: bool) -> Vec<(std::ops::Range<usize>, bool)> {
+        if self.finished { return Vec::new(); }
+        let mut out = Vec::new();
+        if self.frame > 0 {
+            while self.pos + self.frame <= samples.len() {
+                let end = self.pos + self.frame;
+                match self.vad.update(rms(&samples[self.pos..end])) {
+                    VoiceActivity::Silent => self.silence_run += 1,
+                    _ => self.silence_run = 0,
+                }
+                if (end - self.start >= self.arm
+                    && self.silence_run >= (SILENCE_CUT_MS / FRAME_MS).ceil() as usize)
+                    || end - self.start >= self.force_cut {
+                    out.push((self.start..end, self.overlaps_previous));
+                    self.overlaps_previous = true;
+                    self.start = end.saturating_sub(self.overlap);
+                    self.silence_run = 0;
+                }
+                self.pos = end;
+            }
+        }
+        if finished {
+            if self.start < samples.len() { out.push((self.start..samples.len(), self.overlaps_previous)); }
+            self.finished = true;
+        }
+        out
+    }
+}
+
 fn rms(frame: &[f32]) -> f32 {
     if frame.is_empty() {
         return 0.0;
@@ -131,50 +267,11 @@ pub fn split_into_chunks(samples: &[f32], sample_rate: u32) -> Vec<Chunk<'_>> {
     if samples.is_empty() {
         return Vec::new();
     }
-    let sr = sample_rate as f32;
-    let frame = ((FRAME_MS / 1000.0) * sr) as usize;
-    let force_cut = (FORCE_CUT_SECS * sr) as usize;
-    let arm = (SILENCE_ARM_SECS * sr) as usize;
-    let overlap = (FORCED_OVERLAP_SECS * sr) as usize;
-    let silence_frames_needed = ((SILENCE_CUT_MS / FRAME_MS).ceil() as usize).max(1);
-
-    if frame == 0 || samples.len() <= arm {
+    if sample_rate == 0 {
         return vec![Chunk { samples, overlaps_previous: false }];
     }
-
-    let mut out = Vec::new();
-    let mut vad = AdaptiveVad::new();
-    let mut start = 0usize;
-    let mut overlaps_previous = false;
-    let mut silence_run = 0usize;
-    let mut pos = 0usize;
-
-    while pos + frame <= samples.len() {
-        let end = pos + frame;
-        match vad.update(rms(&samples[pos..end])) {
-            VoiceActivity::Silent => silence_run += 1,
-            _ => silence_run = 0,
-        }
-
-        let long_enough = end - start >= arm;
-        let paused = silence_run >= silence_frames_needed;
-        let forced = end - start >= force_cut;
-
-        if (long_enough && paused) || forced {
-            out.push(Chunk { samples: &samples[start..end], overlaps_previous });
-            // A pause is a clean boundary and needs no overlap; a forced cut lands mid-word,
-            // so the next chunk rewinds to catch whatever was severed.
-            overlaps_previous = true;
-            start = end.saturating_sub(overlap);
-            silence_run = 0;
-        }
-        pos = end;
-    }
-
-    if start < samples.len() {
-        out.push(Chunk { samples: &samples[start..], overlaps_previous });
-    }
-    out
+    ChunkPlanner::new(sample_rate).advance(samples, true).into_iter()
+        .map(|(range, overlaps_previous)| Chunk { samples: &samples[range], overlaps_previous }).collect()
 }
 
 /// How much of an overlapping chunk's start duplicates the previous chunk.
@@ -186,12 +283,12 @@ pub const OVERLAP_SECS: f32 = FORCED_OVERLAP_SECS;
 /// sherpa tokenizers mark a word start with U+2581 (lower one-eighth block).
 const WORD_MARK: char = '\u{2581}';
 
-/// Rebuild text from tokens, dropping everything the previous chunk already transcribed.
+/// Legacy timestamp-only trimmer, retained for compatibility, not used by the
+/// production decoders. A previous decode may have omitted words inside its
+/// final seconds, so blindly trimming the replay window can lose real speech.
 ///
-/// This is the exact form of overlap removal and is preferred over the text-matching fallback
-/// below. The decoder reports when each token was spoken, so a token starting inside the
-/// replayed window is provably a repeat — no similarity heuristic, no threshold to tune, and
-/// no risk of deleting real content that merely resembles the previous chunk's tail.
+/// Production merging corroborates words in both hypotheses and keeps unmatched
+/// words; timestamps alone do not establish that a word was already recognized.
 ///
 /// Falls back to the whole text when the model gives no timestamps or returns a count that
 /// does not line up with the tokens, since a mismatched pair cannot be trusted to trim by.
@@ -229,11 +326,15 @@ pub fn merge_chunk_texts(parts: &[(String, bool)]) -> String {
         if words.is_empty() {
             continue;
         }
-        let skip = if *overlaps && !acc.is_empty() {
+        let (replace, skip) = if *overlaps && !acc.is_empty() {
             overlap_len(&acc, &words)
         } else {
-            0
+            (0, 0)
         };
+        if replace > 0 {
+            acc.truncate(acc.len() - replace);
+            acc.extend(words[..skip].iter().map(|w| w.to_string()));
+        }
         acc.extend(words[skip..].iter().map(|w| w.to_string()));
     }
     acc.join(" ")
@@ -313,8 +414,14 @@ fn words_similar(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
+    if seam_sensitive(&a) || seam_sensitive(&b) { return false; }
     // Numbers/digits must match exactly; e.g. "2" and "3" or "item 1" and "item 2" are distinct items.
     if a.chars().any(|c| c.is_ascii_digit()) || b.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Valid differing words are not spelling variants. The old majority rule
+    // could drop "not", a different list number, or an adjective at the seam.
+    if crate::vocab_correct::is_common_word(&a) && crate::vocab_correct::is_common_word(&b) {
         return false;
     }
     let budget = if a.len().max(b.len()) <= 4 { 1 } else { 2 };
@@ -323,24 +430,33 @@ fn words_similar(a: &str, b: &str) -> bool {
 
 /// Longest prefix of `new` that repeats the tail of `acc`, capped at `MERGE_WINDOW_WORDS`.
 ///
-/// A seam is accepted on a majority of similar words rather than all of them: across three
-/// seconds of re-decoded audio a couple of words routinely differ beyond an edit or two, and
-/// demanding a perfect run means never matching at all. The first word must still align, which
-/// anchors the seam and stops a chance mid-sentence resemblance from eating real text.
-fn overlap_len(acc: &[String], new: &[&str]) -> usize {
+/// Every skipped word must be corroborated. A richer overlapping decode may
+/// replace a shorter tail only when it contains every word of that tail in
+/// order, with both ends anchored. Unique newly recognized words survive.
+fn overlap_len(acc: &[String], new: &[&str]) -> (usize, usize) {
     let max = MERGE_WINDOW_WORDS.min(acc.len()).min(new.len());
     for n in (1..=max).rev() {
         let tail = &acc[acc.len() - n..];
-        if !words_similar(&tail[0], new[0]) {
-            continue;
+        if tail.iter().zip(new).all(|(a, b)| words_similar(a, b)) {
+            return (0, n);
         }
-        let matches = tail.iter().zip(new.iter()).filter(|(a, b)| words_similar(a, b)).count();
-        let needed = if n <= 2 { n } else { (n * 2).div_ceil(3) };
-        if matches >= needed {
-            return n;
+        if n < 3 { continue; }
+        for m in (3..=MERGE_WINDOW_WORDS.min(new.len())).rev() {
+            let prefix = &new[..m];
+            if !words_similar(&tail[0], prefix[0]) || !words_similar(&tail[n - 1], prefix[m - 1]) { continue; }
+            let is_subsequence = |short: &[&str], long: &[&str]| {
+                let mut index = 0;
+                for word in long {
+                    if index < short.len() && words_similar(short[index], word) { index += 1; }
+                }
+                index == short.len()
+            };
+            let old: Vec<_> = tail.iter().map(String::as_str).collect();
+            if m > n && is_subsequence(&old, prefix) { return (n, m); }
+            if n > m && is_subsequence(prefix, &old) { return (0, m); }
         }
     }
-    0
+    (0, 0)
 }
 
 #[cfg(test)]
@@ -348,6 +464,86 @@ mod tests {
     use super::*;
 
     const SR: u32 = 16_000;
+
+    fn timed(text: &str, starts: &[f32], overlaps_previous: bool) -> TimedChunkText {
+        let words: Vec<_> = text.split_whitespace().zip(starts).map(|(text, &start)|
+            TimedWord { text: text.into(), start }).collect();
+        assert_eq!(words.len(), text.split_whitespace().count());
+        TimedChunkText { text: text.into(), words: Some(words), overlaps_previous }
+    }
+
+    #[test]
+    fn timed_seams_remove_corroborated_duplicates_and_retain_new_words() {
+        assert_eq!(merge_timed_chunks(&[
+            timed("review speech engines before deployment.", &[19., 20., 21., 22., 23.], false),
+            timed("Beach engines before deployment. Continue.", &[20.08, 21.08, 22.08, 23.08, 24.], true),
+        ]), "review speech engines before deployment. Continue.");
+        assert_eq!(merge_timed_chunks(&[
+            timed("carried consecutive chunks", &[0., 0.8, 1.2], false),
+            timed("carried between consecutive chunks and finish", &[0., 0.4, 0.8, 1.2, 1.6, 2.], true),
+        ]), "carried between consecutive chunks and finish");
+    }
+
+    #[test]
+    fn timed_seams_do_not_collapse_real_repetitions() {
+        assert_eq!(merge_timed_chunks(&[
+            timed("very", &[0.], false),
+            timed("very very good", &[0., 0.3, 0.6], true),
+        ]), "very very good");
+        assert_eq!(merge_timed_chunks(&[timed("very very good", &[0., 0.2, 0.4], false)]), "very very good");
+        assert_eq!(merge_timed_chunks(&[
+            timed("again", &[0.], false), timed("again", &[1.], true),
+        ]), "again again");
+    }
+
+    #[test]
+    fn timed_seams_keep_numbers_negations_and_unaligned_text() {
+        let text = merge_timed_chunks(&[
+            timed("do work without AI", &[0., 1., 2., 3.], false),
+            timed("don't work without AI", &[0., 1., 2., 3.], true),
+        ]);
+        assert!(text.contains("don't"), "a changed negation must not be skipped");
+        assert_eq!(merge_timed_chunks(&[
+            timed("item 1", &[0., 1.], false), timed("item 2", &[0., 1.], true),
+        ]), "item 1 2");
+        assert_eq!(merge_timed_chunks(&[
+            timed("keep final words", &[0., 1., 2.], false),
+            TimedChunkText { text: "keep all final words".into(), words: None, overlaps_previous: true },
+        ]), "keep all final words");
+        assert!(!words_similar("mustn't", "must"));
+        assert!(!words_similar("not", "tot"));
+    }
+
+    #[test]
+    fn incremental_boundaries_match_batch_and_cover_final_partial_frame() {
+        for input in [speech(79.887), speech_with_pause(44.053, 20.0, 2.0)] {
+            let expected = ChunkPlanner::new(SR).advance(&input, true);
+            for size in [1, 511, 2400, 17001] {
+                let mut planner = ChunkPlanner::new(SR);
+                let mut actual = Vec::new();
+                for end in (size..input.len()).step_by(size) { actual.extend(planner.advance(&input[..end], false)); }
+                actual.extend(planner.advance(&input, true));
+                assert_eq!(actual, expected);
+                assert_eq!(actual.last().unwrap().0.end, input.len());
+                assert!(planner.advance(&input, true).is_empty(), "tail must flush once");
+                for pair in actual.windows(2) { assert!(pair[1].0.start <= pair[0].0.end); }
+            }
+        }
+    }
+
+    #[test]
+    fn seams_preserve_new_words_negations_and_distinct_numbers() {
+        for (before, after, expected) in [
+            ("states are preserved and carried consecutive chunks", "carried between consecutive chunks then continue",
+             "states are preserved and carried between consecutive chunks then continue"),
+            ("keep all the final words", "keep all final words and finish", "keep all the final words and finish"),
+            ("the model does work", "the model does not work", "the model does not work"),
+            ("check item 1", "check item 2 and finish", "check item 1 check item 2 and finish"),
+            ("keep the final word", "keep the final work safe", "keep the final word keep the final work safe"),
+        ] {
+            assert_eq!(merge_chunk_texts(&[(before.into(), false), (after.into(), true)]), expected);
+        }
+    }
 
     fn secs(n: f32) -> usize {
         (n * SR as f32) as usize

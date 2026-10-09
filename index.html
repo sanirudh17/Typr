@@ -258,6 +258,20 @@
               </div>
             </div>
           </div>
+          <div class="settings-group">
+            <div class="group-title">Data</div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Clear local data</span>
+                  <span class="label-hint" id="clear-data-status">Remove transcription history, logs, and saved recordings.</span>
+                </div>
+                <div class="setting-control">
+                  <button id="clear-data-btn" class="btn-danger clear-data-action">Clear data…</button>
+                </div>
+              </div>
+            </div>
+          </div>
           <div id="update-progress" class="hidden">
             <div id="update-progress-bar"><div id="update-progress-fill"></div></div>
           </div>
@@ -797,6 +811,16 @@
       </main>
       </div>
     </div>
+    <dialog id="clear-data-dialog" class="data-dialog" aria-labelledby="clear-data-title" aria-describedby="clear-data-description clear-data-kept">
+      <h2 id="clear-data-title">Clear local data?</h2>
+      <p id="clear-data-description">This permanently deletes your transcription history, logs, and saved review or temporary recordings. This cannot be undone.</p>
+      <p id="clear-data-kept">Your settings, dictionary, API key, and downloaded models will stay.</p>
+      <p id="clear-data-error" class="data-dialog-error hidden" role="alert"></p>
+      <div class="data-dialog-actions">
+        <button id="clear-data-cancel" class="btn-secondary" autofocus>Cancel</button>
+        <button id="clear-data-confirm" class="btn-danger clear-data-action">Clear data</button>
+      </div>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -31,6 +31,19 @@ pub fn model_files_present(model_dir: &Path) -> bool {
 
 static RECOGNIZER: Mutex<Option<(PathBuf, sherpa_onnx::OnlineRecognizer)>> = Mutex::new(None);
 
+// Both model variants use 1120 ms chunks. Flush with a full chunk plus
+// feature-window headroom, even when the recording ends on a chunk boundary.
+const TAIL_PADDING_SAMPLES: usize = 20_000; // 1.25 seconds at 16 kHz
+
+// Captured WAVs already contain 400 ms of exact zero padding. Keep at least
+// a full 1.25 s closure without decoding that comfort padding a second time.
+fn missing_tail_padding(samples: &[f32], sample_rate: u32) -> usize {
+    if sample_rate != 16_000 { return TAIL_PADDING_SAMPLES; }
+    let existing = samples.iter().rev().take(TAIL_PADDING_SAMPLES)
+        .take_while(|&&s| s == 0.0).count();
+    TAIL_PADDING_SAMPLES - existing
+}
+
 fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, String> {
     let mut config = sherpa_onnx::OnlineRecognizerConfig::default();
     config.model_config.transducer.encoder =
@@ -88,27 +101,44 @@ fn live_preprocess_enabled() -> bool {
     std::env::var("TYPR_NEMOTRON_LIVE_PREPROCESS").map(|v| v != "0").unwrap_or(true)
 }
 
+type LiveWorkerResult = (sherpa_onnx::OnlineStream, usize,
+    Option<crate::audio::StreamingPreprocessor>, crate::audio::StreamingResampler);
+
 pub struct NemotronLiveSession {
     pub model_dir: PathBuf,
     stop_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
     worker_handle: Option<
-        std::thread::JoinHandle<(sherpa_onnx::OnlineStream, usize, Option<crate::audio::StreamingPreprocessor>)>,
+        std::thread::JoinHandle<LiveWorkerResult>,
     >,
+    worker_result: Option<LiveWorkerResult>,
     audio_recorder: std::sync::Arc<std::sync::Mutex<crate::audio::AudioRecorder>>,
 }
 
 impl NemotronLiveSession {
+    fn stop_worker(&mut self) -> Result<(), String> {
+        self.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.worker_handle.take() {
+            h.thread().unpark();
+            self.worker_result = Some(h.join().map_err(|_| "Nemotron stream worker panicked".to_string())?);
+        }
+        Ok(())
+    }
+
+    /// Join without decoding the tail. Keep the stream only as a recovery path
+    /// if the short-clip batch decode fails; successful batch clips never finish it.
+    pub fn pause(mut self) -> Result<Self, String> {
+        self.stop_worker()?;
+        Ok(self)
+    }
+
     pub fn finish(mut self) -> Result<String, String> {
         let started = std::time::Instant::now();
-        self.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
-        let (stream, last_read, mut pre) = if let Some(h) = self.worker_handle.take() {
-            h.join().map_err(|_| "Nemotron stream worker panicked".to_string())?
-        } else {
-            return Err("Nemotron stream worker already finished".to_string());
-        };
+        self.stop_worker()?;
+        let (stream, last_read, mut pre, mut resampler) = self.worker_result.take()
+            .ok_or_else(|| "Nemotron stream worker already finished".to_string())?;
 
         // Drain any remaining unread samples from the live stream
-        let (new_samples, _, src_rate, src_channels) = {
+        let (new_samples, _, _, src_channels) = {
             let rec = self.audio_recorder.lock().unwrap();
             rec.get_raw_samples_from(last_read)
         };
@@ -127,12 +157,15 @@ impl NemotronLiveSession {
                     *s *= factor;
                 }
             }
-            let mut resampled = crate::audio::resample(&mono, src_rate, 16000);
+            let mut resampled = resampler.process(&mono);
             if let Some(p) = pre.as_mut() {
                 p.process(&mut resampled);
             }
             stream.accept_waveform(16000, &resampled);
         }
+        let mut remaining = resampler.finish();
+        if let Some(p) = pre.as_mut() { p.process(&mut remaining); }
+        stream.accept_waveform(16000, &remaining);
 
         let guard = RECOGNIZER
             .lock()
@@ -142,8 +175,7 @@ impl NemotronLiveSession {
             .ok_or_else(|| "Nemotron recognizer missing".to_string())?
             .1;
 
-        // Comfort tail silence padding (1.0s = 16000 samples @ 16kHz) to fully flush the 1120ms chunk
-        let tail_silence = vec![0.0f32; 16000];
+        let tail_silence = vec![0.0f32; TAIL_PADDING_SAMPLES];
         stream.accept_waveform(16000, &tail_silence);
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
@@ -154,12 +186,9 @@ impl NemotronLiveSession {
             recognizer.decode(&stream);
         }
 
-        let result = recognizer.get_result(&stream);
-        let final_text = if let Some(ref r) = result {
-            r.text.trim().to_string()
-        } else {
-            String::new()
-        };
+        let final_text = recognizer.get_result(&stream)
+            .ok_or_else(|| "Nemotron returned no final result; refusing incomplete transcription".to_string())?
+            .text.trim().to_string();
 
         println!(
             "[Typr] Nemotron live streaming completed tail decode in {:?}",
@@ -173,6 +202,7 @@ impl Drop for NemotronLiveSession {
     fn drop(&mut self) {
         self.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.worker_handle.take() {
+            h.thread().unpark();
             let _ = h.join();
         }
     }
@@ -211,19 +241,22 @@ pub fn start_live_session(
     let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = stop_signal.clone();
     let audio_clone = audio_recorder.clone();
+    let source_rate = audio_recorder.lock().unwrap().source_sample_rate();
 
     let worker_handle = std::thread::Builder::new()
         .name("nemotron-live-stream".to_string())
         .spawn(move || {
             let mut last_read = 0usize;
+            let mut resampler = crate::audio::StreamingResampler::new(source_rate, 16000);
             let mut pre = if live_preprocess_enabled() {
                 Some(crate::audio::StreamingPreprocessor::new(16000, crate::audio::FIXED_INPUT_GAIN_DB))
             } else {
                 None
             };
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                let (new_samples, new_end, src_rate, src_channels) = {
+                std::thread::park_timeout(std::time::Duration::from_millis(150));
+                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                let (new_samples, new_end, _, src_channels) = {
                     let rec = audio_clone.lock().unwrap();
                     rec.get_raw_samples_from(last_read)
                 };
@@ -245,7 +278,7 @@ pub fn start_live_session(
                         *s *= factor;
                     }
                 }
-                let mut resampled = crate::audio::resample(&mono, src_rate, 16000);
+                let mut resampled = resampler.process(&mono);
                 if let Some(p) = pre.as_mut() {
                     p.process(&mut resampled);
                 }
@@ -253,13 +286,14 @@ pub fn start_live_session(
                 stream.accept_waveform(16000, &resampled);
                 if let Ok(guard) = RECOGNIZER.lock() {
                     if let Some((_, ref rec)) = *guard {
-                        while rec.is_ready(&stream) {
+                        while !stop_clone.load(std::sync::atomic::Ordering::Relaxed)
+                            && rec.is_ready(&stream) {
                             rec.decode(&stream);
                         }
                     }
                 }
             }
-            (stream, last_read, pre)
+            (stream, last_read, pre, resampler)
         })
         .map_err(|e| format!("Failed to spawn Nemotron stream worker: {}", e))?;
 
@@ -267,6 +301,7 @@ pub fn start_live_session(
         model_dir: model_dir.to_path_buf(),
         stop_signal,
         worker_handle: Some(worker_handle),
+        worker_result: None,
         audio_recorder,
     })
 }
@@ -415,8 +450,7 @@ pub async fn transcribe_nemotron(
             recognizer.decode(&stream);
         }
 
-        // Comfort tail silence padding (1.0s = 16000 samples @ 16kHz) to fully flush FastConformer chunks
-        let tail_silence = vec![0.0f32; 16000];
+        let tail_silence = vec![0.0f32; missing_tail_padding(&samples, sample_rate)];
         stream.accept_waveform(16000, &tail_silence);
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
@@ -428,12 +462,9 @@ pub async fn transcribe_nemotron(
             recognizer.decode(&stream);
         }
 
-        let result = recognizer.get_result(&stream);
-        let final_text = if let Some(ref r) = result {
-            r.text.trim().to_string()
-        } else {
-            String::new()
-        };
+        let final_text = recognizer.get_result(&stream)
+            .ok_or_else(|| "Nemotron returned no final result; refusing incomplete transcription".to_string())?
+            .text.trim().to_string();
 
         println!("[Typr] Nemotron completed in {:?}", started.elapsed());
         Ok(final_text)
@@ -448,6 +479,52 @@ mod tests {
     use crate::audio_chunker;
 
     static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn batch_padding_reuses_only_exact_silence_at_the_expected_rate() {
+        assert_eq!(missing_tail_padding(&[0.1, 0.0], 16_000), 19_999);
+        let mut samples = vec![0.1; 1600];
+        samples.extend(vec![0.0; 6400]);
+        assert_eq!(missing_tail_padding(&samples, 16_000), 13_600);
+        samples.push(0.00001);
+        assert_eq!(missing_tail_padding(&samples, 16_000), 20_000);
+        assert_eq!(missing_tail_padding(&vec![0.0; 48_000], 48_000), 20_000);
+        assert_eq!(missing_tail_padding(&vec![0.0; 30_000], 16_000), 0);
+    }
+
+    #[tokio::test]
+    async fn live_microphone_sample_rates_preserve_long_dictation_tail() {
+        let _lock = TEST_MUTEX.lock().await;
+        let model_dir = dirs::config_dir().unwrap().join("com.typr.app")
+            .join(model_dir_name("v3_5"));
+        let wav_path = Path::new("../scripts/test_clips/clip2_30s.wav");
+        if !model_files_present(&model_dir) || !wav_path.exists() { return; }
+        let (samples, rate) = audio_chunker::read_wav_samples(&wav_path.to_path_buf()).unwrap();
+        let recognizer = build_recognizer(&model_dir).unwrap();
+        for microphone_rate in [44_100, 48_000] {
+            let microphone_audio = crate::audio::resample(&samples, rate, microphone_rate);
+            let mut resampler = crate::audio::StreamingResampler::new(microphone_rate, 16_000);
+            let mut preprocess = crate::audio::StreamingPreprocessor::new(16_000, crate::audio::FIXED_INPUT_GAIN_DB);
+            let stream = recognizer.create_stream();
+            stream.set_option("language", "en");
+            for chunk in microphone_audio.chunks((microphone_rate as usize * 150 / 1000) + 7) {
+                let mut processed = resampler.process(chunk);
+                preprocess.process(&mut processed);
+                stream.accept_waveform(16_000, &processed);
+                while recognizer.is_ready(&stream) { recognizer.decode(&stream); }
+            }
+            let mut tail = resampler.finish();
+            preprocess.process(&mut tail);
+            stream.accept_waveform(16_000, &tail);
+            stream.accept_waveform(16_000, &vec![0.0; TAIL_PADDING_SAMPLES]);
+            stream.input_finished();
+            while recognizer.is_ready(&stream) { recognizer.decode(&stream); }
+            let result = recognizer.get_result(&stream).unwrap().text;
+            println!("Live {microphone_rate} Hz -> {result}");
+            assert!(result.trim_end_matches(['.', ' ']).to_lowercase().ends_with("robust decoding algorithms"), "Dropped tail at {microphone_rate} Hz: {result}");
+            assert!(result.split_whitespace().count() >= 58, "Lost a clause at {microphone_rate} Hz: {result}");
+        }
+    }
 
     #[test]
     fn test_nemotron_model_dir_name_maps_variants() {
@@ -577,6 +654,20 @@ mod tests {
             let res = transcribe_nemotron(&model_dir, &wav_path).await;
             assert!(res.is_ok(), "Transcription failed: {:?}", res);
             let hyp = res.unwrap();
+            // Recorder WAVs already have 400 ms of comfort silence. Reusing it
+            // must give exactly the same complete transcript as an unpadded WAV.
+            let mut reader = hound::WavReader::open(&wav_path).unwrap();
+            let spec = reader.spec();
+            let padded_path = std::env::temp_dir().join(format!("typr-padding-{}-{}.wav",
+                std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&padded_path).unwrap();
+            let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec).unwrap();
+            for sample in reader.samples::<i16>() { writer.write_sample(sample.unwrap()).unwrap(); }
+            for _ in 0..spec.sample_rate * 4 / 10 { writer.write_sample(0i16).unwrap(); }
+            writer.finalize().unwrap();
+            let padded = transcribe_nemotron(&model_dir, &padded_path).await;
+            let _ = std::fs::remove_file(&padded_path);
+            assert_eq!(padded.unwrap(), hyp, "Padding reuse changed the transcript for {path_str}");
             let acc = word_accuracy(&hyp, expected_ref);
             println!("Clip: {} -> Word Accuracy: {:.1}% | Transcript: {}", path_str, acc * 100.0, hyp);
             assert!(acc >= 0.95, "Accuracy {:.2} below 95% threshold for {}", acc, path_str);
@@ -667,8 +758,10 @@ mod tests {
         let session = start_live_session(&model_dir, recorder.clone())
             .expect("start_live_session should succeed");
 
-        // Feed audio in chunks of 2400 samples (150ms @ 16kHz)
-        for chunk in samples.chunks(2400) {
+        // Leave the final phrase unread until after joining the worker. This
+        // reproduces the driver/callback tail arriving at hotkey release.
+        let split = samples.len().saturating_sub(sample_rate as usize);
+        for chunk in samples[..split].chunks(2400) {
             recorder.lock().unwrap().push_raw_samples_for_test(chunk);
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
@@ -677,7 +770,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let finish_start = std::time::Instant::now();
-        let text = session.finish().expect("finish should succeed");
+        let session = session.pause().expect("pausing should join without losing the recovery stream");
+        recorder.lock().unwrap().push_raw_samples_for_test(&samples[split..]);
+        let text = session.finish().expect("a paused session must still finish successfully");
         let finish_elapsed = finish_start.elapsed();
 
         let expected = "Let me know whether there are some changes that you would like to make.";
@@ -689,6 +784,8 @@ mod tests {
             text
         );
         assert!(acc >= 0.90, "Live session accuracy too low: {:.2}", acc);
+        assert!(text.trim_end_matches(['.', ' ']).to_lowercase().ends_with("would like to make"),
+            "Unread final words were lost: {text}");
         // A hang/deadlock guard, not a performance budget: the full suite runs heavy
         // model tests in parallel and this measurement competes for the same lock, so
         // the bound must tolerate load (it measures ~350ms solo).

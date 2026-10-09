@@ -625,6 +625,20 @@ fn delete_transcription(state: State<AppState>, id: String) -> Result<(), String
 }
 
 #[tauri::command]
+async fn clear_local_data(app: tauri::AppHandle) -> Result<typr_lib::data_cleanup::ClearDataReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let report = state.recorder.run_when_idle(|| {
+            let mut history = state.history.lock().unwrap();
+            typr_lib::data_cleanup::clear_local_data(&state.app_dir, &mut history)
+        })?;
+        use tauri::Emitter;
+        let _ = app.emit("history-updated", ());
+        Ok(report)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn update_transcription(state: State<AppState>, id: String, text: String) -> Result<(), String> {
     state.history.lock().unwrap().update_item(&id, text, &state.app_dir)
 }
@@ -938,9 +952,10 @@ async fn do_toggle_recording(
             let nemotron_dir = state
                 .app_dir
                 .join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+            let parakeet_dir = state.app_dir.join(typr_lib::transcribe_parakeet::model_dir_name(&settings.parakeet_model));
             state
                 .recorder
-                .start_recording(app, &mic, session_override, &settings.engine, Some(&nemotron_dir))?;
+                .start_recording(app, &mic, session_override, &settings.engine, Some(&nemotron_dir), Some(&parakeet_dir))?;
             Ok("recording".to_string())
         }
         RecordingState::Recording => {
@@ -1069,6 +1084,7 @@ fn main() {
             set_secondary_profile,
             get_history,
             delete_transcription,
+            clear_local_data,
             update_transcription,
             propose_correction,
             write_text_file,
@@ -1393,12 +1409,14 @@ fn main() {
                                         let nemotron_dir = state
                                             .app_dir
                                             .join(typr_lib::transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+                                        let parakeet_dir = state.app_dir.join(typr_lib::transcribe_parakeet::model_dir_name(&settings.parakeet_model));
                                         match state.recorder.start_recording(
                                             &rx_handle,
                                             &mic,
                                             session_override,
                                             &settings.engine,
                                             Some(&nemotron_dir),
+                                            Some(&parakeet_dir),
                                         ) {
                                             Ok(_) => println!("[Typr] Recording started"),
                                             Err(e) => eprintln!("[Typr] Start recording error: {}", e),

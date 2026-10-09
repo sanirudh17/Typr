@@ -220,9 +220,9 @@ impl Dictionary {
     }
 
     pub fn apply_replacements(&self, text: &str) -> String {
-        // Normalize multiple spaces in the input text to a single space
-        let normalized_text = text.split_whitespace().collect::<Vec<&str>>().join(" ");
-        let mut result = normalized_text;
+        // Preserve paragraphs, list rows, and literal spacing from the AI/command
+        // passes. Normalize the trigger pattern, never the whole transcript.
+        let mut result = text.to_string();
 
         // Sort replacements by find field length in descending order,
         // so that longer phrase/context matches are evaluated and replaced first.
@@ -235,7 +235,11 @@ impl Dictionary {
             if find_normalized.is_empty() {
                 continue;
             }
-            let escaped_find = escape(&find_normalized);
+            let escaped_find = find_normalized
+                .split(' ')
+                .map(escape)
+                .collect::<Vec<_>>()
+                .join(r"[^\S\r\n]+");
             
             // Build regex with smart word boundaries:
             // - If starting with alphanumeric, prepend \b boundary
@@ -258,14 +262,22 @@ impl Dictionary {
                 .case_insensitive(!entry.case_sensitive)
                 .build()
             {
-                if entry.case_sensitive {
-                    result = re.replace_all(&result, &entry.replace).to_string();
-                } else {
-                    // For case-insensitive replacements, respect the original casing context (e.g. title case or ALL CAPS)
-                    result = re.replace_all(&result, |caps: &regex::Captures| {
-                        preserve_case(&caps[0], &entry.replace)
-                    }).to_string();
-                }
+                // A snippet may contain its own trigger ("check" -> "check the
+                // folder"). The post-AI reassertion must not expand it twice.
+                let protected: Vec<_> = if entry.replace.is_empty() { Vec::new() }
+                    else { RegexBuilder::new(&escape(&entry.replace))
+                        .case_insensitive(!entry.case_sensitive).build().unwrap()
+                        .find_iter(&result).map(|m| m.range()).collect() };
+                result = re.replace_all(&result, |caps: &regex::Captures| {
+                    let matched = caps.get(0).unwrap();
+                    if protected.iter().any(|range| range.start <= matched.start() && range.end >= matched.end()) {
+                        matched.as_str().to_string()
+                    } else if entry.case_sensitive {
+                        entry.replace.clone()
+                    } else {
+                        preserve_case(matched.as_str(), &entry.replace)
+                    }
+                }).to_string();
             }
         }
         result
@@ -337,6 +349,28 @@ fn preserve_case(matched: &str, replacement: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacements_preserve_layout_and_literal_snippets() {
+        let mut dict = Dictionary::default();
+        let text = "First paragraph.\n\n1. my  app\n2. set env\n";
+        assert_eq!(dict.apply_replacements(text), text);
+        dict.replacements = vec![
+            ReplacementEntry { find: "my app".into(), replace: "FluidVoice".into(), case_sensitive: false },
+            ReplacementEntry { find: "set env".into(), replace: "$env:PATH = $PATH".into(), case_sensitive: true },
+        ];
+        assert_eq!(dict.apply_replacements(text), "First paragraph.\n\n1. FluidVoice\n2. $env:PATH = $PATH\n");
+        assert_eq!(dict.apply_replacements("my\napp"), "my\napp");
+    }
+
+    #[test]
+    fn dictionary_reassertion_does_not_repeat_an_expansion() {
+        let mut dict = Dictionary::default();
+        dict.replacements.push(ReplacementEntry { find: "check".into(), replace: "check the folder".into(), case_sensitive: false });
+        let first = dict.apply_replacements("Check\n\ncheck");
+        assert_eq!(first, "Check the folder\n\ncheck the folder");
+        assert_eq!(dict.apply_replacements(&first), first);
+    }
     use std::env::temp_dir;
 
     #[test]

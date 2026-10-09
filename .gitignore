@@ -28,6 +28,7 @@ target/
 
 # App-specific
 src-tauri/binaries/
+src-tauri/.binaries-source-link/
 whisper.cpp/
 *.exe
 *.msi
@@ -35,3 +36,8 @@ whisper.cpp/
 # Updater signing keys — must never be committed
 *.key
 *.key.pub
+*.dpapi
+*.pfx
+*.p12
+.env
+.env.*
