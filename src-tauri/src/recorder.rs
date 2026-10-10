@@ -55,6 +55,8 @@ pub struct Recorder {
     nemotron_session: Arc<Mutex<Option<crate::transcribe_nemotron::NemotronLiveSession>>>,
     parakeet_session: Arc<Mutex<Option<crate::transcribe_parakeet::ParakeetLiveSession>>>,
     review_saves: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    write_session: Arc<Mutex<Option<crate::write_mode::Session>>>,
+    write_cancel: Arc<Mutex<Option<crate::write_mode::Cancellation>>>,
 }
 
 impl Recorder {
@@ -67,6 +69,8 @@ impl Recorder {
             nemotron_session: Arc::new(Mutex::new(None)),
             parakeet_session: Arc::new(Mutex::new(None)),
             review_saves: Arc::new(Mutex::new(Vec::new())),
+            write_session: Arc::new(Mutex::new(None)),
+            write_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -93,11 +97,61 @@ impl Recorder {
         self.state.lock().unwrap().clone()
     }
 
+    pub fn is_write_active(&self) -> bool { self.write_cancel.lock().unwrap().is_some() }
+
+    pub fn cancel_write(&self) {
+        if let Some(cancel) = self.write_cancel.lock().unwrap().as_ref() { cancel.cancel(); }
+    }
+
+
+    pub async fn start_write(&self, app: &AppHandle, settings: &Settings, app_dir: &PathBuf) -> Result<(), String> {
+        if !settings.write_enabled { return Err("Enable Write Mode in Recording settings first.".into()); }
+        if settings.groq_api_key.trim().is_empty() { return Err("Add a Groq API key in Write Mode settings to begin editing.".into()); }
+        let cancellation = crate::write_mode::Cancellation::default();
+        {
+            let mut state = self.state.lock().unwrap();
+            if *state != RecordingState::Ready { return Err("Finish your current recording first.".into()); }
+            *state = RecordingState::Transcribing; // Reserve the recorder while reading the selection.
+            *self.write_cancel.lock().unwrap() = Some(cancellation.clone());
+        }
+        crate::overlay::set_write_mode(app, true);
+        let _ = app.emit("recording-state", RecordingState::Transcribing);
+        update_overlay(app, &RecordingState::Transcribing, true);
+        let selection = tokio::task::spawn_blocking(crate::selection::capture).await
+            .map_err(|_| "Could not read the selected text.".to_string()).and_then(|r| r);
+        let selection = match selection.and_then(|s| { cancellation.check()?; Ok(s) }) {
+            Ok(selection) => selection,
+            Err(e) => { self.reset_ready(app); return Err(e); }
+        };
+        *self.write_session.lock().unwrap() = Some(crate::write_mode::Session { selection, settings: settings.clone(), cancellation });
+        let nemotron = app_dir.join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
+        let parakeet = app_dir.join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
+        if let Err(e) = self.start_recording(app, &settings.microphone, None, &settings.engine, Some(&nemotron), Some(&parakeet)) {
+            self.reset_ready(app); return Err(e);
+        }
+        // Escape during model/session startup must not leave a cancelled mic running.
+        let cancelled = self.write_cancel.lock().unwrap().as_ref().is_some_and(|c| c.check().is_err());
+        if cancelled {
+            self.abort_write_capture(app);
+        }
+        Ok(())
+    }
+
+    fn abort_write_capture(&self, app: &AppHandle) {
+        let _ = self.audio_recorder.lock().unwrap().stop_capture();
+        self.nemotron_session.lock().unwrap().take();
+        self.parakeet_session.lock().unwrap().take();
+        self.audio_recorder.lock().unwrap().clear_samples();
+        self.session_override.lock().unwrap().take();
+        self.session_context.lock().unwrap().take();
+        self.reset_ready(app);
+    }
+
     /// Prevent a hotkey from starting capture during a local-data operation.
     pub fn run_when_idle<T>(&self, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         let state = self.state.lock().unwrap();
         if *state != RecordingState::Ready {
-            return Err("Finish your current dictation before clearing data.".into());
+            return Err("Finish your current recording first.".into());
         }
         // A completed dictation may still be saving opt-in review audio. Join
         // before deleting, so no background writer recreates data after Clear.
@@ -127,7 +181,8 @@ impl Recorder {
         // 1. Transition state to Recording while holding the state lock briefly
         {
             let mut state = self.state.lock().unwrap();
-            if *state != RecordingState::Ready {
+            let reserved_write = *state == RecordingState::Transcribing && self.write_session.lock().unwrap().is_some();
+            if *state != RecordingState::Ready && !reserved_write {
                 return Err("Already recording or transcribing".to_string());
             }
 
@@ -223,6 +278,12 @@ impl Recorder {
     ) -> Result<String, String> {
         let transcription_started_at = Instant::now();
 
+        let cancelled = self.write_cancel.lock().unwrap().as_ref().is_some_and(|c| c.check().is_err());
+        if cancelled {
+            self.abort_write_capture(app);
+            return Err("Write Mode cancelled. Your selected text was kept.".into());
+        }
+
         // Stop recording, taking this session's profile override and initial context snapshot
         // in the same locked step that transitions out of Recording — so exactly one stop consumes them.
         let (session_override, session_context) = {
@@ -242,7 +303,8 @@ impl Recorder {
         // Apply the override (if any) to a local copy of the live settings. The caller passes
         // the base settings; the override forces AI on with the chosen profile for this
         // dictation only.
-        let effective_settings = apply_session_override(settings, session_override);
+        let write_session = self.write_session.lock().unwrap().take();
+        let effective_settings = if let Some(write) = &write_session { write.settings.clone() } else { apply_session_override(settings, session_override) };
         let settings = &effective_settings;
 
         // Delimit this capture for stage logs and asynchronous comparison output.
@@ -293,14 +355,11 @@ impl Recorder {
                     _ => "No audio captured — check your microphone.",
                 };
                 notify_user(app, toast);
-                let mut state = self.state.lock().unwrap();
-                *state = RecordingState::Ready;
                 *self.nemotron_session.lock().unwrap() = None;
                 *self.parakeet_session.lock().unwrap() = None;
                 self.audio_recorder.lock().unwrap().clear_samples();
                 if wav_requested { let _ = std::fs::remove_file(&temp_path); }
-                let _ = app.emit("recording-state", RecordingState::Ready);
-                update_overlay(app, &RecordingState::Ready, false);
+                self.reset_ready(app);
                 return Err(e);
             }
         };
@@ -602,6 +661,23 @@ impl Recorder {
         let replaced = crate::email_assemble::assemble_emails(&replaced);
         crate::debug_log::log(app_dir, &format!("STAGE 3 [email assembly]: {}", replaced));
 
+        if let Some(write) = write_session {
+            let result = async {
+                write.cancellation.check()?;
+                let edited = crate::write_mode::rewrite(&write.selection.text, &replaced, settings, &write.cancellation).await?;
+                let target = write.selection.clone();
+                let text = edited.clone();
+                let cancel = write.cancellation.clone();
+                let warning = tokio::task::spawn_blocking(move || crate::selection::replace(&target, &text, &cancel)).await
+                    .map_err(|_| "Could not replace the selection safely.".to_string())??;
+                if let Some(message) = warning { notify_user(app, &message); } else { let _ = app.emit("show-toast", "Text updated. Use Ctrl+Z in your editor to undo."); }
+                Ok("Write Mode edit applied".to_string())
+            }.await;
+            // Selected text and rewritten content never enter dictation history/logs.
+            self.reset_ready(app);
+            return result;
+        }
+
         // Deterministic cleanup is the always-available fallback.
         let deterministic = cleanup_text(&replaced);
         // Filler safety net: when AI is on and the user opted to strip filler in
@@ -859,6 +935,10 @@ impl Recorder {
         let mut state = self.state.lock().unwrap();
         *state = RecordingState::Ready;
         *self.nemotron_session.lock().unwrap() = None;
+        *self.parakeet_session.lock().unwrap() = None;
+        self.write_session.lock().unwrap().take();
+        self.write_cancel.lock().unwrap().take();
+        crate::overlay::set_write_mode(app, false);
         let _ = app.emit("recording-state", RecordingState::Ready);
         update_overlay(app, &RecordingState::Ready, false);
     }

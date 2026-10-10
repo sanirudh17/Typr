@@ -569,10 +569,18 @@ fn retain_anchored_edits(input: &str, output: &str, prompt: &str) -> Option<Stri
             else { j += 1; }
             continue;
         }
-        let gap = recover_edit_gap(
-            &input[source_end..before[i].start], &output[edited_end..after[j].start],
-            i - source_token, j - edited_token, source_end == 0, false,
-        )?;
+        let gap = if i == source_token && j == edited_token + 1
+            && missing_infinitive_to(input, &source_words, &edited_words, i, j - 1) {
+            // This local gap has no source token, but its surrounding request
+            // supplies the grammatical context. Keep the safe "to" insertion
+            // even when another part of the completion needs recovery.
+            (output[edited_end..after[j].start].to_string(), false)
+        } else {
+            recover_edit_gap(
+                &input[source_end..before[i].start], &output[edited_end..after[j].start],
+                i - source_token, j - edited_token, source_end == 0, false,
+            )?
+        };
         restored |= gap.1;
         candidate.push_str(&gap.0);
         candidate.push_str(after[j].text);
@@ -672,6 +680,19 @@ fn recover_edit_gap(source: &str, edited: &str, source_words: usize, edited_word
         // empty heading/list item or attaching punctuation to another clause.
         return Some((source.to_string(), true));
     }
+    // A model may hyphenate a replacement compound ("repo-wide"). When its
+    // replacement is rejected, don't attach that hyphen to restored prose
+    // ("repo-in depth"). Keep original horizontal spacing at this boundary.
+    // Accepted compounds and real paragraph/bullet boundaries stay untouched.
+    let source_prefix = source.find(char::is_alphanumeric).unwrap_or(0);
+    let edited_prefix = edited.find(char::is_alphanumeric).unwrap_or(0);
+    let boundary: std::borrow::Cow<'_, str> = if source_prefix > 0
+        && source[..source_prefix].chars().all(|ch| ch.is_whitespace() && !matches!(ch, '\n' | '\r'))
+        && edited[..edited_prefix].trim() == "-"
+        && !edited[..edited_prefix].contains(['\n', '\r']) {
+        format!("{}{}", &source[..source_prefix], &edited[edited_prefix..]).into()
+    } else { edited.into() };
+    let edited = boundary.as_ref();
     if let Some(repaired) = restore_aligned_words(source, edited) {
         return Some((repaired, true));
     }
@@ -942,12 +963,81 @@ fn spelling_equivalent(source: &str, output: &str) -> bool {
     }
     // Small malformed spellings can be repaired. Valid ordinary words, numbers,
     // and short tokens must never be replaced based on topic or sound alone.
-    source.chars().count() >= 4 && output.chars().count() >= 4
-        && !source.chars().any(|c| c.is_numeric())
-        && !output.chars().any(|c| c.is_numeric())
-        && !crate::vocab_correct::is_common_word(source)
-        && !source.starts_with('<') && !output.starts_with('<')
-        && strsim::levenshtein(source, output) <= if source.len().min(output.len()) <= 4 { 1 } else { 2 }
+    let source_len = source.chars().count();
+    let output_len = output.chars().count();
+    if source_len < 4 || output_len < 4
+        || !source.chars().all(char::is_alphabetic)
+        || !output.chars().all(char::is_alphabetic)
+        || known_english_word(source)
+        || source.starts_with('<') || output.starts_with('<') {
+        return false;
+    }
+    let distance = strsim::levenshtein(source, output);
+    if distance <= if source_len.min(output_len) <= 4 { 1 } else { 2 } {
+        return true;
+    }
+    // A short, malformed word may need both its missing final letter and plural
+    // agreement repaired ("issu" -> "issues"). Require an exact existing prefix
+    // and an ordinary destination, not a loose two-edit match of short names.
+    if source_len == 4 && output_len <= 6 && output.starts_with(source)
+        && known_english_word(output) && distance <= 2 {
+        return true;
+    }
+    // Longer misspellings can lose a syllable ("vulabilities"). The old flat
+    // two-letter ceiling restored them even when the AI supplied the right word.
+    // Keep this extension bounded and anchored at both ends; never apply it to
+    // ordinary source words, numbers, or unknown destination names/identifiers.
+    source_len.min(output_len) >= 8 && distance <= 3
+        && distance * 4 <= source_len.max(output_len)
+        && source.chars().take(3).eq(output.chars().take(3))
+        && source.chars().rev().take(2).eq(output.chars().rev().take(2))
+        && known_english_word(output)
+}
+
+fn known_english_word(word: &str) -> bool {
+    if crate::vocab_correct::is_common_word(word) { return true; }
+    // The compact lexicon stores many nouns only in their singular form.
+    word.strip_suffix("ies").is_some_and(|stem|
+        crate::vocab_correct::is_common_word(&format!("{stem}y")))
+        || word.strip_suffix('s').is_some_and(crate::vocab_correct::is_common_word)
+        || word.strip_suffix("es").is_some_and(crate::vocab_correct::is_common_word)
+}
+
+fn fused_word_equivalent(input: &str, source: &str, fragments: &[String]) -> bool {
+    if fragments.len() != 2 || source.chars().count() < 6 || known_english_word(source)
+        || !source.chars().all(char::is_alphabetic)
+        || fragments.iter().any(|word| !known_english_word(word))
+        || fragments.concat() != source {
+        return false;
+    }
+    // A fused ordinary word plus a short function word is a spacing error.
+    // Never split arbitrary names, two content words, or camelCase identifiers.
+    const FUNCTION_WORDS: &[&str] = &["on", "in", "to", "of", "for", "at", "and", "is", "it", "with", "that", "my"];
+    if !fragments.iter().any(|word| FUNCTION_WORDS.contains(&word.as_str()))
+        || !fragments.iter().any(|word| word.chars().count() >= 4) {
+        return false;
+    }
+    let pattern = format!(r"(?i)\b{}\b", regex::escape(source));
+    regex::Regex::new(&pattern).is_ok_and(|re| re.find_iter(input).any(|matched| {
+        let mut chars = matched.as_str().chars();
+        chars.next();
+        chars.all(|ch| !ch.is_uppercase())
+    }))
+}
+
+fn missing_infinitive_to(input: &str, before: &[String], after: &[String], i: usize, j: usize) -> bool {
+    if i == 0 || after[j] != "to" || after.get(j + 1) != before.get(i) { return false; }
+    const REQUEST_VERBS: &[&str] = &["want", "wants", "wanted", "need", "needs", "needed", "ask", "asks", "asked", "expect", "expects", "expected"];
+    const ACTIONS: &[&str] = &["do", "<present-do>", "fix", "check", "review", "make", "take", "keep", "find", "open", "close", "read", "write", "test", "run", "update", "change", "look", "confirm", "ensure", "help"];
+    if !ACTIONS.contains(&before[i].as_str()) { return false; }
+    let start = if REQUEST_VERBS.contains(&before[i - 1].as_str()) { i - 1 }
+        else if i >= 2 && REQUEST_VERBS.contains(&before[i - 2].as_str())
+            && matches!(before[i - 1].as_str(), "you" | "me" | "us" | "them" | "him" | "her") { i - 2 }
+        else { return false; };
+    let pattern = format!(r"(?i)\b{}\b", before[start..=i].iter()
+        .map(|word| if word == "<present-do>" { "(?:do|does)".to_string() }
+            else { regex::escape(word) }).collect::<Vec<_>>().join(r"[^\S\r\n]+"));
+    regex::Regex::new(&pattern).is_ok_and(|re| re.is_match(input))
 }
 
 /// Join only malformed, adjacent spelling fragments of an ordinary known word.
@@ -985,7 +1075,11 @@ fn preserves_wording(input: &str, output: &str) -> bool {
     }
     let (mut i, mut j) = (0, 0);
     while i < before.len() && j < after.len() {
-        if spelling_equivalent(&before[i], &after[j]) {
+        // Prefer a verified spacing repair over interpreting its first word as
+        // a two-letter deletion and then rejecting the remaining function word.
+        if j + 2 <= after.len() && fused_word_equivalent(&input, &before[i], &after[j..j + 2]) {
+            i += 1; j += 2;
+        } else if spelling_equivalent(&before[i], &after[j]) {
             i += 1; j += 1;
         } else {
             // Established compound product names may gain their canonical
@@ -997,6 +1091,8 @@ fn preserves_wording(input: &str, output: &str) -> bool {
             } else if let Some(count) = (2..=3).find(|&count| i + count <= before.len()
                 && spelling_fragments_equivalent(&input, &before[i..i + count], &after[j])) {
                 i += count; j += 1;
+            } else if missing_infinitive_to(&input, &before, &after, i, j) {
+                j += 1;
             } else { return false; }
         }
     }
@@ -1072,6 +1168,127 @@ async fn postprocess_attempts(api_key: &str, text: &str, model: &str, system_pro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const REVIEW_SOURCE: &str = "Okay, I want you do an in depth repo in depth review of this app and make sure that you find any vulabilities in this repository and plug them out once you flock them out I want you to fix those for me another thing is that make sure that the app is functioning properly and does not cause any issu afterwards";
+
+    #[test]
+    fn cleanup_retains_review_spelling_repairs_in_every_prose_profile() {
+        for base in [CLEANUP_PROMPT, CONTEXT_MESSAGING, CONTEXT_EMAIL,
+            CONTEXT_PROFESSIONAL, CONTEXT_DEVELOPER] {
+            for (source, proposal) in [
+                ("find any vulabilities in this repository", "Find any vulnerabilities in this repository."),
+                ("does not cause any issu afterwards", "Does not cause any issues afterwards."),
+                ("do an in depth reviewon this app", "Do an in-depth review on this app."),
+                ("I want you do a review", "I want you to do a review."),
+            ] {
+                assert_eq!(accept_cleanup(source, proposal, base).unwrap().0, proposal,
+                    "{source} -> {proposal}");
+            }
+        }
+    }
+
+    #[test]
+    fn review_recovery_keeps_typos_fixed_without_replacing_valid_words() {
+        let proposal = "Okay, I want you to do an in-depth review of this app and make sure that you find any vulnerabilities in this repository and plug them out. Once you knock them out, I want you to fix those for me. Another thing is that make sure that the app is functioning properly and does not cause any issues afterwards.";
+        let (kept, recovered) = accept_cleanup(REVIEW_SOURCE, proposal, CONTEXT_PROFESSIONAL).unwrap();
+        assert!(recovered);
+        assert!(kept.contains("I want you to do"), "{kept}");
+        assert!(kept.contains("vulnerabilities"), "{kept}");
+        assert!(kept.ends_with("issues afterwards."), "{kept}");
+        assert!(kept.contains("flock them out"), "{kept}");
+        assert!(!kept.contains("knock"));
+        assert!(validate_fidelity(REVIEW_SOURCE, &kept, CONTEXT_PROFESSIONAL).is_ok());
+        let qwen = proposal.replace("an in-depth review", "an in-depth, repo-wide review");
+        let (kept, _) = accept_cleanup(REVIEW_SOURCE, &qwen, CONTEXT_PROFESSIONAL).unwrap();
+        assert!(kept.contains("repo in depth"), "{kept}");
+        assert!(!kept.contains("repo-in"), "{kept}");
+    }
+
+    #[test]
+    fn spelling_extensions_do_not_replace_words_names_numbers_or_shortcuts() {
+        for (source, output) in [
+            ("flock", "knock"), ("improvisations", "improvements"),
+            ("review", "renew"), ("teth", "team"),
+            ("Anirudh", "Andrew"), ("0.2.2", "0.2.3"),
+            ("Ctrl+Shift+W", "Ctrl+Shift+Q"),
+        ] {
+            assert!(!spelling_equivalent(&source.to_lowercase(), &output.to_lowercase()), "{source} -> {output}");
+        }
+        for source in ["vulnerabilities", "improvisations", "flock", "review"] {
+            assert!(known_english_word(source));
+        }
+        for (source, output) in [("vulabilities", "vulnerabilities"), ("issu", "issues"),
+            ("acuracy", "accuracy"), ("confiden", "confident")] {
+            assert!(spelling_equivalent(source, output), "{source} -> {output}");
+        }
+    }
+
+    #[test]
+    fn spacing_and_grammar_repairs_keep_scope_tense_and_literal_boundaries() {
+        for (source, proposal) in [
+            ("I want you. Do a review", "I want you to do a review."),
+            ("I want you\nDo a review", "I want you to do a review."),
+            ("I want you can do a review", "I want you to do a review."),
+            ("I wanted you do a review", "I want you to do a review."),
+            ("the model works", "The model does not work."),
+            ("the reviewOn app", "The review on app."),
+            ("review on this app", "Review this app."),
+            ("check reviewon_value", "Check review on value."),
+            ("open src/reviewon.rs", "Open src/review on.rs."),
+            ("check reviewon.example", "Check review on.example."),
+        ] {
+            assert!(!preserves_literal_tokens(source, proposal)
+                || validate_fidelity(source, proposal, CONTEXT_PROFESSIONAL).is_err(), "{source} -> {proposal}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Explicit review only: requires TYPR_REVIEW_CONFIG and sends fixed test text to Groq"]
+    async fn review_latest_nemotron_cleanup() {
+        let path = std::env::var("TYPR_REVIEW_CONFIG").expect("Set an explicit review config path");
+        let settings: crate::settings::Settings = serde_json::from_str(
+            &std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!settings.groq_api_key.is_empty());
+        let prompt = build_system_prompt(&crate::recorder::append_vocabulary_hints(
+            CONTEXT_PROFESSIONAL, &[]), "default", "default", "");
+        for (model, source) in [
+            (MODEL_QUALITY, REVIEW_SOURCE),
+            (MODEL_QWEN, REVIEW_SOURCE),
+            (MODEL_QUALITY, "I wanted to make sure that you can go through this app and do an in depth reviewon this app and find any vulnerabilities in this repository and plug them once you locate them I wanted to fix those for me"),
+        ] {
+            let started = std::time::Instant::now();
+            let (system, user) = build_chat_messages(&prompt, source);
+            let response = ai_client().post("https://api.groq.com/openai/v1/chat/completions")
+                .bearer_auth(&settings.groq_api_key)
+                .json(&serde_json::json!({
+                    "model": model, "temperature": 0,
+                    "reasoning_effort": reasoning_effort_for(model),
+                    "max_completion_tokens": max_completion_tokens_for(model),
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                })).send().await.unwrap();
+            assert!(response.status().is_success(), "Groq status {}", response.status());
+            let response: serde_json::Value = response.json().await.unwrap();
+            assert_ne!(response["choices"][0]["finish_reason"], "length");
+            let proposal = sanitize_output(response["choices"][0]["message"]["content"].as_str().unwrap());
+            let result = accept_cleanup(source, &proposal, &prompt);
+            println!("REVIEW {}", serde_json::json!({
+                "model": model, "elapsed_ms": started.elapsed().as_millis(),
+                "proposal": proposal, "accepted": result,
+            }));
+            let (kept, _) = result.unwrap();
+            assert!(validate_fidelity(source, &kept, &prompt).is_ok());
+            assert!(kept.contains("vulnerabilities"));
+            if source == REVIEW_SOURCE {
+                assert!(kept.contains("I want you to do"));
+                // Both forms repair "issu" without changing the reported fact.
+                assert!(kept.ends_with("issues afterwards.") || kept.ends_with("issue afterwards."));
+                assert!(kept.contains("flock them out"));
+            } else {
+                assert!(kept.contains("review on this app"));
+                assert!(kept.contains("once you locate them"));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn ai_budget_cancels_slow_work_and_preserves_success() {

@@ -172,6 +172,14 @@ fn start_watchdog_if_needed(app: &AppHandle) {
     }
 }
 
+static WRITE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_write_mode(app: &AppHandle, active: bool) {
+    WRITE_MODE.store(active, std::sync::atomic::Ordering::SeqCst);
+    use tauri::Emitter;
+    let _ = app.emit("write-mode-state", active);
+}
+
 pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) {
     set_current_state(state.clone(), show_pill);
 
@@ -202,8 +210,9 @@ pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) 
             RecordingState::Transcribing => "processing",
         };
         let js = format!(
-            "if (window.__setPillState) window.__setPillState('{}'); else if (document.getElementById('pill')) document.getElementById('pill').style.display = '{}';",
+            "if (window.__setPillState) window.__setPillState('{}', {}); else if (document.getElementById('pill')) document.getElementById('pill').style.display = '{}';",
             pill_state,
+            WRITE_MODE.load(std::sync::atomic::Ordering::SeqCst),
             if show_pill { "flex" } else { "none" }
         );
         let _ = overlay.eval(&js);

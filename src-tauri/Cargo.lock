@@ -5785,6 +5785,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
 ]
 

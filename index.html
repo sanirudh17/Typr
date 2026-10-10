@@ -712,6 +712,44 @@
             </div>
             </div>
           </div>
+          <div class="settings-group" id="write-mode-settings">
+            <div class="group-title">Write Mode</div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Rewrite selected text</span>
+                  <span class="label-hint">Select text in another app and speak an editing instruction.</span>
+                </div>
+                <div class="setting-control"><div class="toggle-group" aria-label="Write Mode">
+                  <button id="write-off" class="toggle-btn active" aria-pressed="true">Off</button>
+                  <button id="write-on" class="toggle-btn" aria-pressed="false">On</button>
+                </div></div>
+              </div>
+              <div id="write-options" class="hidden">
+                <div class="setting-row">
+                  <div class="setting-label"><span class="label-text">Write hotkey</span><span class="label-hint">Press once to record. Press again to apply. Escape cancels.</span></div>
+                  <div class="setting-control hotkey-control"><kbd id="write-hotkey-display">Ctrl+Shift+W</kbd><button id="write-hotkey-change" class="toggle-btn">Change</button></div>
+                </div>
+                <p id="write-hotkey-status" class="hotkey-status settings-note" role="status" aria-live="polite"></p>
+                <div class="setting-row">
+                  <div class="setting-label"><label for="write-groq-key" class="label-text">Groq API key</label><span class="label-hint">Required for rewriting. Shared with AI cleanup and the Cloud engine.</span></div>
+                  <div class="setting-control"><input type="password" id="write-groq-key" placeholder="gsk_..." autocomplete="off" spellcheck="false" /></div>
+                </div>
+                <div class="setting-row">
+                  <div class="setting-label"><span class="label-text">Editing model</span><span class="label-hint">Shared with AI cleanup. Write Mode works even when cleanup is off.</span></div>
+                  <div class="setting-control"><select id="write-model-select">
+                    <option value="qwen/qwen3.8-27b">Qwen 3.8 27B</option>
+                    <option value="openai/gpt-oss-20b">GPT OSS 20B</option>
+                    <option value="openai/gpt-oss-120b">GPT OSS 120B</option>
+                  </select></div>
+                </div>
+                <p class="settings-note">Try &ldquo;Make this more polite&rdquo; or &ldquo;Shorten this to two sentences.&rdquo; Keep the field focused while Typr edits. Your clipboard is restored afterward.</p>
+                <p class="settings-note">The selected text and spoken instruction are sent to Groq for editing. Rewritten text is kept out of dictation history. To undo an edit, press Ctrl+Z in the edited app; no highlighting is needed.</p>
+                <p id="write-key-note" class="settings-note hidden">Paste your Groq API key above to start editing.</p>
+              </div>
+              <p id="write-status" class="hotkey-status settings-note" role="status" aria-live="polite"></p>
+            </div>
+          </div>
         </section>
 
 

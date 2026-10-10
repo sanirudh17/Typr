@@ -31,6 +31,8 @@ interface Settings {
   autoContextOverride: string;
   appRules: AppRule[];
   dismissedUpdateVersion: string;
+  writeEnabled: boolean;
+  writeHotkey: string;
 }
 
 interface AppRule {
@@ -109,6 +111,7 @@ const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 // Parakeet or Nemotron could turn AI cleanup on and have nowhere to enter the key it needs. Both inputs
 // edit one setting and are mirrored on every keystroke.
 const aiGroqKey = document.getElementById("ai-groq-key") as HTMLInputElement;
+const writeGroqKey = document.getElementById("write-groq-key") as HTMLInputElement;
 const aiKeyMissingNote = document.getElementById("ai-key-missing-note")!;
 const engineSetupNote = document.getElementById("engine-setup-note")!;
 // Whether the model each local engine is set to use is actually on disk. Cached from the
@@ -357,10 +360,12 @@ navItems.forEach((item) => {
     // shortcuts get re-armed instead of being left dead when we navigate away.
     if (primaryCapture.isCapturing()) primaryCapture.cancel();
     if (secondaryCapture.isCapturing()) secondaryCapture.cancel();
+    if (writeCapture.isCapturing()) writeCapture.cancel();
     // Clear any lingering transient status so the tab reads fresh on entry
     // (the persistent instructions in #hotkey-hint always remain visible).
     primaryCapture.clearStatus();
     secondaryCapture.clearStatus();
+    writeCapture.clearStatus();
     navItems.forEach((n) => n.classList.remove("active"));
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
@@ -509,6 +514,7 @@ async function loadSettings() {
   // AI post-processing
   setAiEnabled(currentSettings.aiEnabled);
   setAiModel(currentSettings.aiModel || AI_MODEL_DEFAULT);
+  renderWriteMode();
   setAiProfile(currentSettings.aiProfile || "cleanup");
   setAiPromptFormat(currentSettings.aiPromptFormat || "natural");
   setAiTone(currentSettings.aiTone || "default");
@@ -658,6 +664,7 @@ function syncGroqKeyInputs(value: string) {
   currentSettings.groqApiKey = value;
   if (groqKey.value !== value) groqKey.value = value;
   if (aiGroqKey.value !== value) aiGroqKey.value = value;
+  if (writeGroqKey.value !== value) writeGroqKey.value = value;
   updateAiKeyWarning();
   updateEngineSetupNote();
 }
@@ -670,6 +677,7 @@ function updateAiKeyWarning() {
   // would abort loadSettings and leave the whole window half-populated.
   const missing = currentSettings.aiEnabled && !(currentSettings.groqApiKey || "").trim();
   aiKeyMissingNote.classList.toggle("hidden", !missing);
+  document.getElementById("write-key-note")?.classList.toggle("hidden", !currentSettings.writeEnabled || !!(currentSettings.groqApiKey || "").trim());
 }
 
 // Appearance — the default is System (platform convention: Apple HIG, Material,
@@ -977,6 +985,8 @@ nemotronDeleteBtn.addEventListener("click", async () => {
 // on change (blur) as before — one setting, edited from either tab.
 groqKey.addEventListener("input", () => syncGroqKeyInputs(groqKey.value));
 aiGroqKey.addEventListener("input", () => syncGroqKeyInputs(aiGroqKey.value));
+writeGroqKey.addEventListener("input", () => syncGroqKeyInputs(writeGroqKey.value));
+writeGroqKey.addEventListener("change", () => void saveSettings().catch((err) => { writeStatus.textContent = String(err); }));
 groqKey.addEventListener("change", () => saveSettings());
 aiGroqKey.addEventListener("change", () => saveSettings());
 
@@ -1149,7 +1159,7 @@ function codeToKeyToken(code: string): string | null {
 }
 
 function toDisplay(accel: string): string {
-  return accel.replace("CmdOrCtrl", "Cmd").replace("Super", "Win").split("+").join(" + ");
+  return accel.replace("CmdOrCtrl", "Ctrl").replace("Super", "Win").split("+").join(" + ");
 }
 
 /// A capture control bound to one hotkey (primary or secondary). Reuses the
@@ -1164,13 +1174,14 @@ interface HotkeyCaptureConfig {
   onSet: (accepted: string) => void;
   onCurrentRender?: () => void; // optional override for how the idle value renders
 }
+let activeCaptureCancel: (() => Promise<void>) | null = null;
 
 function createHotkeyCapture(config: HotkeyCaptureConfig) {
   let capturing = false;
 
   const renderCurrent = () => {
     if (config.onCurrentRender) config.onCurrentRender();
-    else config.display.textContent = config.getCurrent().replace("CmdOrCtrl", "Cmd");
+    else config.display.textContent = toDisplay(config.getCurrent());
   };
   const setStatus = (msg: string) => {
     config.status.textContent = msg;
@@ -1226,9 +1237,8 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
     } catch (err) {
       console.error(`[Typr] ${config.setCommand} failed:`, err);
       renderCurrent();
-      setStatus(
-        `${toDisplay(accel)} is already in use by Windows or another app — try another. Your hotkey is unchanged.`,
-      );
+      setStatus(String(err));
+      await invoke("resume_hotkeys").catch(() => {});
     }
   }
 
@@ -1245,11 +1255,13 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
 
   function endListening(): void {
     capturing = false;
+    if (activeCaptureCancel === cancel) activeCaptureCancel = null;
     config.changeBtn.textContent = "Change";
     window.removeEventListener("keydown", onKeydown, true);
   }
 
   async function start(): Promise<void> {
+    if (activeCaptureCancel) await activeCaptureCancel();
     config.changeBtn.textContent = "Listening…";
     setStatus("Listening… hold your modifiers and press a key (Esc to cancel).");
     renderPreview([], null);
@@ -1257,8 +1269,13 @@ function createHotkeyCapture(config: HotkeyCaptureConfig) {
       await invoke("suspend_hotkeys"); // stop the active hotkeys from eating keys
     } catch (err) {
       console.error("[Typr] suspend_hotkeys failed:", err);
+      config.changeBtn.textContent = "Change";
+      renderCurrent();
+      setStatus(String(err));
+      return;
     }
     capturing = true;
+    activeCaptureCancel = cancel;
     window.addEventListener("keydown", onKeydown, true);
   }
 
@@ -1360,6 +1377,57 @@ wireSecondaryProfile(secondaryProfileCleanup, "cleanup");
 wireSecondaryProfile(secondaryProfilePrompt, "prompt");
 wireSecondaryProfile(secondaryProfileAuto, "auto");
 
+const writeOff = document.getElementById("write-off") as HTMLButtonElement;
+const writeOn = document.getElementById("write-on") as HTMLButtonElement;
+const writeModel = document.getElementById("write-model-select") as HTMLSelectElement;
+const writeStatus = document.getElementById("write-status")!;
+function renderWriteMode(): void {
+  const enabled = !!currentSettings.writeEnabled;
+  writeOff.classList.toggle("active", !enabled);
+  writeOn.classList.toggle("active", enabled);
+  writeOff.setAttribute("aria-pressed", String(!enabled));
+  writeOn.setAttribute("aria-pressed", String(enabled));
+  document.getElementById("write-options")!.classList.toggle("hidden", !enabled);
+  document.getElementById("write-hotkey-display")!.textContent = toDisplay(currentSettings.writeHotkey || "CmdOrCtrl+Shift+W");
+  writeModel.value = currentSettings.aiModel || AI_MODEL_DEFAULT;
+  syncCustomSelectDisplay(writeModel);
+  updateAiKeyWarning();
+}
+async function setWriteEnabled(enabled: boolean): Promise<void> {
+  if (activeCaptureCancel) await activeCaptureCancel();
+  writeOn.disabled = writeOff.disabled = true;
+  try {
+    await invoke("set_write_enabled", { enabled });
+    currentSettings.writeEnabled = enabled;
+    renderWriteMode();
+    writeStatus.textContent = enabled ? (currentSettings.groqApiKey.trim() ? "Write Mode is ready. Select text in another app to begin." : "Write Mode is on. Add your Groq API key to begin.") : "Write Mode is off.";
+  } catch (err) {
+    writeStatus.textContent = String(err);
+    // Keep setup available when a default shortcut is taken, so it can be changed.
+    document.getElementById("write-options")!.classList.remove("hidden");
+  }
+  finally { writeOn.disabled = writeOff.disabled = false; }
+}
+writeOff.addEventListener("click", () => void setWriteEnabled(false));
+writeOn.addEventListener("click", () => void setWriteEnabled(true));
+writeModel.addEventListener("change", () => {
+  setAiModel(writeModel.value);
+  void saveSettings().catch((err) => { writeStatus.textContent = String(err); });
+});
+aiModelSelect.addEventListener("change", () => {
+  writeModel.value = currentSettings.aiModel;
+  syncCustomSelectDisplay(writeModel);
+});
+const writeCapture = createHotkeyCapture({
+  display: document.getElementById("write-hotkey-display")!, status: document.getElementById("write-hotkey-status")!,
+  changeBtn: document.getElementById("write-hotkey-change") as HTMLButtonElement,
+  setCommand: "set_write_hotkey", getCurrent: () => currentSettings.writeHotkey || "CmdOrCtrl+Shift+W",
+  onSet: (accepted) => { currentSettings.writeHotkey = accepted; },
+});
+document.getElementById("write-hotkey-change")!.addEventListener("click", () => writeCapture.isCapturing() ? writeCapture.cancel() : writeCapture.start());
+let writeActive = false;
+listen<boolean>("write-mode-state", (event) => { writeActive = event.payload; });
+
 // Label reflecting the true recording state, so the transient mic notice can
 // restore to it instead of blindly resetting to "Ready" mid-recording.
 let recordingLabel = "Ready";
@@ -1390,11 +1458,11 @@ listen<string>("recording-state", (event) => {
   if (state === "Recording") {
     statusDot.classList.add("recording");
     statusIndicator.classList.add("recording");
-    recordingLabel = "Recording...";
+    recordingLabel = writeActive ? "Write Mode: speak your edit" : "Recording...";
   } else if (state === "Transcribing") {
     statusDot.classList.add("transcribing");
     statusIndicator.classList.add("transcribing");
-    recordingLabel = "Transcribing...";
+    recordingLabel = writeActive ? "Write Mode: processing edit..." : "Transcribing...";
   } else {
     statusDot.classList.add("ready");
     statusIndicator.classList.add("ready");

@@ -59,7 +59,13 @@ pub struct Settings {
     /// user can keep them if preferred. Defaults to true (strip).
     #[serde(rename = "developerStripFiller", default = "default_true")]
     pub developer_strip_filler: bool,
+    #[serde(rename = "writeEnabled", default)]
+    pub write_enabled: bool,
+    #[serde(rename = "writeHotkey", default = "default_write_hotkey")]
+    pub write_hotkey: String,
 }
+
+fn default_write_hotkey() -> String { "CmdOrCtrl+Shift+W".into() }
 
 fn default_parakeet_model() -> String {
     "v3".to_string()
@@ -136,6 +142,8 @@ impl Default for Settings {
             auto_context_override: "auto".to_string(),
             dismissed_update_version: String::new(),
             developer_strip_filler: true,
+            write_enabled: false,
+            write_hotkey: default_write_hotkey(),
         }
     }
 }

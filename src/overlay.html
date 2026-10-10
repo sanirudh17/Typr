@@ -70,6 +70,8 @@
         border-radius: 50%;
         animation: spin 0.7s linear infinite;
       }
+      .write-caption { display: none; position: absolute; top: calc(50% + 23px); max-width: 280px; padding: 5px 9px; border-radius: 6px; font: 12px/1.4 "IBM Plex Sans", system-ui, sans-serif; color: #f1f1f5; background: rgba(18, 18, 22, 0.94); text-align: center; }
+      html[data-theme="light"] .write-caption { color: #242630; background: rgba(255, 255, 255, 0.96); }
       /* Light theme (set from General → Appearance in the main window): the
          dark glass pill would glare on a bright desktop, so it renders as a
          bright pill with the same accent waveform. */
@@ -106,6 +108,9 @@
       <div class="spinner" id="spinner" style="display: none;"></div>
     </div>
     <script type="module">
+      const writeCaption = document.createElement("div");
+      writeCaption.className = "write-caption";
+      document.body.appendChild(writeCaption);
       import { invoke } from "@tauri-apps/api/core";
       import { emit, listen } from "@tauri-apps/api/event";
 
@@ -242,7 +247,9 @@
         }
       }
 
-      window.__setPillState = function(state) {
+      window.__setPillState = function(state, writeMode = false) {
+        writeCaption.style.display = writeMode && state !== "ready" ? "block" : "none";
+        writeCaption.textContent = state === "recording" ? "Write Mode · Speak your edit · Esc cancels" : "Write Mode · Processing edit · Esc cancels";
         isRunning = false;
         if (animationId) {
           cancelAnimationFrame(animationId);

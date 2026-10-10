@@ -462,6 +462,7 @@ body {
 
 #content {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -720,6 +721,7 @@ body {
   display: flex;
   justify-content: flex-end;
   min-width: 0;
+  max-width: 100%;
 }
 
 /* Hotkey row: keep the live status on the same line as the combo + buttons so
@@ -740,6 +742,17 @@ body {
 
 .hotkey-status:empty {
   display: none;
+}
+
+/* New Write Mode guidance remains legible in both incumbent themes. */
+#write-mode-settings .label-hint,
+#write-mode-settings .settings-note {
+  color: color-mix(in srgb, var(--text) 80%, var(--bg));
+}
+
+#write-mode-settings button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 /* Narrow windows: stack the control below the label so multi-button toggle groups
@@ -804,6 +817,7 @@ input[type="password"]::placeholder {
 }
 .model-row .custom-select {
   flex: 1;
+  min-width: 0;
   max-width: none;
 }
 .dict-add-row .custom-select {
@@ -910,7 +924,8 @@ input[type="password"]::placeholder {
 
 .toggle-group {
   display: inline-flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 2px;
   background: var(--surface);
   border-radius: var(--radius);
@@ -1069,6 +1084,7 @@ input[type="password"]::placeholder {
 
 .model-row {
   display: flex;
+  min-width: 0;
   gap: 8px;
   width: 100%;
   max-width: 440px;

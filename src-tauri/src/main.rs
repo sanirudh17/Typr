@@ -40,6 +40,8 @@ fn launched_hidden() -> bool {
 enum HotkeySource {
     Primary,
     Secondary,
+    Write,
+    CancelWrite,
 }
 
 /// A global-shortcut press/release tagged with the hotkey it came from.
@@ -58,8 +60,21 @@ fn register_hotkey(
     tx: &Sender<HotkeyEvent>,
 ) -> Result<(), String> {
     let tx = tx.clone();
+    let held = AtomicBool::new(false);
     app.global_shortcut()
-        .on_shortcut(accelerator, move |_app, shortcut, event| {
+        .on_shortcut(accelerator, move |app, shortcut, event| {
+            if matches!(source, HotkeySource::Primary | HotkeySource::Secondary) && app.state::<AppState>().recorder.is_write_active() {
+                return;
+            }
+            if matches!(source, HotkeySource::Write) {
+                if event.state == ShortcutState::Released { held.store(false, Ordering::SeqCst); }
+                else if held.swap(true, Ordering::SeqCst) { return; }
+                if event.state == ShortcutState::Pressed && app.state::<AppState>().recorder.get_state() == RecordingState::Transcribing {
+                    use tauri::Emitter;
+                    let _ = app.emit("show-toast", "An operation is in progress. Wait for it to finish, or press Escape to cancel Write Mode.");
+                    return;
+                }
+            }
             println!("[Typr] Hotkey event: {:?} state={:?}", shortcut, event.state);
             let _ = tx.try_send(HotkeyEvent { source, state: event.state });
         })
@@ -75,8 +90,76 @@ fn register_secondary_if_set(app: &tauri::AppHandle, state: &AppState) {
             Err(e) => eprintln!("[Typr] Secondary hotkey unavailable ({}): {}", secondary, e),
         }
     }
+    register_write_if_enabled(app, state);
 }
 
+fn register_write_if_enabled(app: &tauri::AppHandle, state: &AppState) {
+    let settings = state.settings.lock().unwrap().clone();
+    if !settings.write_enabled { return; }
+    for (key, source) in [(&settings.write_hotkey, HotkeySource::Write)] {
+        if app.global_shortcut().is_registered(key.as_str()) { continue; }
+        if let Err(e) = register_hotkey(app, key, source, &state.hotkey_tx) {
+            use tauri::Emitter;
+            let _ = app.emit("show-notification", format!("Write Mode shortcut {key} is unavailable. Change it in Recording settings."));
+            eprintln!("[Typr] Write Mode shortcut unavailable: {e}");
+        }
+    }
+}
+
+fn validate_shortcuts(settings: &Settings) -> Result<(), String> {
+    typr_lib::hotkey::validate_accelerator(&settings.write_hotkey)?;
+    let mut keys = vec![settings.hotkey.as_str()];
+    if !settings.hotkey_secondary.is_empty() { keys.push(&settings.hotkey_secondary); }
+    if settings.write_enabled { keys.push(settings.write_hotkey.as_str()); }
+    let mut parsed = Vec::new();
+    for key in keys {
+        typr_lib::hotkey::validate_accelerator(key)?;
+        let shortcut = key.parse::<tauri_plugin_global_shortcut::Shortcut>().map_err(|e| e.to_string())?;
+        if parsed.contains(&shortcut) { return Err("Each shortcut needs a different key combination.".into()); }
+        parsed.push(shortcut);
+    }
+    Ok(())
+}
+
+fn register_saved_shortcuts(app: &tauri::AppHandle, state: &AppState, settings: &Settings) -> Result<(), String> {
+    validate_shortcuts(settings)?;
+    register_hotkey(app, &settings.hotkey, HotkeySource::Primary, &state.hotkey_tx)?;
+    if !settings.hotkey_secondary.is_empty() { register_hotkey(app, &settings.hotkey_secondary, HotkeySource::Secondary, &state.hotkey_tx)?; }
+    if settings.write_enabled {
+        register_hotkey(app, &settings.write_hotkey, HotkeySource::Write, &state.hotkey_tx)?;
+    }
+    Ok(())
+}
+
+fn change_shortcuts(app: &tauri::AppHandle, state: &AppState, edit: impl FnOnce(&mut Settings)) -> Result<Settings, String> {
+    state.recorder.run_when_idle(|| {
+        let old = state.settings.lock().unwrap().clone();
+        let mut new = old.clone(); edit(&mut new);
+        let result: Result<(), String> = (|| {
+            validate_shortcuts(&new)?;
+            app.global_shortcut().unregister_all().map_err(|e| e.to_string())?;
+            register_saved_shortcuts(app, state, &new)?;
+            new.save(&state.app_dir)?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let _ = app.global_shortcut().unregister_all();
+            let _ = register_saved_shortcuts(app, state, &old);
+            return Err(format!("Could not set the shortcut: {e}. Your settings are unchanged."));
+        }
+        *state.settings.lock().unwrap() = new.clone();
+        Ok(new)
+    })
+}
+
+#[tauri::command]
+fn set_write_enabled(app: tauri::AppHandle, state: State<AppState>, enabled: bool) -> Result<(), String> {
+    change_shortcuts(&app, &state, |s| s.write_enabled = enabled)?; Ok(())
+}
+#[tauri::command]
+fn set_write_hotkey(app: tauri::AppHandle, state: State<AppState>, accelerator: String) -> Result<String, String> {
+    Ok(change_shortcuts(&app, &state, |s| s.write_hotkey = accelerator)?.write_hotkey)
+}
 struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
@@ -293,6 +376,8 @@ async fn save_settings(
     }
 
     let old_settings = state.settings.lock().unwrap().clone();
+    settings.write_enabled = old_settings.write_enabled;
+    settings.write_hotkey = old_settings.write_hotkey.clone();
     let mic_changed = old_settings.microphone != settings.microphone;
     let engine_changed = old_settings.engine != settings.engine;
     let model_changed = old_settings.whisper_model != settings.whisper_model;
@@ -402,129 +487,30 @@ async fn save_settings(
 }
 
 #[tauri::command]
-async fn set_hotkey(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    accelerator: String,
-) -> Result<String, String> {
-    // 1. Validate the shape before touching the OS registration.
-    typr_lib::hotkey::validate_accelerator(&accelerator)?;
-
-    let old = state.settings.lock().unwrap().hotkey.clone();
-
-    // 2. Clear the old primary (harmless no-op if hotkeys are suspended), then
-    //    try the new one. This always ends with `accelerator` registered on
-    //    success — even when it equals `old` — so it is safe to call while
-    //    global shortcuts are suspended for capture.
-    let _ = app.global_shortcut().unregister(old.as_str());
-    match register_hotkey(&app, &accelerator, HotkeySource::Primary, &state.hotkey_tx) {
-        Ok(_) => {
-            // 3. Persist only when it actually changed.
-            if accelerator != old {
-                let mut settings = state.settings.lock().unwrap().clone();
-                settings.hotkey = accelerator.clone();
-                settings.save(&state.app_dir)?;
-                *state.settings.lock().unwrap() = settings;
-                println!("[Typr] Hotkey rebound to {}", accelerator);
-            }
-            // Capture suspended everything — re-arm the secondary too.
-            register_secondary_if_set(&app, &state);
-            Ok(accelerator)
-        }
-        Err(e) => {
-            // 4. Best-effort restore so we never end with no hotkey.
-            let _ = register_hotkey(&app, &old, HotkeySource::Primary, &state.hotkey_tx);
-            register_secondary_if_set(&app, &state);
-            eprintln!("[Typr] Rebind to {} failed ({}); kept {}", accelerator, e, old);
-            Err(format!(
-                "`{}` is unavailable — it may be in use by Windows or another app.",
-                accelerator
-            ))
-        }
-    }
+async fn set_hotkey(app: tauri::AppHandle, state: State<'_, AppState>, accelerator: String) -> Result<String, String> {
+    Ok(change_shortcuts(&app, &state, |s| s.hotkey = accelerator)?.hotkey)
 }
 
-/// Unregister all global shortcuts while the UI captures a new combo, so the
-/// keystrokes reach the webview instead of being swallowed (or firing a
-/// recording) by the currently-registered hotkey.
 #[tauri::command]
-fn suspend_hotkeys(app: tauri::AppHandle) -> Result<(), String> {
-    app.global_shortcut()
-        .unregister_all()
-        .map_err(|e| e.to_string())
+fn suspend_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    if state.recorder.get_state() != RecordingState::Ready { return Err("Finish your recording before changing shortcuts.".into()); }
+    app.global_shortcut().unregister_all().map_err(|e| e.to_string())
 }
 
-/// Re-register the saved hotkeys after a capture is cancelled without a
-/// successful rebind — both the primary and (if set) the secondary, since
-/// capture suspends all global shortcuts.
 #[tauri::command]
 fn resume_hotkeys(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    let hotkey = state.settings.lock().unwrap().hotkey.clone();
-    let res = register_hotkey(&app, &hotkey, HotkeySource::Primary, &state.hotkey_tx);
-    register_secondary_if_set(&app, &state);
-    res
+    let settings = state.settings.lock().unwrap().clone();
+    register_saved_shortcuts(&app, &state, &settings)
 }
 
 #[tauri::command]
-async fn set_secondary_hotkey(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    accelerator: String,
-) -> Result<String, String> {
-    typr_lib::hotkey::validate_accelerator(&accelerator)?;
-
-    let (primary, old_secondary) = {
-        let s = state.settings.lock().unwrap();
-        (s.hotkey.clone(), s.hotkey_secondary.clone())
-    };
-    if accelerator == primary {
-        // Restore whatever was suspended for capture before returning.
-        let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-        register_secondary_if_set(&app, &state);
-        return Err("That's already your main hotkey — pick a different combo.".to_string());
-    }
-
-    if !old_secondary.is_empty() {
-        let _ = app.global_shortcut().unregister(old_secondary.as_str());
-    }
-    match register_hotkey(&app, &accelerator, HotkeySource::Secondary, &state.hotkey_tx) {
-        Ok(_) => {
-            let mut settings = state.settings.lock().unwrap().clone();
-            settings.hotkey_secondary = accelerator.clone();
-            settings.save(&state.app_dir)?;
-            *state.settings.lock().unwrap() = settings;
-            // Capture suspended everything — re-arm the primary.
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-            println!("[Typr] Secondary hotkey set to {}", accelerator);
-            Ok(accelerator)
-        }
-        Err(e) => {
-            // Restore prior state: old secondary (if any) + primary.
-            if !old_secondary.is_empty() {
-                let _ = register_hotkey(&app, &old_secondary, HotkeySource::Secondary, &state.hotkey_tx);
-            }
-            let _ = register_hotkey(&app, &primary, HotkeySource::Primary, &state.hotkey_tx);
-            eprintln!("[Typr] Secondary rebind to {} failed: {}", accelerator, e);
-            Err(format!(
-                "`{}` is unavailable — it may be in use by Windows or another app.",
-                accelerator
-            ))
-        }
-    }
+async fn set_secondary_hotkey(app: tauri::AppHandle, state: State<'_, AppState>, accelerator: String) -> Result<String, String> {
+    Ok(change_shortcuts(&app, &state, |s| s.hotkey_secondary = accelerator)?.hotkey_secondary)
 }
 
 #[tauri::command]
 fn clear_secondary_hotkey(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    let old = state.settings.lock().unwrap().hotkey_secondary.clone();
-    if !old.is_empty() {
-        let _ = app.global_shortcut().unregister(old.as_str());
-    }
-    let mut settings = state.settings.lock().unwrap().clone();
-    settings.hotkey_secondary = String::new();
-    settings.save(&state.app_dir)?;
-    *state.settings.lock().unwrap() = settings;
-    println!("[Typr] Secondary hotkey cleared");
-    Ok(())
+    change_shortcuts(&app, &state, |s| s.hotkey_secondary.clear())?; Ok(())
 }
 
 #[tauri::command]
@@ -886,7 +872,7 @@ async fn download_model(
 fn profile_override_for(state: &AppState, source: HotkeySource) -> Option<String> {
     match source {
         HotkeySource::Secondary => Some(state.settings.lock().unwrap().secondary_profile.clone()),
-        HotkeySource::Primary => None,
+        _ => None,
     }
 }
 
@@ -937,11 +923,39 @@ fn prewarm_local(app: &tauri::AppHandle) {
     });
 }
 
+async fn do_write(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    match state.recorder.get_state() {
+        RecordingState::Ready => {
+            let settings = state.settings.lock().unwrap().clone();
+            let tx = state.hotkey_tx.clone();
+            // The callback signals directly: the receiver may be awaiting ASR/AI.
+            app.global_shortcut().on_shortcut("Escape", move |app, _, event| {
+                if event.state == ShortcutState::Pressed {
+                    app.state::<AppState>().recorder.cancel_write();
+                    let _ = tx.try_send(HotkeyEvent { source: HotkeySource::CancelWrite, state: ShortcutState::Pressed });
+                }
+            }).map_err(|_| "Escape is unavailable for cancellation. Close the app using it and retry Write Mode.".to_string())?;
+            prewarm_local(app);
+            let result = state.recorder.start_write(app, &settings, &state.app_dir).await;
+            if result.is_err() || state.recorder.get_state() == RecordingState::Ready { let _ = app.global_shortcut().unregister("Escape"); }
+            result
+        }
+        RecordingState::Recording if state.recorder.is_write_active() => {
+            let settings = state.settings.lock().unwrap().clone();
+            let result = state.recorder.stop_and_transcribe(app, &settings, &state.history, &state.dictionary, &state.app_dir).await.map(|_| ());
+            let _ = app.global_shortcut().unregister("Escape");
+            result
+        }
+        _ => Err("Finish your current recording before starting Write Mode.".into()),
+    }
+}
+
 async fn do_toggle_recording(
     app: &tauri::AppHandle,
     state: &AppState,
     source: HotkeySource,
 ) -> Result<String, String> {
+    if state.recorder.is_write_active() { return Err("Finish Write Mode with its hotkey, or press Escape to cancel.".into()); }
     let current_state = state.recorder.get_state();
     match current_state {
         RecordingState::Ready => {
@@ -1077,6 +1091,8 @@ fn main() {
             delete_whisper_model,
             toggle_recording,
             set_hotkey,
+            set_write_enabled,
+            set_write_hotkey,
             suspend_hotkeys,
             resume_hotkeys,
             set_secondary_hotkey,
@@ -1387,6 +1403,26 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 while let Some(hotkey_event) = hotkey_rx.recv().await {
                     let state = rx_handle.state::<AppState>();
+                    if matches!(hotkey_event.source, HotkeySource::Write | HotkeySource::CancelWrite) {
+                        if hotkey_event.state == ShortcutState::Pressed {
+                            let result = if hotkey_event.source == HotkeySource::CancelWrite {
+                                if state.recorder.is_write_active() && state.recorder.get_state() == RecordingState::Recording {
+                                    state.recorder.cancel_write();
+                                    let settings = state.settings.lock().unwrap().clone();
+                                    let result = state.recorder.stop_and_transcribe(&rx_handle, &settings, &state.history, &state.dictionary, &state.app_dir).await.map(|_| ());
+                                    let _ = rx_handle.global_shortcut().unregister("Escape");
+                                    result
+                                } else { Ok(()) }
+                            } else { do_write(&rx_handle, state.inner()).await };
+                            if let Err(message) = result {
+                                use tauri::Emitter;
+                                let _ = rx_handle.emit("show-toast", &message);
+                                let _ = rx_handle.emit("show-notification", &message);
+                            }
+                        }
+                        continue;
+                    }
+                    if state.recorder.is_write_active() { continue; }
                     let mode = state.settings.lock().unwrap().recording_mode.clone();
                     match hotkey_event.state {
                         ShortcutState::Pressed => {
