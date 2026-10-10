@@ -13,6 +13,7 @@
 /// Professional (bullets) and Prompt Mode (markdown headers) profiles all return deliberate
 /// layout, and flattening it here silently undid the styling the AI pass had just produced.
 pub fn apply_commands(text: &str) -> String {
+    if let Some(letter) = crate::spelling::standalone_letter(text) { return letter; }
     if text.trim().is_empty() {
         return text.to_string();
     }
@@ -106,6 +107,11 @@ fn apply_commands_to_line(
                 }
 
                 match kind {
+                    Kind::Spell(letters) => {
+                        out.push_word(&letters);
+                        i += len;
+                        prev_was_command = true;
+                    }
                     Kind::Case(style) => {
                         let end = capture_end(&words, i + len);
                         let captured = &words[i + len..end];
@@ -230,6 +236,7 @@ struct Trigger {
 }
 
 enum Kind {
+    Spell(String),
     Case(Casing),
     NewLine,
     NewParagraph,
@@ -337,6 +344,9 @@ fn capture_end(words: &[&str], start: usize) -> usize {
 
 /// Match a command trigger phrase starting at word index `i` (longest phrase first).
 fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
+    if let Some((len, letters)) = crate::spelling::match_sequence(words, i) {
+        return Some(Trigger { len, kind: Kind::Spell(letters) });
+    }
     let w = |k: usize| words.get(i + k).map(|s| norm(s));
     let (w0, w1, w2, w3) = (w(0), w(1), w(2), w(3));
 
@@ -459,6 +469,7 @@ fn match_trigger(words: &[&str], i: usize) -> Option<Trigger> {
 /// Used to bypass the AI cleanup pass for command-bearing (structured/code) dictations, so the LLM
 /// can't reword or half-apply the command phrases before the deterministic pass runs.
 pub fn contains_command(text: &str) -> bool {
+    if crate::spelling::standalone_letter(text).is_some() { return true; }
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut i = 0;
     let mut is_start_of_utterance = true;

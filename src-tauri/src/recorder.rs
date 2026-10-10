@@ -42,6 +42,7 @@ pub(crate) fn notify_user(app: &AppHandle, message: &str) {
 
 #[derive(Clone)]
 pub struct Recorder {
+    pub learning: crate::learning::Learning,
     state: Arc<Mutex<RecordingState>>,
     audio_recorder: Arc<Mutex<AudioRecorder>>,
     // Per-session AI profile override (Secondary hotkey). Set when a recording starts and
@@ -62,6 +63,7 @@ pub struct Recorder {
 impl Recorder {
     pub fn new() -> Self {
         Self {
+            learning: crate::learning::Learning::default(),
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
             session_override: Arc::new(Mutex::new(None)),
@@ -179,6 +181,7 @@ impl Recorder {
         parakeet_model_dir: Option<&std::path::Path>,
     ) -> Result<(), String> {
         // 1. Transition state to Recording while holding the state lock briefly
+        self.learning.cancel(app);
         {
             let mut state = self.state.lock().unwrap();
             let reserved_write = *state == RecordingState::Transcribing && self.write_session.lock().unwrap().is_some();
@@ -404,7 +407,7 @@ impl Recorder {
         // Transcribe
         let prompt = {
             let dict = dictionary.lock().unwrap();
-            dict.get_bias_prompt()
+            dict.engine_prompt(&settings.engine,settings.dictionary_cloud_hints)
         };
 
         let engine_started_at = Instant::now();
@@ -617,9 +620,9 @@ impl Recorder {
             }
         };
 
-        // Hallucinated-fragment guard: a lone token from a multi-second capture is
-        // engine noise (a quiet-room hotkey tap pasting "D"), never dictation. Same
-        // outcome as silence today: reset, paste nothing.
+        // Punctuation/noise fragments are discarded, but an actual recognized
+        // letter is meaningful even after a pause. Audio already passed the
+        // capture's signal-based silence gate; duration cannot prove intent.
         if is_hallucinated_fragment(&raw_text, duration_secs) {
             crate::debug_log::log(app_dir, &format!("STAGE 1 [engine return]: {} (rejected: hallucinated fragment)", raw_text));
             notify_user(app, "Nothing heard — check your microphone and speak closer to it.");
@@ -645,12 +648,10 @@ impl Recorder {
 
         crate::debug_log::log(app_dir, &format!("STAGE 1 [engine return]: {}", raw_text));
 
-        // Dictionary vocabulary correction (snap close mis-hearings to exact hint
-        // spellings), then snippet/email replacements — both before the LLM.
+        // Only explicitly configured Snippets rewrite text deterministically.
         let replaced = {
             let dict = dictionary.lock().unwrap();
-            let corrected = crate::vocab_correct::correct_vocabulary(&raw_text, &dict.vocabulary_hints);
-            dict.apply_replacements(&corrected)
+            dict.apply_replacements(&raw_text)
         };
         crate::debug_log::log(app_dir, &format!("STAGE 2 [dictionary]: {}", replaced));
 
@@ -766,11 +767,10 @@ impl Recorder {
                     &settings.ai_prompt_format,
                 )
             };
-            let vocab_hints = {
-                let dict = dictionary.lock().unwrap();
-                dict.vocabulary_hints.clone()
-            };
-            let base_with_vocab = append_vocabulary_hints(base_prompt, &vocab_hints);
+            let mut base_with_vocab = append_vocabulary_hints(base_prompt, &[]);
+            let vocabulary = crate::vocabulary::cleanup_hint_for_text(&dictionary.lock().unwrap().entries, &replaced_stripped);
+            crate::debug_log::log(app_dir, &format!("AI vocabulary_chars={} engine={}", vocabulary.chars().count(), settings.engine));
+            base_with_vocab.push_str(&vocabulary);
 
             // Base prompt + the never-refuse contract + the user's cross-profile style
             // modifiers (Tone / Formatting / Custom Instructions). The modifiers land last so an
@@ -782,7 +782,7 @@ impl Recorder {
                 &settings.ai_format,
                 &settings.ai_custom_instructions,
             );
-            let budget = ai_postprocess::budget_ms(&settings.ai_profile);
+            let budget = ai_postprocess::budget_ms_for_text(&settings.ai_profile, &replaced_stripped);
             let ai_started_at = Instant::now();
             let llm = match tokio::time::timeout(
                 Duration::from_millis(budget),
@@ -799,7 +799,8 @@ impl Recorder {
                     // Metadata only: timing/model/profile, never the dictated text itself.
                     // The result's model produced this text, which is not always the
                     // one selected in settings — a fallback retry must be visible in the log.
-                    let guarded = guard_ai_output(result.text, &replaced_stripped, &settings.ai_profile, app_dir);
+                    let reference=ai_postprocess::vocabulary_validation_reference(&replaced_stripped,&result.text,&system_prompt);
+                    let guarded = guard_ai_output(result.text, &reference, &settings.ai_profile, app_dir);
                     if guarded.is_some() { crate::debug_log::log(
                         app_dir,
                         &format!(
@@ -881,9 +882,7 @@ impl Recorder {
         // deterministic and idempotent, so running them again is safe.
         let final_text = {
             let dict = dictionary.lock().unwrap();
-            let corrected =
-                crate::vocab_correct::correct_vocabulary(&final_text, &dict.vocabulary_hints);
-            dict.apply_replacements(&corrected)
+            dict.apply_replacements(&final_text)
         };
         crate::debug_log::log(app_dir, &format!("STAGE 5.5 [dictionary re-assert]: {}", final_text));
 
@@ -910,12 +909,25 @@ impl Recorder {
 
         // Auto-paste and record history
         if !final_text.is_empty() {
+            self.learning.cancel(app);
+            let marker=if settings.learn_from_corrections {
+                tokio::time::timeout(Duration::from_millis(600),tauri::async_runtime::spawn_blocking(crate::selection::prepare_observation))
+                    .await.ok().and_then(Result::ok).and_then(Result::ok)
+            } else { None };
             if let Err(e) = paste_text(&final_text) {
                 self.reset_ready(app);
                 return Err(e);
             }
             let _ = history.lock().unwrap().add_item(final_text.clone(), duration_secs, app_dir);
             let _ = app.emit("history-updated", ());
+            let known={
+                let mut dict=dictionary.lock().unwrap();
+                let _=dict.record_hits(&final_text,app_dir);
+                dict.entries.clone()
+            };
+            if let Some(marker)=marker {
+                self.learning.observe(app.clone(),marker,final_text.clone(),settings.clone(),known);
+            }
         }
 
         let total_ms = transcription_started_at.elapsed().as_millis();
@@ -1080,15 +1092,14 @@ fn should_retry_empty_batch(batch_empty: bool, live_empty: bool) -> bool {
 
 /// Whether an engine transcript is a hallucinated fragment rather than dictation.
 ///
-/// Engines emit lone tokens ("D", "a", "...") for noise on longer clips. A deliberate
-/// single-letter dictation is a quick tap well under a second; a lone token out of a
-/// multi-second capture is never intentional speech, so the pipeline treats it as
-/// silence (reset, paste nothing).
+/// Discard empty/punctuation fragments. A single spoken letter can be held or
+/// followed by a pause; never infer that it is noise solely from duration.
 pub fn is_hallucinated_fragment(raw_text: &str, duration_secs: f32) -> bool {
     if duration_secs < 1.0 {
         return false;
     }
     let squashed: String = raw_text.chars().filter(|c| c.is_alphanumeric()).collect();
+    if squashed.len() == 1 && squashed.as_bytes()[0].is_ascii_alphabetic() { return false; }
     squashed.chars().count() <= 1
 }
 
@@ -1536,9 +1547,10 @@ mod tests {
 
     #[test]
     fn test_hallucinated_fragment_guard() {
-        // The observed failure: a quiet-room hotkey tap pasted "D".
-        assert!(is_hallucinated_fragment("D", 2.5));
-        assert!(is_hallucinated_fragment("D.", 3.0));
+        // Silence is judged from audio. A pause must not delete a spoken letter.
+        assert!(!is_hallucinated_fragment("D", 2.5));
+        assert!(!is_hallucinated_fragment("D.", 3.0));
+        assert!(!is_hallucinated_fragment("g", 5.0));
         assert!(is_hallucinated_fragment("...", 2.0));
         assert!(is_hallucinated_fragment("", 5.0));
         // A deliberate single-letter dictation is a quick tap and must pass through.

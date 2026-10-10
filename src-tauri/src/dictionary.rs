@@ -42,6 +42,8 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Dictionary {
+    #[serde(default)]
+    pub entries: Vec<crate::vocabulary::Entry>,
     // Vocabulary hints are a pure recognition aid: they are sent to the engine as
     // a bias prompt to improve how it hears these terms. They NEVER rewrite the
     // transcript, so common words are never mangled. Deterministic spelling/word
@@ -77,6 +79,15 @@ impl Dictionary {
             }
         }
         
+        let mut migrated=false;
+        for term in dict.vocabulary_hints.clone() {
+            if !dict.entries.iter().any(|e| e.canonical_term.eq_ignore_ascii_case(&term)) {
+                let mut entry = crate::vocabulary::Entry::manual(term);
+                if entry.validate().is_ok() { dict.entries.push(entry); migrated=true; }
+            }
+        }
+        dict.sync_hints();
+        if migrated { let _=dict.save(app_dir); }
         dict
     }
 
@@ -84,34 +95,106 @@ impl Dictionary {
         let path = Self::config_path(app_dir);
         fs::create_dir_all(app_dir).map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| e.to_string())
+        let temporary = app_dir.join("dictionary.json.tmp");
+        fs::write(&temporary, json).map_err(|e| e.to_string())?;
+        // rename replaces atomically on Windows and Unix; a failed write leaves
+        // the last good dictionary untouched.
+        fs::rename(&temporary, &path).map_err(|e| e.to_string())
+    }
+
+    fn sync_hints(&mut self) {
+        self.vocabulary_hints = self.entries.iter().filter(|e| e.enabled).map(|e| e.canonical_term.clone()).collect();
+    }
+
+    pub fn upsert_entry(&mut self, mut entry: crate::vocabulary::Entry, app_dir: &PathBuf) -> Result<(), String> {
+        entry.validate()?;
+        let mut next = self.clone();
+        if let Some(existing) = next.entries.iter_mut().find(|e| e.id == entry.id) {
+            entry.created_at = existing.created_at;
+            entry.hit_count = existing.hit_count;
+            entry.source = existing.source.clone();
+            *existing = entry;
+        } else {
+            if next.entries.len() >= crate::vocabulary::MAX_ENTRIES { return Err("Dictionary limit reached (2,000 terms).".into()); }
+            entry.id = crate::vocabulary::new_id();
+            entry.created_at = crate::vocabulary::now_ms();
+            next.entries.push(entry);
+        }
+        let mut terms = std::collections::HashSet::new();
+        if next.entries.iter().any(|e| !terms.insert(e.canonical_term.to_lowercase())) {
+            return Err("This preferred spelling is already in your dictionary. Edit its aliases instead.".into());
+        }
+        for e in &mut next.entries { if self.entries.iter().find(|old| old.id == e.id) != Some(e) { e.updated_at = crate::vocabulary::now_ms(); } }
+        next.sync_hints(); next.save(app_dir)?; *self = next; Ok(())
+    }
+
+    pub fn delete_entry(&mut self, id: &str, app_dir: &PathBuf) -> Result<(), String> {
+        let mut next = self.clone();
+        if !next.entries.iter().any(|e| e.id == id) { return Err("Dictionary entry no longer exists.".into()); }
+        next.entries.retain(|e| e.id != id); next.sync_hints(); next.save(app_dir)?; *self = next; Ok(())
+    }
+
+    pub fn export_entries(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(&serde_json::json!({"version":1,"entries":self.entries})).map_err(|e| e.to_string())
+    }
+
+    /// Validate the whole import before changing any data. Duplicate spellings
+    /// merge aliases without overwriting local metadata or disabled status.
+    pub fn import_entries(&mut self, json: &str, app_dir: &PathBuf) -> Result<usize, String> {
+        #[derive(serde::Deserialize)] struct Document { version: u32, entries: Vec<crate::vocabulary::Entry> }
+        if json.len() > 2_000_000 { return Err("Choose a dictionary JSON smaller than 2 MB.".into()); }
+        let mut doc: Document = serde_json::from_str(json).map_err(|_| "Invalid dictionary JSON.".to_string())?;
+        if doc.version != 1 || doc.entries.len() > crate::vocabulary::MAX_ENTRIES { return Err("Unsupported dictionary version or too many entries.".into()); }
+        for e in &mut doc.entries { e.validate()?; }
+        let count = doc.entries.len(); let mut next = self.clone();
+        for mut e in doc.entries {
+            if let Some(old) = next.entries.iter_mut().find(|old| old.canonical_term.eq_ignore_ascii_case(&e.canonical_term)) {
+                old.aliases.extend(e.aliases); old.validate()?; old.updated_at=crate::vocabulary::now_ms();
+            } else {
+                // Imported IDs are untrusted; always allocate a local identity.
+                e.id=crate::vocabulary::new_id(); next.entries.push(e);
+            }
+        }
+        if next.entries.len() > crate::vocabulary::MAX_ENTRIES { return Err("Import would exceed 2,000 terms.".into()); }
+        next.sync_hints(); next.save(app_dir)?; *self=next; Ok(count)
+    }
+
+    pub fn record_hits(&mut self, transcript: &str, app_dir: &PathBuf) -> Result<(), String> {
+        let mut next=self.clone(); let mut changed=false;
+        for e in &mut next.entries {
+            if e.enabled && crate::vocabulary::contains_term(transcript, &e.canonical_term) {
+                e.hit_count=e.hit_count.saturating_add(1); changed=true;
+            }
+        }
+        if changed { next.save(app_dir)?; *self=next; } Ok(())
+    }
+
+    pub fn engine_prompt(&self, engine: &str, cloud_opt_in: bool) -> String {
+        if engine == "cloud" && !cloud_opt_in || !matches!(engine,"local"|"cloud") { return String::new(); }
+        let mut prompt=crate::vocabulary::hotwords(&self.entries,500);
+        for r in &self.replacements {
+            let term=r.find.trim();
+            if term.is_empty() || crate::vocabulary::contains_term(&prompt,term) { continue; }
+            let addition=format!("{}{}",if prompt.is_empty(){""}else{", "},term);
+            if prompt.chars().count()+addition.chars().count()<=500 { prompt.push_str(&addition); }
+        }
+        prompt
     }
 
     // --- Vocabulary Hints ---
 
     pub fn add_vocabulary_hint(&mut self, word: String, app_dir: &PathBuf) -> Result<(), String> {
-        let trimmed = word.trim().to_string();
-        if trimmed.is_empty() {
-            return Err("Word cannot be empty.".to_string());
-        }
-        // De-duplicate case-insensitively so "Claude"/"claude" don't both linger.
-        if !self
-            .vocabulary_hints
-            .iter()
-            .any(|w| w.eq_ignore_ascii_case(&trimmed))
-        {
-            self.vocabulary_hints.push(trimmed);
-            self.save(app_dir)?;
-        }
-        Ok(())
+        if self.entries.iter().any(|e| e.canonical_term.eq_ignore_ascii_case(word.trim())) { return Ok(()); }
+        self.upsert_entry(crate::vocabulary::Entry::manual(word), app_dir)
     }
 
     pub fn remove_vocabulary_hint(&mut self, index: usize, app_dir: &PathBuf) -> Result<(), String> {
         if index >= self.vocabulary_hints.len() {
             return Err("Invalid dictionary index.".to_string());
         }
-        self.vocabulary_hints.remove(index);
-        self.save(app_dir)
+        let term=&self.vocabulary_hints[index];
+        let id=self.entries.iter().find(|e| &e.canonical_term==term).map(|e|e.id.clone()).ok_or("Dictionary entry no longer exists.")?;
+        self.delete_entry(&id,app_dir)
     }
 
     // Backwards compatible aliases
@@ -349,6 +432,46 @@ fn preserve_case(matched: &str, replacement: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rich_dictionary_roundtrip_and_no_alias_replacement() {
+        let dir=std::env::temp_dir().join(crate::vocabulary::new_id());
+        let mut dict=Dictionary::default();
+        let mut entry=crate::vocabulary::Entry::manual("Supabase".into());
+        entry.aliases=vec!["supper base".into()]; entry.category=crate::vocabulary::Category::Product;
+        entry.source=crate::vocabulary::Source::Learned; entry.confidence=0.85; entry.notes="Database platform".into();
+        dict.upsert_entry(entry,&dir).unwrap(); dict.record_hits("Deploy to Supabase.",&dir).unwrap();
+        assert_eq!(dict.entries[0].hit_count,1);
+        assert_eq!(dict.apply_replacements("supper base"),"supper base");
+        let mut imported=Dictionary::default(); imported.import_entries(&dict.export_entries().unwrap(),&dir).unwrap();
+        let mut original=dict.entries[0].clone(); original.id=imported.entries[0].id.clone();
+        assert_eq!(original,imported.entries[0]);
+        assert_eq!(Dictionary::load(&dir).entries,imported.entries);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn import_is_atomic_and_merges_without_enabling_disabled_entries() {
+        let dir=std::env::temp_dir().join(crate::vocabulary::new_id());
+        let mut dict=Dictionary::default(); let mut e=crate::vocabulary::Entry::manual("Tauri".into());
+        e.enabled=false; dict.upsert_entry(e.clone(),&dir).unwrap();
+        e.aliases=vec!["tory".into()];
+        let good=serde_json::json!({"version":1,"entries":[e.clone()]});
+        dict.import_entries(&good.to_string(),&dir).unwrap();
+        assert!(!dict.entries[0].enabled); assert_eq!(dict.entries[0].aliases,vec!["tory"]);
+        assert!(Dictionary::load(&dir).vocabulary_hints.is_empty());
+        let before=dict.export_entries().unwrap(); e.canonical_term="".into();
+        assert!(dict.import_entries(&serde_json::json!({"version":1,"entries":[e]}).to_string(),&dir).is_err());
+        assert_eq!(dict.export_entries().unwrap(),before);
+        assert!(dict.import_entries(r#"{"version":2,"entries":[]}"#,&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn cloud_opt_in_and_engine_capability_are_enforced() {
+        let mut dict=Dictionary::default(); dict.entries.push(crate::vocabulary::Entry::manual("Tauri".into()));
+        assert_eq!(dict.engine_prompt("local",false),"Tauri");
+        assert!(dict.engine_prompt("cloud",false).is_empty());
+        assert_eq!(dict.engine_prompt("cloud",true),"Tauri");
+        assert!(dict.engine_prompt("parakeet",true).is_empty()); assert!(dict.engine_prompt("nemotron",true).is_empty());
+    }
 
     #[test]
     fn replacements_preserve_layout_and_literal_snippets() {

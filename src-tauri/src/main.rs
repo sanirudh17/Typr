@@ -365,6 +365,7 @@ async fn save_settings(
     mut settings: Settings,
 ) -> Result<(), String> {
     settings.normalize_startup();
+    state.recorder.learning.cancel(&app);
 
     // Reconcile the OS auto-start registry entry with the toggle.
     let autolaunch = app.autolaunch();
@@ -386,6 +387,7 @@ async fn save_settings(
 
     settings.save(&state.app_dir)?;
     *state.settings.lock().unwrap() = settings.clone();
+    state.recorder.learning.set_enabled(settings.learn_from_corrections);
 
     if old_settings.theme != settings.theme {
         if let Some(win) = app.get_webview_window("main") {
@@ -530,6 +532,95 @@ fn set_secondary_profile(state: State<AppState>, profile: String) -> Result<(), 
 fn get_dictionary(state: State<AppState>) -> Dictionary {
     state.dictionary.lock().unwrap().clone()
 }
+#[tauri::command]
+fn save_dictionary_entry(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    entry: typr_lib::vocabulary::Entry,
+) -> Result<(), String> {
+    state
+        .dictionary
+        .lock()
+        .unwrap()
+        .upsert_entry(entry, &state.app_dir)?;
+    use tauri::Emitter;
+    let _ = app.emit("dictionary-updated", ());
+    Ok(())
+}
+#[tauri::command]
+fn delete_dictionary_entry(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .dictionary
+        .lock()
+        .unwrap()
+        .delete_entry(&id, &state.app_dir)?;
+    use tauri::Emitter;
+    let _ = app.emit("dictionary-updated", ());
+    Ok(())
+}
+#[tauri::command]
+fn import_dictionary(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    json: String,
+) -> Result<usize, String> {
+    let count = state
+        .dictionary
+        .lock()
+        .unwrap()
+        .import_entries(&json, &state.app_dir)?;
+    use tauri::Emitter;
+    let _ = app.emit("dictionary-updated", ());
+    Ok(count)
+}
+#[tauri::command]
+fn export_dictionary(state: State<AppState>) -> Result<String, String> {
+    state.dictionary.lock().unwrap().export_entries()
+}
+#[tauri::command]
+fn get_learning_suggestion(state: State<AppState>) -> Option<typr_lib::learning::Suggestion> {
+    state.recorder.learning.pending()
+}
+#[tauri::command]
+fn accept_learning_suggestion(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap();
+    if !settings.learn_from_corrections {
+        return Err("Learn from corrections is off.".into());
+    }
+    state.recorder.learning.accept_with(&id, |candidate| {
+        let mut dict = state.dictionary.lock().unwrap();
+        let mut entry = dict
+            .entries
+            .iter()
+            .find(|e| e.canonical_term.eq_ignore_ascii_case(&candidate.correct))
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut e = typr_lib::vocabulary::Entry::manual(candidate.correct.clone());
+                e.source = typr_lib::vocabulary::Source::Learned;
+                e.confidence = candidate.confidence;
+                e
+            });
+        entry.aliases.push(candidate.wrong.clone());
+        dict.upsert_entry(entry, &state.app_dir)
+    })?;
+    drop(settings);
+    state.recorder.learning.cancel(&app);
+    use tauri::Emitter;
+    let _ = app.emit("dictionary-updated", ());
+    Ok(())
+}
+#[tauri::command]
+fn dismiss_learning_suggestion(app: tauri::AppHandle, state: State<AppState>, id: String) {
+    state.recorder.learning.dismiss(&id, &app);
+}
 
 #[tauri::command]
 fn add_dictionary_word(state: State<AppState>, word: String) -> Result<(), String> {
@@ -615,6 +706,7 @@ async fn clear_local_data(app: tauri::AppHandle) -> Result<typr_lib::data_cleanu
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let report = state.recorder.run_when_idle(|| {
+            state.recorder.learning.cancel(&app);
             let mut history = state.history.lock().unwrap();
             typr_lib::data_cleanup::clear_local_data(&state.app_dir, &mut history)
         })?;
@@ -627,11 +719,6 @@ async fn clear_local_data(app: tauri::AppHandle) -> Result<typr_lib::data_cleanu
 #[tauri::command]
 fn update_transcription(state: State<AppState>, id: String, text: String) -> Result<(), String> {
     state.history.lock().unwrap().update_item(&id, text, &state.app_dir)
-}
-
-#[tauri::command]
-fn propose_correction(old: String, new: String) -> Option<typr_lib::history::Correction> {
-    typr_lib::history::propose_correction(&old, &new)
 }
 
 #[tauri::command]
@@ -1048,6 +1135,8 @@ fn main() {
     let history = History::load(&app_dir);
     let dictionary = Dictionary::load(&app_dir);
     let initial_hotkey = settings.hotkey.clone();
+    let recorder=Recorder::new();
+    recorder.learning.set_enabled(settings.learn_from_corrections);
 
     let (hotkey_tx, hotkey_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(32);
 
@@ -1066,7 +1155,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState {
-            recorder: Recorder::new(),
+            recorder,
             settings: Mutex::new(settings),
             history: Mutex::new(history),
             dictionary: Mutex::new(dictionary),
@@ -1102,9 +1191,15 @@ fn main() {
             delete_transcription,
             clear_local_data,
             update_transcription,
-            propose_correction,
             write_text_file,
             get_dictionary,
+            save_dictionary_entry,
+            delete_dictionary_entry,
+            import_dictionary,
+            export_dictionary,
+            get_learning_suggestion,
+            accept_learning_suggestion,
+            dismiss_learning_suggestion,
             add_dictionary_word,
             remove_dictionary_word,
             add_vocabulary_hint,

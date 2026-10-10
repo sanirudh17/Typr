@@ -1,0 +1,6 @@
+{
+  "identifier": "learning",
+  "description": "Local correction suggestion events",
+  "windows": ["learning"],
+  "permissions": ["core:event:default"]
+}

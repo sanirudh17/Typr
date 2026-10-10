@@ -20,6 +20,16 @@ pub fn capture() -> Result<Selection, String> {
         Err("Write Mode currently supports Windows.".into())
     }
 }
+/// Read-only, bounded anchor for a normal dictation insertion. Unlike Write
+/// Mode it permits an empty caret selection and never simulates copy.
+pub fn prepare_observation() -> Result<Selection, String> {
+    #[cfg(windows)] { native::prepare_observation() }
+    #[cfg(not(windows))] { Err("Edit observation currently supports Windows.".into()) }
+}
+pub fn observed_passage(marker: &Selection) -> Result<String, String> {
+    #[cfg(windows)] { native::observed_passage(marker) }
+    #[cfg(not(windows))] { let _=marker; Err("Edit observation currently supports Windows.".into()) }
+}
 pub fn replace(
     selection: &Selection,
     text: &str,
@@ -185,6 +195,9 @@ mod native {
         }
     }
     fn text_selection(element: &IUIAutomationElement) -> Result<(String, Anchor), String> {
+        anchored_selection(element, true)
+    }
+    fn anchored_selection(element: &IUIAutomationElement, require_text: bool) -> Result<(String, Anchor), String> {
         unsafe {
             let pattern: IUIAutomationTextPattern = element
                 .GetCurrentPatternAs(UIA_TextPatternId)
@@ -195,7 +208,7 @@ mod native {
             }
             let range = ranges.GetElement(0).map_err(err)?;
             let text = range.GetText(12001).map_err(err)?.to_string();
-            validate_length(&text)?;
+            if require_text { validate_length(&text)?; }
             let document = pattern.DocumentRange().map_err(err)?;
             if document.GetText(MAX_DOCUMENT + 1).map_err(err)?.len() > MAX_DOCUMENT as usize {
                 return Err("This document is too large for safe in-place editing. Use a smaller editor document.".into());
@@ -224,6 +237,29 @@ mod native {
                 },
             ))
         }
+    }
+    pub(super) fn prepare_observation() -> Result<Selection, String> {
+        let _com=Apartment::new()?;
+        let (_,element,target)=focused()?;
+        let (text,anchor)=anchored_selection(&element,false)?;
+        Ok(Selection { text, target, anchor:Some(anchor) })
+    }
+    pub(super) fn observed_passage(marker: &Selection) -> Result<String,String> {
+        let _com=Apartment::new()?;
+        let (_,element,target)=focused()?;
+        if target != marker.target { return Err(CHANGED.into()); }
+        let anchor=marker.anchor.as_ref().ok_or(CHANGED)?;
+        let document=unsafe {
+            let pattern: IUIAutomationTextPattern=element.GetCurrentPatternAs(UIA_TextPatternId).map_err(err)?;
+            pattern.DocumentRange().map_err(err)?.GetText(MAX_DOCUMENT+1).map_err(err)?.to_string()
+        };
+        if document.len()>MAX_DOCUMENT as usize { return Err(CHANGED.into()); }
+        let doc=normalized(&document);
+        let prefix=normalized(&anchor.prefix); let suffix=normalized(&anchor.suffix);
+        if !doc.starts_with(&prefix) || !doc.ends_with(&suffix) || doc.len()<prefix.len()+suffix.len() { return Err(CHANGED.into()); }
+        let passage=&doc[prefix.len()..doc.len()-suffix.len()];
+        if passage.chars().count()>6000 { return Err(CHANGED.into()); }
+        Ok(passage.to_string())
     }
     fn validate_length(text: &str) -> Result<(), String> {
         if text.trim().is_empty() {

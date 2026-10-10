@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>Learn a word — Typr</title><link rel="stylesheet" href="/src/style.css" /></head>
+  <body class="learning-window">
+    <main class="learning-toast" aria-label="Add a dictionary word">
+      <div class="learning-copy"><p id="learning-pair" role="status"></p><p id="learning-error" class="dictionary-error" role="alert"></p></div>
+      <button id="learning-accept" class="btn-primary" aria-label="Yes, add this word to dictionary">Yes</button>
+      <button id="learning-dismiss" class="btn-secondary" aria-label="No, dismiss this suggestion">No</button>
+      <div id="learning-progress" role="progressbar" aria-label="Suggestion time elapsed" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+    </main>
+    <script type="module" src="/src/learning.ts"></script>
+  </body>
+</html>

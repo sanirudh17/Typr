@@ -1,3 +1,4 @@
+import { initDictionaryFeature, renderVocabulary, syncLearningSettings, type VocabularyEntry } from "./dictionary";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -33,6 +34,11 @@ interface Settings {
   dismissedUpdateVersion: string;
   writeEnabled: boolean;
   writeHotkey: string;
+  learnFromCorrections: boolean;
+  dictionaryCloudHints: boolean;
+  learningObservationSeconds: number;
+  learningSuggestionSeconds: number;
+  learningMaxPhraseChars: number;
 }
 
 interface AppRule {
@@ -465,6 +471,7 @@ async function loadSettings() {
   currentSettings = await invoke<Settings>("get_settings");
   await loadHistory();
   await loadDictionary();
+  syncLearningSettings();
 
   // Populate mic dropdown
   await populateMics();
@@ -1513,7 +1520,6 @@ let cachedHistory: History | null = null;
 let historyEpoch = 0;
 let historyLoadGeneration = 0;
 
-interface Correction { find: string; replace: string; }
 
 // Transient toast with a 5s Undo window. onExpire fires if the user does not
 // click Undo before the window closes (used to commit a delete to disk).
@@ -1552,72 +1558,6 @@ function showUndoToast(
     toast.remove();
     onUndo();
   };
-}
-
-// After a save that changed the text, ask the backend for the corrected term
-// and, if there is one, offer to add it to the Dictionary as a spelling hint.
-// A hint only *biases* the engine toward that spelling — it never rewrites text,
-// so common words are never mangled (unlike a strict snippet replacement).
-// Only writes when the user clicks Add.
-async function maybeOfferCorrection(id: string, oldText: string, newText: string) {
-  const corr = await invoke<Correction | null>("propose_correction", { old: oldText, new: newText });
-  if (!corr || corr.replace.trim() === "") return;
-
-  const card = document.querySelector<HTMLElement>(`.feed-item[data-id="${id}"]`);
-  if (!card) return;
-
-  const panel = document.createElement("div");
-  panel.className = "learn-panel";
-
-  const label = document.createElement("span");
-  label.className = "learn-panel-label";
-  label.textContent = "Remember this spelling?";
-
-  const termInput = document.createElement("input");
-  termInput.className = "learn-panel-input";
-  termInput.value = corr.replace;
-
-  const addBtn = document.createElement("button");
-  addBtn.className = "btn-primary";
-  addBtn.textContent = "Add to Dictionary";
-
-  const dismissBtn = document.createElement("button");
-  dismissBtn.className = "btn-secondary";
-  dismissBtn.textContent = "Dismiss";
-
-  const note = document.createElement("span");
-  note.className = "learn-panel-note";
-  note.textContent = "Biases the engine toward this spelling — never rewrites your text.";
-
-  addBtn.onclick = async () => {
-    const term = termInput.value.trim();
-    if (term === "") {
-      label.textContent = "Enter a term first.";
-      return;
-    }
-    try {
-      await invoke("add_vocabulary_hint", { word: term });
-      loadDictionary(); // refresh the Dictionary tab so the hint shows immediately
-      panel.innerHTML = "";
-      const done = document.createElement("span");
-      done.className = "learn-panel-label";
-      done.textContent = "Added to Dictionary ✓";
-      panel.appendChild(done);
-      setTimeout(() => panel.remove(), 2000);
-    } catch (err) {
-      label.textContent = String(err);
-    }
-  };
-
-  dismissBtn.onclick = () => panel.remove();
-
-  panel.appendChild(label);
-  panel.appendChild(termInput);
-  panel.appendChild(addBtn);
-  panel.appendChild(dismissBtn);
-  panel.appendChild(note);
-
-  card.insertAdjacentElement("afterend", panel);
 }
 
 // Flip a history card into an inline editor. Save persists via
@@ -1661,7 +1601,6 @@ function enterEditMode(card: HTMLElement, item: TranscriptionItem) {
       item.text = newText;
       item.word_count = newText.split(/\s+/).filter(Boolean).length;
       loadHistory(false);
-      maybeOfferCorrection(item.id, oldText, newText);
     } catch (err) {
       console.error(err);
     }
@@ -1868,13 +1807,10 @@ interface ReplacementEntry {
 interface DictionaryData {
   vocabulary_hints: string[];
   replacements: ReplacementEntry[];
+  entries: VocabularyEntry[];
 }
 
 // Spelling Hints selectors
-const dictHintWordInput = document.getElementById("dict-hint-word") as HTMLInputElement;
-const dictHintAddBtn = document.getElementById("dict-hint-add-btn")!;
-const dictHintsList = document.getElementById("dict-hints-list")!;
-
 // Text Replacements selectors
 const replaceFindInput = document.getElementById("replace-find") as HTMLInputElement;
 const replaceWithInput = document.getElementById("replace-with") as HTMLInputElement;
@@ -1885,38 +1821,7 @@ const dictReplacementsList = document.getElementById("dict-replacements-list")!;
 async function loadDictionary() {
   const data = await invoke<DictionaryData>("get_dictionary");
   
-  // 1. Render Spelling Hints List
-  dictHintsList.innerHTML = "";
-  const hints = data.vocabulary_hints || [];
-  
-  if (hints.length === 0) {
-    dictHintsList.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px; text-align: center; padding: 20px;">No spelling hints added yet.</div>';
-  } else {
-    hints.forEach((word, index) => {
-      const row = document.createElement("div");
-      row.className = "dict-entry";
-
-      const wordSpan = document.createElement("span");
-      wordSpan.className = "dict-entry-word";
-      wordSpan.textContent = word;
-
-      const actions = document.createElement("div");
-      actions.className = "dict-entry-actions";
-
-      const deleteBtn = document.createElement("button");
-      deleteBtn.className = "dict-btn dict-btn-delete";
-      deleteBtn.textContent = "Delete";
-      deleteBtn.onclick = async () => {
-        await invoke("remove_vocabulary_hint", { index });
-        loadDictionary();
-      };
-
-      actions.appendChild(deleteBtn);
-      row.appendChild(wordSpan);
-      row.appendChild(actions);
-      dictHintsList.appendChild(row);
-    });
-  }
+  renderVocabulary(data.entries || []);
 
   // 2. Render Text Replacements List
   dictReplacementsList.innerHTML = "";
@@ -1962,19 +1867,6 @@ async function loadDictionary() {
     dictReplacementsList.appendChild(row);
   });
 }
-
-// Add Spelling Hint Handler
-dictHintAddBtn.addEventListener("click", async () => {
-  const word = dictHintWordInput.value.trim();
-  if (!word) return;
-  await invoke("add_vocabulary_hint", { word });
-  dictHintWordInput.value = "";
-  loadDictionary();
-});
-
-dictHintWordInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") dictHintAddBtn.click();
-});
 
 // Add Text Replacement Handler
 replaceAddBtn.addEventListener("click", async () => {
@@ -2626,6 +2518,8 @@ const revealTimer = setTimeout(revealWindow, 600);
 
 // The startup check runs only once settings are in hand — the banner has to know which
 // version was already dismissed, and currentSettings is unset until the load resolves.
+initDictionaryFeature({ settings: () => currentSettings, save: saveSettings, toast: showToast, reload: loadDictionary });
+
 loadSettings().finally(() => {
   clearTimeout(revealTimer);
   revealWindow();

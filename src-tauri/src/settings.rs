@@ -63,7 +63,17 @@ pub struct Settings {
     pub write_enabled: bool,
     #[serde(rename = "writeHotkey", default = "default_write_hotkey")]
     pub write_hotkey: String,
+    // Compatibility fields for older settings files. Both features are now
+    // always enabled; normalize_startup also migrates explicit old false values.
+    #[serde(rename="learnFromCorrections",default="default_true")] pub learn_from_corrections: bool,
+    #[serde(rename="dictionaryCloudHints",default="default_true")] pub dictionary_cloud_hints: bool,
+    #[serde(rename="learningObservationSeconds",default="default_observation")] pub learning_observation_seconds: u32,
+    #[serde(rename="learningSuggestionSeconds",default="default_suggestion")] pub learning_suggestion_seconds: u32,
+    #[serde(rename="learningMaxPhraseChars",default="default_phrase")] pub learning_max_phrase_chars: u32,
 }
+fn default_observation()->u32 {60}
+fn default_suggestion()->u32 {10}
+fn default_phrase()->u32 {12}
 
 fn default_write_hotkey() -> String { "CmdOrCtrl+Shift+W".into() }
 
@@ -144,6 +154,11 @@ impl Default for Settings {
             developer_strip_filler: true,
             write_enabled: false,
             write_hotkey: default_write_hotkey(),
+            learn_from_corrections: true,
+            dictionary_cloud_hints: true,
+            learning_observation_seconds: default_observation(),
+            learning_suggestion_seconds: default_suggestion(),
+            learning_max_phrase_chars: default_phrase(),
         }
     }
 }
@@ -155,10 +170,12 @@ impl Settings {
 
     pub fn load(app_dir: &PathBuf) -> Self {
         let path = Self::config_path(app_dir);
-        match fs::read_to_string(&path) {
+        let mut settings: Self = match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
-        }
+        };
+        settings.normalize_startup();
+        settings
     }
 
     pub fn save(&self, app_dir: &PathBuf) -> Result<(), String> {
@@ -172,6 +189,11 @@ impl Settings {
     /// window close would be pointless. Enabling autostart forces background on;
     /// disabling autostart leaves background as the user set it.
     pub fn normalize_startup(&mut self) {
+        self.learn_from_corrections=true;
+        self.dictionary_cloud_hints=true;
+        self.learning_observation_seconds=self.learning_observation_seconds.clamp(10,60);
+        self.learning_suggestion_seconds=self.learning_suggestion_seconds.clamp(5,60);
+        self.learning_max_phrase_chars=self.learning_max_phrase_chars.clamp(2,32);
         if self.autostart {
             self.background_mode = true;
         }
@@ -181,6 +203,24 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn learning_defaults_and_limits() {
+        let mut s=Settings::default(); assert!(s.learn_from_corrections); assert!(s.dictionary_cloud_hints);
+        assert_eq!((s.learning_observation_seconds,s.learning_suggestion_seconds,s.learning_max_phrase_chars),(60,10,12));
+        let mut legacy=serde_json::to_value(&s).unwrap();
+        for key in ["learnFromCorrections","dictionaryCloudHints","learningObservationSeconds","learningSuggestionSeconds","learningMaxPhraseChars"] {legacy.as_object_mut().unwrap().remove(key);}
+        let parsed:Settings=serde_json::from_value(legacy).unwrap(); assert_eq!(parsed,s);
+        s.learning_observation_seconds=0; s.learning_suggestion_seconds=100; s.learning_max_phrase_chars=500;
+        s.normalize_startup(); assert_eq!((s.learning_observation_seconds,s.learning_suggestion_seconds,s.learning_max_phrase_chars),(10,60,32));
+    }
+    #[test]
+    fn old_disabled_dictionary_settings_migrate_to_always_on() {
+        let mut s=Settings::default(); s.learn_from_corrections=false; s.dictionary_cloud_hints=false;
+        s.normalize_startup(); assert!(s.learn_from_corrections); assert!(s.dictionary_cloud_hints);
+        let dir=std::env::temp_dir().join(format!("typr-dictionary-settings-{}",crate::vocabulary::new_id()));
+        s.learn_from_corrections=false; s.dictionary_cloud_hints=false; s.save(&dir).unwrap();
+        let restored=Settings::load(&dir); assert!(restored.learn_from_corrections); assert!(restored.dictionary_cloud_hints);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use std::env::temp_dir;
 
     #[test]

@@ -613,6 +613,8 @@
               <div class="cmd-row"><span class="cmd-say">&ldquo;snake case max retry count&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">max_retry_count</code></div>
               <div class="cmd-row"><span class="cmd-say">&ldquo;constant case max buffer size&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">MAX_BUFFER_SIZE</code></div>
               <div class="cmd-row"><span class="cmd-say">&ldquo;kebab case main nav bar&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">main-nav-bar</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;spell G P U I end spelling&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">GPUI</code></div>
+              <div class="cmd-row"><span class="cmd-say">&ldquo;spell golf papa uniform india end spelling&rdquo;</span><span class="cmd-arrow">&rarr;</span><code class="cmd-out">GPUI</code></div>
             </div>
           </div>
 
@@ -758,35 +760,43 @@
         <section id="section-dictionary" class="content-section">
           <div class="section-header">
             <h2 class="section-title">Dictionary</h2>
-            <p class="section-desc">Teach the transcription engine your names and terms</p>
+            <p class="section-desc">Names and spellings you want Typr to remember</p>
           </div>
 
-          <div class="info-card">
-            <div class="info-card-title">How hints work</div>
-            <div class="info-card-body">Hints are a <b>recognition aid</b>. Your terms &mdash; <code>Tauri</code>, <code>IBM Plex</code>, <code>agentic</code> &mdash; are sent to the engine so it is more likely to hear and spell them correctly. They only nudge it; they never rewrite your text, so everyday words are never mangled.<br><br>Need a term to come out a specific way <b>every</b> time, or a shortcut expanded? Use <b>Snippets</b> instead.</div>
+          <div class="dictionary-toolbar dictionary-main-toolbar">
+            <input id="dictionary-search" class="dict-input" type="search" placeholder="Search your terms" aria-label="Search dictionary" />
+            <button id="dictionary-new" class="btn-primary" type="button">Add term</button>
           </div>
-
-          <div class="settings-list">
-            <div class="setting-row setting-block">
-              <div class="setting-label">
-                <span class="label-text">Add a hint</span>
-                <span class="label-hint">A name, brand, or rare term the engine keeps getting wrong.</span>
-              </div>
-              <div class="dict-add-row">
-                <input type="text" id="dict-hint-word" class="dict-input" placeholder="e.g. Tauri" />
-                <button id="dict-hint-add-btn" class="btn-primary">Add Hint</button>
-              </div>
-            </div>
-            <div class="setting-row setting-block">
-              <div class="setting-label">
-                <span class="label-text">Active hints</span>
-                <span class="label-hint">Sent with every transcription. Keep the list short so each term carries weight.</span>
-              </div>
-              <div id="dict-hints-list" class="dict-list-container">
-                <!-- Injected via JS -->
-              </div>
-            </div>
+          <div id="dictionary-editor" class="hidden">
+              <form id="dictionary-form" class="dictionary-form">
+                <label>Preferred spelling<input id="dict-hint-word" class="dict-input" placeholder="e.g. Supabase" maxlength="64" required /></label>
+                <label>Also heard as (optional)<input id="dictionary-aliases" class="dict-input" placeholder="e.g. supper base, super base" maxlength="2080" /></label>
+                <details class="dictionary-details dictionary-form-details">
+                  <summary>Category and context</summary>
+                  <div class="dictionary-extra-fields">
+                <label>Category<select id="dictionary-category"><option value="other">Other</option><option value="person">Person</option><option value="product">Product</option><option value="technical">Technical</option><option value="acronym">Acronym</option></select></label>
+                <label>Context notes (optional)<input id="dictionary-notes" class="dict-input" placeholder="e.g. Our database platform" maxlength="500" /></label>
+                  </div>
+                </details>
+                <div class="dictionary-toolbar"><button id="dict-hint-add-btn" class="btn-primary" type="submit">Add term</button><button id="dictionary-cancel" class="btn-secondary" type="button">Cancel</button></div>
+                <p id="dictionary-error" class="dictionary-error" role="alert"></p>
+              </form>
           </div>
+          <p id="dictionary-count" class="dictionary-count"></p>
+          <div id="dict-hints-list" class="dict-list-container" aria-live="polite"></div>
+          <p class="dictionary-help dictionary-learning-note">Correct a name after dictation and choose <b>Yes</b> to add its spelling.</p>
+          <details class="dictionary-details dictionary-tools">
+            <summary>Learning options</summary>
+            <div class="dictionary-tools-body">
+              <div class="learning-options">
+                <label>Watch edits (seconds)<input id="learning-observation" type="number" min="10" max="60" value="60" class="dict-input" /></label>
+                <label>Show suggestion (seconds)<input id="learning-suggestion" type="number" min="5" max="60" value="10" class="dict-input" /></label>
+                <label>Max phrase (characters)<input id="learning-phrase" type="number" min="2" max="32" value="12" class="dict-input" /></label>
+              </div>
+              <p class="dictionary-help">Learning is always active; every addition needs your confirmation. Confirmed terms accompany cloud transcription and AI cleanup. Observed edits and pending suggestions stay on this device.</p>
+              <p class="dictionary-help">Local Whisper uses recognition hints with AI off. Parakeet and Nemotron use your terms through AI cleanup; their current decoders do not support recognition hints. Dictionary never creates a Snippet replacement.</p>
+            </div>
+          </details>
         </section>
 
         <section id="section-snippets" class="content-section">

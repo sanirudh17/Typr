@@ -11,6 +11,7 @@ export default defineConfig(async () => ({
       input: {
         main: "index.html",
         overlay: "src/overlay.html",
+        learning: "src/learning.html",
       },
     },
   },

@@ -47,6 +47,14 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 
 ## Features
 
+**Auto-Learning Dictionary**
+- Manage preferred spellings, aliases, categories and context notes.
+- Local correction observation is always active and suggests names you fix after dictation. The slim bar asks **Add ‘word’ to dictionary?** Choose **Yes** to add it; **No**, Escape or expiry discard it.
+- Local Whisper uses ranked recognition hints even with AI cleanup off. Confirmed terms also accompany cloud recognition and context-aware AI cleanup automatically.
+- Current Parakeet/Nemotron decoders do not support hotword biasing. Edit observation depends on Windows accessibility support; add terms directly in **Dictionary** when observation is unavailable.
+- [Details, privacy, limitations and a short check](docs/AUTO_LEARNING_DICTIONARY.md).
+- [Focused check using saved dictionary words](docs/DICTIONARY_FOCUSED_CHECK.md).
+
 **Dictation**
 - **Toggle or Push-to-Talk**, on a global hotkey (default `Ctrl+Shift+Space`) that works from any app.
 - **Types directly into the focused window** rather than leaving text on your clipboard.
@@ -67,12 +75,13 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 
 **Voice commands** — spoken mid-sentence, applied offline, and independent of whether AI cleanup is on
 - Casing: *"camel case get user by id"* → `getUserById`
+- Spelling: *"spell G P U I end spelling"* → `GPUI`. Use *"spell golf papa uniform india end spelling"* if the speech model confuses individual letters. Recognized standalone letters are retained; spelling commands never guess letters missing from the transcript.
 - Layout: *"new line"*, *"new paragraph"*, *"new bullet"*
 - Symbols: *"open paren"*, *"semicolon"*, *"hyphen"*
 - Editing: *"scratch that"*, *"delete last word"*, *"all caps that"*, *"make it a list"*
 
 **Getting your words right**
-- **Dictionary** — names and rare terms are sent to the engine so it is likelier to hear them correctly. These bias recognition; they never rewrite your text, so ordinary words are never mangled.
+- **Dictionary** — preferred spellings bias supported recognition engines and guide contextual AI cleanup. Current Parakeet/Nemotron decoders use these terms through AI cleanup. Dictionary never applies a deterministic replacement rule; ambiguous recognition can still be wrong.
 - **Snippets** — exact find-and-replace rules that always fire. Good for a word that is always misheard the same way, or for expanding a shortcut like `brb` or `my email`.
 
 **Around the app**
@@ -175,7 +184,7 @@ Qwen is the default because it was both quickest and produced the best-structure
 
 **Recording** — Toggle or Push-to-Talk, the main hotkey, and an optional second hotkey with its own AI profile.
 
-**Dictionary** — recognition hints. These bias the engine and never rewrite text.
+**Dictionary** — preferred spellings and context notes, with recognition hints where the engine supports them and contextual spelling guidance during AI cleanup.
 
 **Snippets** — exact replacements that always fire. Use these when a hint is not forceful enough.
 
@@ -428,7 +437,9 @@ Typr/
     │   ├── ai_postprocess.rs   # profiles, prompts, model fallback
     │   ├── context_detector.rs # focused app → writing style
     │   ├── commands.rs         # spoken voice commands
-    │   ├── dictionary.rs       # hints and snippets
+    │   ├── dictionary.rs       # vocabulary persistence and snippets
+    │   ├── vocabulary.rs       # ranking, hints and correction candidates
+    │   ├── learning.rs         # observation sessions and confirmation
     │   ├── cleanup.rs          # deterministic fallback cleanup
     │   ├── hotkey.rs  paste.rs  history.rs  settings.rs
     │   └── ...
@@ -444,7 +455,7 @@ Settings, history, dictionary, and snippets are stored as plain JSON in your use
 ```
 %APPDATA%\com.typr.app\
 ├── config.json        # settings, including your Groq API key
-├── dictionary.json    # hints and snippets
+├── dictionary.json    # vocabulary entries and snippets
 ├── history.json       # transcription history
 └── ggml-*.bin         # downloaded Whisper models
 ```
@@ -463,7 +474,7 @@ Where your audio and text go depends on which engine you choose, so it is worth 
 - The **Groq Cloud** engine uploads your recorded audio to Groq for transcription.
 - **AI cleanup** sends the transcribed text to Groq, whichever engine produced it.
 
-**Always local** — history, dictionary, snippets, and settings stay on disk. Typr has no analytics, no telemetry, and no account.
+**Local storage** — history, dictionary, snippets, and settings stay on disk. Correction observation and pending suggestions stay local. Confirmed dictionary spellings, aliases and notes automatically accompany existing Groq/AI requests. Typr has no analytics, no telemetry, and no account.
 
 **Window titles are never recorded.** Auto context detection reads the focused application to choose a writing style, but the debug log stores only the process name, window class, and resulting category — never the title of the window you are typing into.
 
@@ -502,7 +513,7 @@ The model has to be downloaded from the Engine tab first — it is not bundled w
 Long recordings are split into overlapping pieces so no words are lost at the joins, and the overlap is normally removed automatically. Occasionally the model repeats a phrase within a single piece, which the AI cleanup pass strips if it is enabled.
 
 **A name is always transcribed wrong.**
-Try a Dictionary hint first, since it biases recognition without touching anything else. If it is still wrong, a Snippet will replace it outright.
+Add the preferred spelling to Dictionary first. Whisper/Groq receive recognition hints; Parakeet/Nemotron require AI cleanup for contextual spelling guidance. Optional aliases and context notes can help disambiguate. If you want an unconditional replacement, use a Snippet.
 
 ---
 
