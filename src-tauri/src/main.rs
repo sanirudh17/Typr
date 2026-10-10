@@ -354,6 +354,18 @@ fn get_settings(state: State<AppState>) -> Settings {
 }
 
 #[tauri::command]
+async fn list_ai_models(state: State<'_, AppState>, force_refresh: bool, expected_key: String) -> Result<typr_lib::ai_models::Catalog, String> {
+    let key = state.settings.lock().unwrap().groq_api_key.clone();
+    // Clicking Refresh can race the key field's blur/save. Do not return the
+    // previous account's catalog under the new key's UI request. Neither key
+    // nor service error bodies are included in this error.
+    if key.trim() != expected_key.trim() {
+        return Err("The API key is still changing. Refresh again after saving it.".into());
+    }
+    Ok(typr_lib::ai_models::discover(&key, &state.app_dir, force_refresh).await)
+}
+
+#[tauri::command]
 fn get_history(state: State<AppState>) -> History {
     state.history.lock().unwrap().clone()
 }
@@ -1170,6 +1182,7 @@ fn main() {
             download_nemotron_model,
             delete_nemotron_model,
             get_settings,
+            list_ai_models,
             save_settings,
             list_microphones,
             get_recording_state,
@@ -1215,6 +1228,23 @@ fn main() {
             toggle_app_maximize,
         ])
         .setup(move |app| {
+            // Keep model availability current even during tray-only use.
+            // This worker shares discovery's cache/deduplication with the UI,
+            // and never holds settings or recorder locks during a request.
+            let catalog_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let (key, dir) = {
+                        let state = catalog_handle.state::<AppState>();
+                        let key = state.settings.lock().unwrap().groq_api_key.clone();
+                        (key, state.app_dir.clone())
+                    };
+                    if !key.trim().is_empty() {
+                        typr_lib::ai_models::discover(&key, &dir, false).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
             // Build the main window here, not in tauri.conf: only the builder can
             // carry a per-launch native background and a Rust-truth init script.
             // A post-hoc set_background_color races first show and loses, leaving

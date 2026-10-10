@@ -469,15 +469,15 @@
               </div>
               <div class="setting-row" id="ai-model-settings">
                 <div class="setting-label">
-                  <span class="label-text">Model</span>
-                  <span class="label-hint">Qwen is the fastest and handles most dictation best. The gpt-oss models reason before answering.</span>
+                  <label for="ai-model-select" class="label-text">Model</label>
+                  <span class="label-hint">Text models from Groq, refreshed automatically. Shared with Write Mode.</span>
                 </div>
-                <div class="setting-control">
-                  <select id="ai-model-select">
-                    <option value="qwen/qwen3.8-27b">Recommended &middot; Qwen 3.8 27B</option>
-                    <option value="openai/gpt-oss-20b">Fast &middot; gpt-oss-20b</option>
-                    <option value="openai/gpt-oss-120b">Quality &middot; gpt-oss-120b</option>
-                  </select>
+                <div class="setting-control ai-model-control">
+                  <div class="ai-model-picker">
+                    <select id="ai-model-select" aria-describedby="ai-model-status"></select>
+                    <button id="ai-model-refresh" class="btn-secondary" type="button">Refresh</button>
+                  </div>
+                  <p id="ai-model-status" class="ai-model-status" role="status" aria-live="polite"></p>
                 </div>
               </div>
             </div>
@@ -738,12 +738,14 @@
                   <div class="setting-control"><input type="password" id="write-groq-key" placeholder="gsk_..." autocomplete="off" spellcheck="false" /></div>
                 </div>
                 <div class="setting-row">
-                  <div class="setting-label"><span class="label-text">Editing model</span><span class="label-hint">Shared with AI cleanup. Write Mode works even when cleanup is off.</span></div>
-                  <div class="setting-control"><select id="write-model-select">
-                    <option value="qwen/qwen3.8-27b">Qwen 3.8 27B</option>
-                    <option value="openai/gpt-oss-20b">GPT OSS 20B</option>
-                    <option value="openai/gpt-oss-120b">GPT OSS 120B</option>
-                  </select></div>
+                  <div class="setting-label"><label for="write-model-select" class="label-text">Editing model</label><span class="label-hint">Shared with AI cleanup. Write Mode works even when cleanup is off.</span></div>
+                  <div class="setting-control ai-model-control">
+                    <div class="ai-model-picker">
+                      <select id="write-model-select" aria-describedby="write-model-status"></select>
+                      <button id="write-model-refresh" class="btn-secondary" type="button">Refresh</button>
+                    </div>
+                    <p id="write-model-status" class="ai-model-status" role="status" aria-live="polite"></p>
+                  </div>
                 </div>
                 <p class="settings-note">Try &ldquo;Make this more polite&rdquo; or &ldquo;Shorten this to two sentences.&rdquo; Keep the field focused while Typr edits. Your clipboard is restored afterward.</p>
                 <p class="settings-note">The selected text and spoken instruction are sent to Groq for editing. Rewritten text is kept out of dictation history. To undo an edit, press Ctrl+Z in the edited app; no highlighting is needed.</p>

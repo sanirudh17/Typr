@@ -16,6 +16,7 @@ pub mod vocabulary;
 pub mod learning;
 pub mod whisper_server;
 pub mod ai_postprocess;
+pub mod ai_models;
 pub mod context_detector;
 pub mod debug_log;
 pub mod commands;

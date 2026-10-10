@@ -61,33 +61,17 @@ fn build_chat_messages(system_prompt: &str, text: &str) -> (String, String) {
 /// `max_completion_tokens_for`). Measured fastest and best-structured on email
 /// layout and Prompt Mode.
 const MODEL_QWEN: &str = "qwen/qwen3.8-27b";
-const MODEL_FAST: &str = "openai/gpt-oss-20b";
+#[cfg(test)]
 const MODEL_QUALITY: &str = "openai/gpt-oss-120b";
 
-/// Used when the stored setting is unknown, empty, or a since-deprecated id.
+/// Bootstrap default before the first successful model discovery.
 const MODEL_DEFAULT: &str = MODEL_QWEN;
 
 /// True for the Qwen model. It runs with reasoning "none" (Qwen writes its
 /// chain-of-thought into the content at "default"), needs no completion-token
 /// headroom, and retries into gpt-oss.
 fn is_qwen(resolved: &str) -> bool {
-    resolved == MODEL_QWEN
-}
-
-/// Reasoning effort for a resolved model id.
-///
-/// The two families expose different scales and are NOT interchangeable:
-/// - gpt-oss accepts only `low` | `medium` | `high`. `medium` is the useful setting; `high`
-///   reliably spends the entire completion budget thinking and returns empty content.
-/// - Qwen accepts only `none` | `default`, and at `default` it writes its chain-of-thought
-///   into the content field with no separate `reasoning` field to strip it from. `none` is
-///   therefore the only safe value — see `has_reasoning_leak`.
-fn reasoning_effort_for(resolved: &str) -> &'static str {
-    if is_qwen(resolved) {
-        "none"
-    } else {
-        "medium"
-    }
+    resolved.starts_with("qwen/qwen3")
 }
 
 /// Completion-token ceiling for a resolved model id.
@@ -139,33 +123,11 @@ fn ai_client() -> &'static reqwest::Client {
     })
 }
 
-/// Resolve a stored model id to a supported Groq chat model. Anything not on the
-/// allowlist (unknown, empty, or a since-deprecated id) falls back to the default,
-/// so a stale setting can never send an invalid model to the API.
-pub fn resolve_model(model: &str) -> &'static str {
-    match model {
-        MODEL_QWEN => MODEL_QWEN,
-        MODEL_QUALITY => MODEL_QUALITY,
-        MODEL_FAST => MODEL_FAST,
-        _ => MODEL_DEFAULT,
-    }
-}
-
-/// The model retried when the primary pass fails. The chain is deliberately cross-family, so
-/// the retry never inherits the failure mode that caused the first attempt to fail.
-///
-/// gpt-oss falls back to Qwen specifically because gpt-oss's characteristic failure is
-/// reasoning starving the completion budget and returning empty content — and that failure is
-/// stochastic, not deterministic: the same input at the same ceiling returned empty on one run
-/// and correct output on the next. Qwen runs with reasoning off, so nothing competes with its
-/// output and it cannot fail that way at all. Retrying gpt-oss on gpt-oss would merely reroll
-/// the same dice.
-fn fallback_model(resolved: &str) -> Option<&'static str> {
-    if is_qwen(resolved) {
-        Some(MODEL_QUALITY)
-    } else {
-        Some(MODEL_QWEN)
-    }
+/// Preserve discovered and future chat IDs. Retirement is decided by the live
+/// catalog, rather than a release-time allowlist that silently changes choices.
+pub fn resolve_model(model: &str) -> &str {
+    let model = model.trim();
+    if crate::ai_models::is_cleanup_model(model) { model } else { MODEL_DEFAULT }
 }
 
 /// Select the system prompt for the active profile/format. Unknown/empty values fall back to
@@ -440,7 +402,7 @@ pub fn preserves_entities(input: &str, output: &str) -> bool {
 }
 
 /// Run one Groq chat-completion cleanup pass over `text` using `model` (resolved via the
-/// allowlist). Returns the sanitized text, or an `Err` the caller treats as "skip and use
+/// catalog). Returns the sanitized text, or an `Err` the caller treats as "skip and use
 /// the deterministic fallback". Empty key errors; empty/whitespace input passes through
 /// without a network call.
 pub async fn postprocess(api_key: &str, text: &str, model: &str, system_prompt: &str) -> Result<String, String> {
@@ -460,18 +422,18 @@ async fn request_cleanup(api_key: &str, text: &str, model: &str, system_prompt: 
         return Ok(text.to_string());
     }
 
-    let resolved = resolve_model(model);
+    let resolved = crate::ai_models::effective_model(api_key, resolve_model(model));
     let (system_content, user_content) = build_chat_messages(system_prompt, text);
-    let body = serde_json::json!({
-        "model": resolved,
+    let mut body = serde_json::json!({
+        "model": &resolved,
         "temperature": 0,
-        "reasoning_effort": reasoning_effort_for(resolved),
-        "max_completion_tokens": completion_tokens_for_text(resolved, text, system_prompt),
+        "max_completion_tokens": completion_tokens_for_text(&resolved, text, system_prompt),
         "messages": [
             { "role": "system", "content": system_content },
             { "role": "user", "content": user_content },
         ],
     });
+    crate::ai_models::apply_reasoning_options(&mut body, &resolved);
 
     let resp = ai_client()
         .post("https://api.groq.com/openai/v1/chat/completions")
@@ -1231,7 +1193,7 @@ fn retry_system_prompt(prompt: &str, error: &str) -> String {
 /// second model attempt. No transcript or rejected completion is logged here.
 pub struct PostprocessResult {
     pub text: String,
-    pub model: &'static str,
+    pub model: String,
     pub recovered: bool,
     pub retried: bool,
 }
@@ -1259,20 +1221,21 @@ async fn within_ai_budget<T>(budget: u64, work: impl std::future::Future<Output 
 
 async fn postprocess_attempts(api_key: &str, text: &str, model: &str, system_prompt: &str, budget: u64)
     -> Result<PostprocessResult, String> {
-    let resolved = resolve_model(model);
-    let reserve = if is_qwen(resolved) { 3_000 } else { 2_000 };
-    run_model_chain(resolved, system_prompt, budget.saturating_sub(reserve).max(1),
+    let resolved = crate::ai_models::effective_model(api_key, resolve_model(model));
+    let fallback = crate::ai_models::fallback_model(api_key, &resolved);
+    let reserve = if is_qwen(&resolved) { 3_000 } else { 2_000 };
+    run_model_chain(resolved, fallback, system_prompt, budget.saturating_sub(reserve).max(1),
         |attempt_model, attempt_prompt| async move {
-            postprocess_once(api_key, text, attempt_model, &attempt_prompt).await
+            postprocess_once(api_key, text, &attempt_model, &attempt_prompt).await
         }).await
 }
 
-async fn run_model_chain<F, Fut>(resolved: &'static str, system_prompt: &str, primary_budget: u64, mut attempt: F)
+async fn run_model_chain<F, Fut>(resolved: String, fallback: Option<String>, system_prompt: &str, primary_budget: u64, mut attempt: F)
     -> Result<PostprocessResult, String>
-where F: FnMut(&'static str, String) -> Fut,
+where F: FnMut(String, String) -> Fut,
       Fut: std::future::Future<Output = Result<(String, bool), String>> {
     let primary = tokio::time::timeout(Duration::from_millis(primary_budget),
-        attempt(resolved, system_prompt.to_string())).await
+        attempt(resolved.clone(), system_prompt.to_string())).await
         .unwrap_or_else(|_| Err(format!("AI primary model exceeded {primary_budget}ms; trying alternate cleanup")));
     let primary_err = match primary {
         Ok((text, recovered)) => return Ok(PostprocessResult { text, model: resolved, recovered, retried: false }),
@@ -1281,12 +1244,12 @@ where F: FnMut(&'static str, String) -> Fut,
 
     if !should_retry_ai_error(&primary_err) { return Err(primary_err); }
 
-    let Some(fallback) = fallback_model(resolved) else {
+    let Some(fallback) = fallback else {
         return Err(primary_err);
     };
 
     let repair_prompt = retry_system_prompt(system_prompt, &primary_err);
-    match attempt(fallback, repair_prompt).await {
+    match attempt(fallback.clone(), repair_prompt).await {
         Ok((text, recovered)) => Ok(PostprocessResult { text, model: fallback, recovered, retried: true }),
         Err(fallback_err) => Err(format!(
             "{} (fallback {} also failed: {})",
@@ -1298,6 +1261,7 @@ where F: FnMut(&'static str, String) -> Fut,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_models::reasoning_effort_for;
 
     #[test]
     fn recovery_preserves_dictionary_repairs_in_every_cleanup_profile() {
@@ -1733,9 +1697,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let recorded = calls.clone(); let done = completed.clone();
-        let result = within_ai_budget(150, run_model_chain(MODEL_QUALITY, CLEANUP_PROMPT, 20,
+        let result = within_ai_budget(150, run_model_chain(MODEL_QUALITY.into(), Some(MODEL_QWEN.into()), CLEANUP_PROMPT, 20,
             move |model, prompt| {
-                recorded.lock().unwrap().push((model, prompt)); let done = done.clone();
+                recorded.lock().unwrap().push((model.clone(), prompt)); let done = done.clone();
                 async move {
                     if model == MODEL_QUALITY {
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2121,26 +2085,28 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_model_allowlist() {
+    fn test_resolve_model_preserves_valid_dynamic_ids() {
         assert_eq!(resolve_model("qwen/qwen3.8-27b"), "qwen/qwen3.8-27b");
-        // Qwen 3.6 is deprecated: a stale stored id migrates to the 3.8 default.
-        assert_eq!(resolve_model("qwen/qwen3.6-27b"), "qwen/qwen3.8-27b");
+        // Availability comes from discovery, never a hard-coded release list.
+        assert_eq!(resolve_model("qwen/qwen3.6-27b"), "qwen/qwen3.6-27b");
         assert_eq!(resolve_model("openai/gpt-oss-20b"), "openai/gpt-oss-20b");
         assert_eq!(resolve_model("openai/gpt-oss-120b"), "openai/gpt-oss-120b");
-        // Unknown / empty / deprecated ids fall back to the default.
+        // Empty or non-chat IDs still use the safe bootstrap default.
         assert_eq!(resolve_model(""), "qwen/qwen3.8-27b");
-        // llama-3.x is decommissioned on Groq 2026-08-16; a stale setting must not reach the API.
-        assert_eq!(resolve_model("llama-3.1-8b-instant"), "qwen/qwen3.8-27b");
-        assert_eq!(resolve_model("llama-3.3-70b-versatile"), "qwen/qwen3.8-27b");
+        assert_eq!(resolve_model("llama-3.1-8b-instant"), "llama-3.1-8b-instant");
+        assert_eq!(resolve_model("llama-3.3-70b-versatile"), "llama-3.3-70b-versatile");
+        assert_eq!(resolve_model("vendor/new-chat"), "vendor/new-chat");
+        assert_eq!(resolve_model("whisper-large-v3"), MODEL_DEFAULT);
+        assert_eq!(resolve_model("bad id"), MODEL_DEFAULT);
     }
 
     /// The two families accept disjoint scales — sending gpt-oss's "medium" to Qwen, or Qwen's
     /// "none" to gpt-oss, is a 400 from the API. Pin the mapping for each family.
     #[test]
     fn test_reasoning_effort_matches_model_family() {
-        assert_eq!(reasoning_effort_for("qwen/qwen3.8-27b"), "none");
-        assert_eq!(reasoning_effort_for("openai/gpt-oss-20b"), "medium");
-        assert_eq!(reasoning_effort_for("openai/gpt-oss-120b"), "medium");
+        assert_eq!(reasoning_effort_for("qwen/qwen3.8-27b"), Some("none"));
+        assert_eq!(reasoning_effort_for("openai/gpt-oss-20b"), Some("medium"));
+        assert_eq!(reasoning_effort_for("openai/gpt-oss-120b"), Some("medium"));
     }
 
     /// gpt-oss shares this budget with its reasoning and needs headroom; Qwen does not.
@@ -2158,12 +2124,12 @@ mod tests {
     /// gpt-oss would be no fallback at all.
     #[test]
     fn test_fallback_always_crosses_family() {
-        assert_eq!(fallback_model("qwen/qwen3.8-27b"), Some("openai/gpt-oss-120b"));
-        assert_eq!(fallback_model("openai/gpt-oss-20b"), Some("qwen/qwen3.8-27b"));
-        assert_eq!(fallback_model("openai/gpt-oss-120b"), Some("qwen/qwen3.8-27b"));
+        assert_eq!(crate::ai_models::fallback_model("unit-test-no-key", "qwen/qwen3.8-27b").as_deref(), Some("openai/gpt-oss-120b"));
+        assert_eq!(crate::ai_models::fallback_model("unit-test-no-key", "openai/gpt-oss-20b").as_deref(), Some("qwen/qwen3.8-27b"));
+        assert_eq!(crate::ai_models::fallback_model("unit-test-no-key", "openai/gpt-oss-120b").as_deref(), Some("qwen/qwen3.8-27b"));
         // And the retry target is never the model that just failed.
         for m in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"] {
-            assert_ne!(fallback_model(m), Some(m));
+            assert_ne!(crate::ai_models::fallback_model("unit-test-no-key", m).as_deref(), Some(m));
         }
     }
 

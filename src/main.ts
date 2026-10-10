@@ -1,4 +1,5 @@
 import { initDictionaryFeature, renderVocabulary, syncLearningSettings, type VocabularyEntry } from "./dictionary";
+import { AI_MODEL_DEFAULT, STARTER_AI_MODELS, validAiModelId, replacementAiModel, type AiModelCatalog } from "./ai-models";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -376,6 +377,7 @@ navItems.forEach((item) => {
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
     document.getElementById(`section-${target}`)?.classList.add("active");
+    if (target === "ai" || target === "recording") void refreshAiModels();
   });
 });
 
@@ -533,6 +535,8 @@ async function loadSettings() {
   syncCustomSelectDisplay(autoContextOverride);
   syncCustomSelectDisplay(appRuleCategory);
   await loadAppRules();
+  // Discovery never delays startup reveal or dictation.
+  void refreshAiModels();
 }
 
 async function populateMics() {
@@ -742,17 +746,101 @@ function setAutostart(enabled: boolean) {
   if (enabled) setBackgroundMode(true);
 }
 
-// Mirrors resolve_model() in ai_postprocess.rs — keep the two allowlists in step, or the
-// dropdown silently coerces a valid choice back to the default. A stored qwen3.6 id (from
-// before its deprecation) is not on the list, so it migrates to the default on next load.
-const AI_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
-const AI_MODEL_DEFAULT = "qwen/qwen3.8-27b";
+let aiCatalog: AiModelCatalog | null = null;
+let aiCatalogNotice = "";
+let aiCatalogKey = "";
+let aiCatalogCheckedAt = 0;
+let aiCatalogGeneration = 0;
+let aiCatalogPending: { key: string; promise: Promise<void> } | null = null;
+
+function setAiCatalogStatus(message: string): void {
+  document.querySelectorAll<HTMLElement>(".ai-model-status").forEach(el => { el.textContent = message; });
+}
+
+function renderAiModelChoices(): void {
+  const selected = currentSettings.aiModel || AI_MODEL_DEFAULT;
+  const ids = (aiCatalog?.models.map(model => model.id) ?? STARTER_AI_MODELS).filter(validAiModelId);
+  // Preserve saved IDs during offline, failed and in-progress discovery.
+  if (!ids.includes(selected)) ids.unshift(selected);
+  for (const id of ["ai-model-select", "write-model-select"]) {
+    const select = document.getElementById(id) as HTMLSelectElement;
+    select.replaceChildren(...ids.map(model => {
+      const option = document.createElement("option");
+      option.value = model; option.textContent = model;
+      return option;
+    }));
+    select.value = selected;
+    syncCustomSelectDisplay(select);
+  }
+}
+
+function renderAiCatalogStatus(): void {
+  const count = aiCatalog?.models.length ?? 0;
+  setAiCatalogStatus(aiCatalogNotice || aiCatalog?.warning || (aiCatalog?.source === "live"
+    ? `${count} text models available. The list updates automatically.`
+    : currentSettings.groqApiKey.trim() ? "Showing saved models. Refresh to check availability."
+    : "Add your Groq API key to discover available models."));
+}
+
+async function refreshAiModels(forceRefresh = false): Promise<void> {
+  if (!currentSettings) return;
+  const key = currentSettings.groqApiKey.trim();
+  if (aiCatalogPending?.key === key) return aiCatalogPending.promise;
+  const interval = aiCatalog?.source === "live" && !aiCatalog.warning ? 3_600_000 : 60_000;
+  if (!forceRefresh && aiCatalogKey === key && Date.now() - aiCatalogCheckedAt < interval) return;
+  const generation = ++aiCatalogGeneration;
+  const buttons = document.querySelectorAll<HTMLButtonElement>("#ai-model-refresh, #write-model-refresh");
+  buttons.forEach(button => { button.disabled = true; button.textContent = "Refreshing…"; });
+  setAiCatalogStatus(key ? "Checking Groq models…" : "Loading saved models…");
+  const promise = (async () => {
+    try {
+      const catalog = await invoke<AiModelCatalog>("list_ai_models", { forceRefresh, expectedKey: key });
+      // An old account's response must never change the new key's UI.
+      if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
+      aiCatalog = catalog; aiCatalogKey = key; aiCatalogCheckedAt = Date.now(); aiCatalogNotice = "";
+      const ids = catalog.models.map(model => model.id).filter(validAiModelId);
+      const selected = currentSettings.aiModel;
+      if (catalog.source === "live" && !catalog.warning && ids.length && !ids.includes(selected)) {
+        const replacement = replacementAiModel(selected, ids);
+        if (replacement) {
+          setAiModel(replacement);
+          aiCatalogNotice = `${selected} is no longer listed by Groq. Switched to ${replacement}.`;
+          try { await saveSettings(); }
+          catch {
+            currentSettings.aiModel = selected;
+            aiCatalogNotice = `Groq no longer lists ${selected}. Could not save the replacement; use Refresh to try again.`;
+          }
+        }
+      }
+      if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
+      renderAiModelChoices(); renderAiCatalogStatus();
+    } catch {
+      if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
+      aiCatalogKey = key; aiCatalogCheckedAt = Date.now();
+      setAiCatalogStatus("Could not load Groq models. Your selection was kept; try Refresh again.");
+    } finally {
+      if (generation === aiCatalogGeneration) {
+        aiCatalogPending = null;
+        buttons.forEach(button => { button.disabled = false; button.textContent = "Refresh"; });
+      }
+    }
+  })();
+  aiCatalogPending = { key, promise };
+  return promise;
+}
+
+document.querySelectorAll<HTMLButtonElement>("#ai-model-refresh, #write-model-refresh").forEach(button => {
+  button.addEventListener("click", () => void refreshAiModels(true));
+});
+window.addEventListener("focus", () => void refreshAiModels());
+setInterval(() => { if (document.visibilityState === "visible") void refreshAiModels(); }, 3_600_000);
 
 function setAiModel(model: string) {
-  const m = AI_MODELS.includes(model) ? model : AI_MODEL_DEFAULT;
+  const m = validAiModelId(model.trim()) ? model.trim() : AI_MODEL_DEFAULT;
   currentSettings.aiModel = m;
-  aiModelSelect.value = m;
-  syncCustomSelectDisplay(aiModelSelect);
+  renderAiModelChoices();
+  aiCatalogNotice = "";
+  renderAiCatalogStatus();
 }
 
 function setAiProfile(profile: string) {
@@ -993,9 +1081,19 @@ nemotronDeleteBtn.addEventListener("click", async () => {
 groqKey.addEventListener("input", () => syncGroqKeyInputs(groqKey.value));
 aiGroqKey.addEventListener("input", () => syncGroqKeyInputs(aiGroqKey.value));
 writeGroqKey.addEventListener("input", () => syncGroqKeyInputs(writeGroqKey.value));
-writeGroqKey.addEventListener("change", () => void saveSettings().catch((err) => { writeStatus.textContent = String(err); }));
-groqKey.addEventListener("change", () => saveSettings());
-aiGroqKey.addEventListener("change", () => saveSettings());
+async function saveGroqKeyAndRefresh(): Promise<void> {
+  try {
+    await saveSettings();
+    // Invalidate a refresh started before the key was saved, including an
+    // account mismatch response that would otherwise hold the retry timer.
+    ++aiCatalogGeneration; aiCatalogPending = null; aiCatalogCheckedAt = 0;
+    await refreshAiModels();
+  }
+  catch { setAiCatalogStatus("Could not save your API key. Try entering it again."); }
+}
+writeGroqKey.addEventListener("change", () => void saveGroqKeyAndRefresh());
+groqKey.addEventListener("change", () => void saveGroqKeyAndRefresh());
+aiGroqKey.addEventListener("change", () => void saveGroqKeyAndRefresh());
 
 aiOff.addEventListener("click", () => {
   setAiEnabled(false);

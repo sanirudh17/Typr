@@ -724,6 +724,46 @@ body {
   max-width: 100%;
 }
 
+.ai-model-control {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ai-model-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 390px;
+}
+
+.ai-model-picker .custom-select {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+}
+
+.ai-model-picker button { flex: 0 0 auto; }
+.ai-model-picker button,
+#ai-model-settings .label-hint { color: color-mix(in srgb, var(--text) 80%, var(--bg)); }
+.ai-model-picker button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.ai-model-status {
+  width: 100%;
+  max-width: 390px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--text) 80%, var(--bg));
+  overflow-wrap: anywhere;
+}
+
+.ai-model-status:empty { display: none; }
+
+@media (max-width: 1280px) {
+  .ai-model-control { align-items: flex-start; }
+}
+
 /* Hotkey row: keep the live status on the same line as the combo + buttons so
    it reads side by side while capturing. The status is pinned left; the combo
    and buttons stay right. */

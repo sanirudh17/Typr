@@ -59,19 +59,20 @@ pub async fn rewrite(
     if instruction.chars().count() > 2000 {
         return Err("Keep the editing instruction shorter. Your selected text was kept.".into());
     }
-    let model = crate::ai_postprocess::resolve_model(&settings.ai_model);
+    let model = crate::ai_models::effective_model(&settings.groq_api_key,
+        crate::ai_postprocess::resolve_model(&settings.ai_model));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "Could not start Write Mode's AI request.")?;
-    let body = serde_json::json!({
-        "model": model, "temperature": 0,
-        "reasoning_effort": if model.starts_with("qwen/") { "none" } else { "medium" },
+    let mut body = serde_json::json!({
+        "model": &model, "temperature": 0,
         "max_completion_tokens": 4096,
         "messages": [{"role": "system", "content": EDIT_PROMPT},
             {"role": "user", "content": serde_json::json!({"selected_text": original, "edit_instruction": instruction}).to_string()}]
     });
+    crate::ai_models::apply_reasoning_options(&mut body, &model);
     let request = async {
         let response = client
             .post("https://api.groq.com/openai/v1/chat/completions")

@@ -153,7 +153,13 @@ Groq offers two speech models. `whisper-large-v3` is the more accurate of the tw
 
 **AI cleanup models**
 
-All three run on Groq. Measured end-to-end in-app, on one machine and network — treat as indicative, not benchmarks:
+The model picker discovers available Groq text models using your saved API key. It checks on launch, after a key change, and hourly (including while running in the tray). **Refresh** checks manually, with a short cooldown to avoid repeated requests. AI cleanup and Write Mode share this selection.
+
+The last successful catalog is cached locally for offline use. Failed refreshes keep your selection. If a successful refresh no longer lists it, Typr chooses an available replacement, preferring the same family, and displays the change. Discovery sends no audio or transcript; only the API key authenticates the model-list request.
+
+Groq's catalog does not declare model capabilities. Typr excludes known speech, speech-synthesis, safety, embedding and tool-agent families from the text picker. Future models using standard Chat Completions can be selected without an app update; a new model requiring a different API or special parameters may still need compatibility work. Availability and cleanup quality also depend on Groq's account permissions and the chosen model.
+
+These starter models were measured end-to-end in-app, on one machine and network — treat as indicative, not benchmarks:
 
 | Model | Typical latency | Notes |
 |---|---|---|
@@ -161,7 +167,7 @@ All three run on Groq. Measured end-to-end in-app, on one machine and network �
 | GPT-OSS 20B | ~700 ms – 1.5 s | Reasons before answering |
 | GPT-OSS 120B | ~700 ms – 1.3 s | Largest |
 
-Qwen is the default because it was both quickest and produced the best-structured output in testing. The GPT-OSS models remain selectable and serve as the automatic fallback.
+Qwen is the bootstrap default. Fallback cleanup prefers another available family from the discovered catalog; before discovery succeeds, the existing Qwen/GPT-OSS fallback remains in use. Transcript-preservation checks apply to every selected model.
 
 ---
 
@@ -175,7 +181,7 @@ Qwen is the default because it was both quickest and produced the best-structure
 - *Profile* — Cleanup, Prompt Mode, or Auto
 - *Style* (Auto only) — pin one writing style, or let it detect from the focused app
 - *Prompt format* (Prompt Mode only) — Natural prose or a Context / Task / Constraints / Output structure
-- *Model* — the three above
+- *Model* — available Groq text models, plus a Refresh action; shared with Write Mode
 - *Presets, Tone, Formatting* — one-click combinations, or set tone and structure directly
 - *Custom instructions* — applied to every pass
 - *Advanced → App context rules* — force a style for a given app, or for a site by window title in any browser
