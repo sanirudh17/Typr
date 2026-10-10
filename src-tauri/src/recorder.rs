@@ -649,9 +649,14 @@ impl Recorder {
         crate::debug_log::log(app_dir, &format!("STAGE 1 [engine return]: {}", raw_text));
 
         // Only explicitly configured Snippets rewrite text deterministically.
-        let replaced = {
+        let (replaced, standalone_snippet) = {
             let dict = dictionary.lock().unwrap();
-            dict.apply_replacements(&raw_text)
+            let standalone = if write_session.is_none() {
+                dict.standalone_snippet(&raw_text)
+            } else {
+                None
+            };
+            (standalone.clone().unwrap_or_else(|| dict.apply_replacements(&raw_text)), standalone)
         };
         crate::debug_log::log(app_dir, &format!("STAGE 2 [dictionary]: {}", replaced));
 
@@ -659,7 +664,11 @@ impl Recorder {
         // before both the AI pass and the deterministic cleanup: the LLM only promises to
         // preserve addresses it can recognize, and the entity guard can only protect one that
         // already looks like an address.
-        let replaced = crate::email_assemble::assemble_emails(&replaced);
+        let replaced = if standalone_snippet.is_some() {
+            replaced
+        } else {
+            crate::email_assemble::assemble_emails(&replaced)
+        };
         crate::debug_log::log(app_dir, &format!("STAGE 3 [email assembly]: {}", replaced));
 
         if let Some(write) = write_session {
@@ -685,8 +694,9 @@ impl Recorder {
         // Developer/Terminal, ensure filler never survives a bypass or an LLM miss.
         // The AI prompt already asks to strip filler; this is the deterministic
         // guarantee for the fallback paths where the LLM is not in the loop.
-        // Always strip filler when AI is on — the former Developer toggle has been removed per user request; filler is never intentional when AI cleanup is enabled.
-        let strip_filler = settings.ai_enabled;
+        // Strip filler from AI-enabled dictation; a standalone snippet's saved
+        // text is literal and must not be interpreted as speech.
+        let strip_filler = settings.ai_enabled && standalone_snippet.is_none();
         let replaced_stripped = if strip_filler {
             crate::cleanup::strip_filler_words(&replaced)
         } else {
@@ -703,14 +713,17 @@ impl Recorder {
         // command pass runs. This includes Prompt Mode — an explicit voice command is a
         // direct instruction whose reliability outweighs the rewrite, and the log showed the
         // LLM deleting "Make it a list" before the command pass ever saw it.
-        let bypass_ai_for_commands = commands::contains_command(&replaced);
+        let bypass_ai_for_commands = standalone_snippet.is_none() && commands::contains_command(&replaced);
         if bypass_ai_for_commands {
             crate::debug_log::log(app_dir, "commands present -> raw text + command pass (skipping AI & prose cleanup)");
         }
 
         // Optional Groq LLM cleanup with a profile-specific budget. On off/offline/slow/error we
         // paste the deterministic result instead, so a dictation is never blocked.
-        let final_text = if bypass_ai_for_commands {
+        let final_text = if let Some(expansion) = &standalone_snippet {
+            crate::debug_log::log(app_dir, "standalone snippet -> saved text (skipping AI & prose cleanup)");
+            expansion.clone()
+        } else if bypass_ai_for_commands {
             // Command/code dictation: skip prose cleanup too (no forced capitalization or
             // trailing period) so literal input like "claude --dangerously-skip-permissions"
             // is not sentence-formatted. The command pass below does the real work.
@@ -872,15 +885,20 @@ impl Recorder {
         // when AI post-processing is off or the AI kept the stutter. This fixes "words
         // being repeated despite said only once" without touching non-consecutive repeats.
         // Runs before voice commands so "hello hello" dedupes to one hello before any
-        // casing/layout pass. Always on — stutters are never intentional.
-        let final_text = crate::cleanup::deduplicate_text(&final_text);
+        // casing/layout pass. Standalone snippets preserve intentional repetitions.
+        let final_text = if standalone_snippet.is_some() {
+            final_text
+        } else {
+            crate::cleanup::deduplicate_text(&final_text)
+        };
         crate::debug_log::log(app_dir, &format!("STAGE 5 [dedup]: {}", final_text));
 
         // Re-assert the dictionary after the AI pass: the LLM can silently revert a
         // corrected spelling or snippet expansion on some runs but not others — exactly
         // the "sometimes works, sometimes doesn't" dictionary symptom. Both steps are
-        // deterministic and idempotent, so running them again is safe.
-        let final_text = {
+        // deterministic and idempotent, so running them again is safe. A literal
+        // standalone expansion must not trigger another snippet.
+        let final_text = if standalone_snippet.is_some() { final_text } else {
             let dict = dictionary.lock().unwrap();
             dict.apply_replacements(&final_text)
         };
@@ -888,13 +906,23 @@ impl Recorder {
 
         // Final deterministic pass: apply always-on voice commands (casing / layout / symbols).
         // Runs after cleanup and any AI pass so nothing downstream can undo it; identical
-        // behavior whether AI is on or off.
-        let final_text = commands::apply_commands(&final_text);
+        // behavior whether AI is on or off. Saved standalone snippet content
+        // is not a voice command, even if it contains a command phrase.
+        let final_text = if standalone_snippet.is_some() {
+            final_text
+        } else {
+            commands::apply_commands(&final_text)
+        };
         crate::debug_log::log(app_dir, &format!("STAGE 6 [commands]: {}", final_text));
 
         // A whispered trailing stop/close marker ("stop", "end session") is a signal to the
         // recorder, not content — drop it so it never reaches the target window.
-        let final_text = crate::cleanup::strip_trailing_stop_phrase(&final_text);
+        // A saved snippet's trailing words are intentional content.
+        let final_text = if standalone_snippet.is_some() {
+            final_text
+        } else {
+            crate::cleanup::strip_trailing_stop_phrase(&final_text)
+        };
         // No trailing whitespace in the pasted payload: in a terminal a trailing newline
         // acts as Enter and executes the last line (bug #2: "commands executed"), and in
         // editors it leaves a stray blank line. Interior newlines from "new line" /

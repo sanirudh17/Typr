@@ -365,6 +365,25 @@ impl Dictionary {
         }
         result
     }
+
+    /// A shortcut dictated by itself is an explicit request for its saved text.
+    /// Ignore only surrounding whitespace and ASR sentence punctuation; keep
+    /// the entry's case setting and never infer a match from similar words.
+    pub fn standalone_snippet(&self, text: &str) -> Option<String> {
+        let mut entries: Vec<_> = self.replacements.iter().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.find.len()));
+        for entry in entries {
+            let words: Vec<_> = entry.find.split_whitespace().map(escape).collect();
+            if words.is_empty() { continue; }
+            let pattern = format!(r"\A(?:{})[.!?]*\z", words.join(r"[^\S\r\n]+"));
+            if let Ok(re) = RegexBuilder::new(&pattern)
+                .case_insensitive(!entry.case_sensitive).build()
+            {
+                if re.is_match(text.trim()) { return Some(entry.replace.clone()); }
+            }
+        }
+        None
+    }
 }
 
 /// Character budget for the engine bias prompt (Whisper's prompt window is ~224 tokens;
@@ -581,6 +600,47 @@ mod tests {
             dict.apply_replacements("Personal email"),
             "sanirudh1017@gmail.com"
         );
+    }
+
+    #[test]
+    fn standalone_email_shortcuts_match_sentence_case_and_asr_punctuation() {
+        let mut dict = Dictionary::default();
+        dict.replacements.push(ReplacementEntry {
+            find: "personal email".into(), replace: "voice@example.com".into(), case_sensitive: false,
+        });
+        for transcript in ["personal email", "Personal email.", "PERSONAL EMAIL!", " Personal  email? "] {
+            assert_eq!(dict.standalone_snippet(transcript), Some("voice@example.com".into()));
+            assert_eq!(crate::cleanup::cleanup_text(&dict.apply_replacements(transcript)), "voice@example.com");
+        }
+        assert_eq!(dict.standalone_snippet("Please use my personal email."), None);
+        assert_eq!(dict.apply_replacements("Please use my personal email."), "Please use my voice@example.com.");
+        for unrelated in ["Personal emails.", "Personal e-mail.", "Personal\nemail", "Personal email and name."] {
+            assert_eq!(dict.standalone_snippet(unrelated), None);
+        }
+    }
+
+    #[test]
+    fn standalone_shortcuts_respect_explicit_case_matching() {
+        let mut dict = Dictionary::default();
+        dict.replacements.push(ReplacementEntry {
+            find: "personal email".into(), replace: "voice@example.com".into(), case_sensitive: true,
+        });
+        assert_eq!(dict.standalone_snippet("personal email."), Some("voice@example.com".into()));
+        assert_eq!(dict.standalone_snippet("Personal email."), None);
+        assert_eq!(dict.apply_replacements("Personal email."), "Personal email.");
+    }
+
+    #[test]
+    fn standalone_shortcuts_keep_literal_content_and_prefer_longer_triggers() {
+        let mut dict = Dictionary::default();
+        dict.replacements = vec![
+            ReplacementEntry { find: "contact".into(), replace: "short".into(), case_sensitive: false },
+            ReplacementEntry { find: "contact.".into(), replace: "uh new line stop\n$PATH".into(), case_sensitive: false },
+            ReplacementEntry { find: "clear token".into(), replace: String::new(), case_sensitive: false },
+        ];
+        assert_eq!(dict.standalone_snippet("Contact."), Some("uh new line stop\n$PATH".into()));
+        assert_eq!(dict.standalone_snippet("Clear token."), Some(String::new()));
+        assert_eq!(dict.standalone_snippet("We need contact."), None);
     }
 
     #[test]

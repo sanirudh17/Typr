@@ -82,7 +82,7 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 
 **Getting your words right**
 - **Dictionary** — preferred spellings bias supported recognition engines and guide contextual AI cleanup. Current Parakeet/Nemotron decoders use these terms through AI cleanup. Dictionary never applies a deterministic replacement rule; ambiguous recognition can still be wrong.
-- **Snippets** — exact find-and-replace rules that always fire. Good for a word that is always misheard the same way, or for expanding a shortcut like `brb` or `my email`.
+- **Snippets** — exact find-and-replace rules. Good for a word that is always misheard the same way, or for expanding a shortcut like `brb` or `my email`. A shortcut dictated on its own pastes the saved expansion directly, without AI cleanup. Leave case matching off for spoken triggers, since speech engines often capitalize standalone phrases.
 
 **Around the app**
 - **History** with search and export to JSON or Markdown.
@@ -192,7 +192,7 @@ Qwen is the bootstrap default. Fallback cleanup prefers another available family
 
 **Dictionary** — preferred spellings and context notes, with recognition hints where the engine supports them and contextual spelling guidance during AI cleanup.
 
-**Snippets** — exact replacements that always fire. Use these when a hint is not forceful enough.
+**Snippets** — exact replacements when the recognized trigger matches. Standalone shortcuts paste their saved text directly, with AI on or off. Leave case matching off for spoken shortcuts; enabling it requires the transcript to use the same capitalization as the trigger. Use these when a hint is not forceful enough.
 
 ---
 
