@@ -373,6 +373,7 @@ navItems.forEach((item) => {
     primaryCapture.clearStatus();
     secondaryCapture.clearStatus();
     writeCapture.clearStatus();
+    resetAiCatalogStatus();
     navItems.forEach((n) => n.classList.remove("active"));
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
@@ -752,9 +753,45 @@ let aiCatalogKey = "";
 let aiCatalogCheckedAt = 0;
 let aiCatalogGeneration = 0;
 let aiCatalogPending: { key: string; promise: Promise<void> } | null = null;
+let aiCatalogStatusEpoch = 0;
+let aiCatalogStatusTimer: number | undefined;
+let aiCatalogCooldownUntil = 0;
 
-function setAiCatalogStatus(message: string): void {
-  document.querySelectorAll<HTMLElement>(".ai-model-status").forEach(el => { el.textContent = message; });
+function clearAiCatalogStatusTimer(): void {
+  if (aiCatalogStatusTimer !== undefined) window.clearInterval(aiCatalogStatusTimer);
+  aiCatalogStatusTimer = undefined;
+}
+
+function resetAiCatalogStatus(): void {
+  ++aiCatalogStatusEpoch;
+  aiCatalogNotice = "";
+  clearAiCatalogStatusTimer();
+  document.querySelectorAll<HTMLElement>(".ai-model-status").forEach(el => { el.textContent = ""; });
+}
+
+function setAiCatalogStatus(message: string, epoch = aiCatalogStatusEpoch): void {
+  if (epoch !== aiCatalogStatusEpoch) return;
+  clearAiCatalogStatusTimer();
+  const elements = document.querySelectorAll<HTMLElement>(".ai-model-status");
+  const paint = (text: string) => elements.forEach(el => {
+    if (el.textContent !== text) el.textContent = text;
+  });
+  if (/^Try Refresh again in \d+ seconds\.$/.test(message)) {
+    const tick = () => {
+      const seconds = Math.max(0, Math.ceil((aiCatalogCooldownUntil - Date.now()) / 1000));
+      if (seconds === 0) {
+        clearAiCatalogStatusTimer();
+        if (aiCatalog?.warning === message) aiCatalog.warning = null;
+        paint("");
+      } else {
+        paint(`Try again in ${seconds} second${seconds === 1 ? "" : "s"}.`);
+      }
+    };
+    if (aiCatalogCooldownUntil > Date.now()) aiCatalogStatusTimer = window.setInterval(tick, 250);
+    tick();
+  } else {
+    paint(message);
+  }
 }
 
 function renderAiModelChoices(): void {
@@ -774,12 +811,12 @@ function renderAiModelChoices(): void {
   }
 }
 
-function renderAiCatalogStatus(): void {
+function renderAiCatalogStatus(epoch = aiCatalogStatusEpoch): void {
   const count = aiCatalog?.models.length ?? 0;
   setAiCatalogStatus(aiCatalogNotice || aiCatalog?.warning || (aiCatalog?.source === "live"
     ? `${count} text models available. The list updates automatically.`
     : currentSettings.groqApiKey.trim() ? "Showing saved models. Refresh to check availability."
-    : "Add your Groq API key to discover available models."));
+    : "Add your Groq API key to discover available models."), epoch);
 }
 
 async function refreshAiModels(forceRefresh = false): Promise<void> {
@@ -789,21 +826,24 @@ async function refreshAiModels(forceRefresh = false): Promise<void> {
   const interval = aiCatalog?.source === "live" && !aiCatalog.warning ? 3_600_000 : 60_000;
   if (!forceRefresh && aiCatalogKey === key && Date.now() - aiCatalogCheckedAt < interval) return;
   const generation = ++aiCatalogGeneration;
+  const statusEpoch = aiCatalogStatusEpoch;
   const buttons = document.querySelectorAll<HTMLButtonElement>("#ai-model-refresh, #write-model-refresh");
   buttons.forEach(button => { button.disabled = true; button.textContent = "Refreshing…"; });
-  setAiCatalogStatus(key ? "Checking Groq models…" : "Loading saved models…");
+  setAiCatalogStatus(key ? "Checking Groq models…" : "Loading saved models…", statusEpoch);
   const promise = (async () => {
     try {
       const catalog = await invoke<AiModelCatalog>("list_ai_models", { forceRefresh, expectedKey: key });
       // An old account's response must never change the new key's UI.
       if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
       aiCatalog = catalog; aiCatalogKey = key; aiCatalogCheckedAt = Date.now(); aiCatalogNotice = "";
+      const cooldown = /^Try Refresh again in (\d+) seconds\.$/.exec(catalog.warning ?? "");
+      aiCatalogCooldownUntil = cooldown ? Date.now() + Number(cooldown[1]) * 1000 : 0;
       const ids = catalog.models.map(model => model.id).filter(validAiModelId);
       const selected = currentSettings.aiModel;
       if (catalog.source === "live" && !catalog.warning && ids.length && !ids.includes(selected)) {
         const replacement = replacementAiModel(selected, ids);
         if (replacement) {
-          setAiModel(replacement);
+          setAiModel(replacement, statusEpoch);
           aiCatalogNotice = `${selected} is no longer listed by Groq. Switched to ${replacement}.`;
           try { await saveSettings(); }
           catch {
@@ -813,11 +853,11 @@ async function refreshAiModels(forceRefresh = false): Promise<void> {
         }
       }
       if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
-      renderAiModelChoices(); renderAiCatalogStatus();
+      renderAiModelChoices(); renderAiCatalogStatus(statusEpoch);
     } catch {
       if (generation !== aiCatalogGeneration || currentSettings.groqApiKey.trim() !== key) return;
       aiCatalogKey = key; aiCatalogCheckedAt = Date.now();
-      setAiCatalogStatus("Could not load Groq models. Your selection was kept; try Refresh again.");
+      setAiCatalogStatus("Could not load Groq models. Your selection was kept; try Refresh again.", statusEpoch);
     } finally {
       if (generation === aiCatalogGeneration) {
         aiCatalogPending = null;
@@ -835,12 +875,12 @@ document.querySelectorAll<HTMLButtonElement>("#ai-model-refresh, #write-model-re
 window.addEventListener("focus", () => void refreshAiModels());
 setInterval(() => { if (document.visibilityState === "visible") void refreshAiModels(); }, 3_600_000);
 
-function setAiModel(model: string) {
+function setAiModel(model: string, statusEpoch = aiCatalogStatusEpoch) {
   const m = validAiModelId(model.trim()) ? model.trim() : AI_MODEL_DEFAULT;
   currentSettings.aiModel = m;
   renderAiModelChoices();
   aiCatalogNotice = "";
-  renderAiCatalogStatus();
+  renderAiCatalogStatus(statusEpoch);
 }
 
 function setAiProfile(profile: string) {
