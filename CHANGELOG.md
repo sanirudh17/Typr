@@ -1,6 +1,6 @@
 # Changelog - Typr
 
-## Unreleased
+## [v0.3.1] - 2026-10-11
 
 ### Smaller installer and optional NVIDIA support
 

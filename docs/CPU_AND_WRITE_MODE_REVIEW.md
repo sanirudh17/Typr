@@ -2,6 +2,17 @@
 
 These changes were developed on `optional-cuda-and-write-mode-fixes`, based on published v0.3.0, and merged into local `main` after validation. Review installers are unsigned and still carry version 0.3.0. They are not published release or updater artifacts. The GitHub v0.3.0 release retains its original packages.
 
+## Final v0.3.1 release check
+
+On 2026-10-11, the version was advanced to 0.3.1 for the release packages. The checks below supplement the preceding review; the original v0.3.0 packages remain unchanged.
+
+- Rust regression suite: 488 passed, 0 failed, 6 ignored. TypeScript, Vite, and thirty frontend checks passed.
+- A four-second reference clip was decoded with CPU Whisper small.en-q5_1, Nemotron 3.5 int8, and Parakeet v3 int8. Whisper preserved every reference word in two warm-server runs (2,447 and 2,414 ms). Nemotron preserved every word in two warm decodes (468 and 469 ms). Parakeet decoded in approximately 282 ms but omitted the function word "that". Running the same model and clip through the original v0.3.0 implementation produced the identical omission, confirming no recognition regression on this reference.
+- The temporary 190 MB Whisper model used for verification was removed afterward. No GPU runtime was downloaded or installed during this release check.
+- Two serialized live AI requests through the production rewrite function passed: convert disposable text into two bullets, then change only a phrase in the second bullet while retaining the first edit and layout. This verifies AI instruction handling separately from microphone capture.
+- The actual NSIS post-install hook ran inside a minimal disposable installer. It removed all 24 known legacy runtime fixtures and preserved CPU runtime, model, settings, and history fixtures. It did not install over the user's running Typr instance.
+- Live GPU inference and live GPU-process removal remain untested. Updater signing authenticates update packages; it is not Windows Authenticode publisher signing.
+
 ## Packaging
 
 - CPU is the default Whisper backend, including migration from settings without a hardware preference.
