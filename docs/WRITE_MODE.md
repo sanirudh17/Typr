@@ -12,19 +12,19 @@ The Write shortcut always toggles recording, including when ordinary dictation u
 
 After a successful edit, keep the same editor focused and give a follow-up instruction, such as "Make the second bullet shorter." In editors that expose their document and selection through accessibility, Typr can select the unchanged rewritten passage again for up to five minutes. It uses the current text and previous instruction as context, with the latest instruction taking priority. Moving to another document or changing the passage manually requires a fresh selection.
 
-In xterm and Windows terminals, highlight the text first. Typr uses **Ctrl+Insert** to copy the screen selection and opens a rewrite preview, instead of replacing terminal input. Click **Copy rewrite** and paste it into your prompt yourself. No command is submitted. Hosts that do not support this copy shortcut may still reject capture; selecting text in a normal editor remains an alternative.
+Write Mode is unavailable in Windows terminals and embedded xterm controls, including Codex TUI. Terminal highlights are screen selections and cannot be replaced reliably across hosts. Typr displays a message before microphone recording starts; it does not copy terminal text or send terminal keystrokes. Use a normal editable field for rewriting. Normal dictation in terminals remains available.
 
 Press **Escape** during capture or processing to cancel. The selected text is kept. To undo a completed edit, press **Ctrl+Z** in the edited app; no highlighting is needed. Undo follows that app’s own undo behavior. Typr has no separate revert shortcut and does not reserve **Ctrl+Alt+Backspace**.
 
 ## Safety and limits
 
-- Windows UI Automation reads editor selections first. A **Ctrl+C** fallback is available for otherwise supported editable fields without a text selection pattern. Recognized terminal controls use **Ctrl+Insert** and a preview. Password fields, other read-only fields, unsupported controls, and changed focus or selection are rejected. Compatibility depends on the editor’s accessibility support.
+- Windows UI Automation reads editor selections first. A **Ctrl+C** fallback is available for otherwise supported editable fields without a text selection pattern. Terminal controls, password fields, read-only fields, unsupported controls, and changed focus or selection are rejected. Compatibility depends on the editor’s accessibility support.
 - Selection is limited to **6,000 characters**, the spoken instruction to **2,000 characters**, and the AI response to **16,000 characters**. The AI request times out after **30 seconds**. Documents too large to verify safely are rejected.
 - Replacement uses a plain text paste into the existing selection. Typr never sends **Ctrl+A**. Rich text styling is not reconstructed.
 - Existing clipboard formats are saved and restored after copy or paste if Typr still owns the clipboard change. A newer user copy is preserved. A busy clipboard or formats that cannot be saved safely can prevent an edit.
 - AI failures and invalid or incomplete responses keep the original text. The editing instruction is never pasted as a dictation fallback.
 
-The selected passage and transcribed instruction are sent to Groq. The selected text and rewrite are excluded from dictation history and logs. The most recent successful in-place edit and its instruction are retained only in memory for up to five minutes for follow-up edits, not for undo. A terminal preview retains its editable result until the preview is closed. The existing recording and diagnostic policy still applies to the spoken instruction and its audio.
+The selected passage and transcribed instruction are sent to Groq. The selected text and rewrite are excluded from dictation history and logs. The most recent successful in-place edit and its instruction are retained only in memory for up to five minutes for follow-up edits, not for undo. The existing recording and diagnostic policy still applies to the spoken instruction and its audio.
 
 ## Run this checkout
 

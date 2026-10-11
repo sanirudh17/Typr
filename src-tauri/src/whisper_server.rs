@@ -325,6 +325,14 @@ pub async fn stop_server() {
     stop_server_inner().await;
 }
 
+/// Keep queued prewarms from opening runtime files while they are removed.
+pub async fn with_server_stopped<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _ensure_guard = ENSURE_LOCK.lock().await;
+    stop_server_inner().await;
+    wait_for_port_free().await;
+    operation()
+}
+
 /// After stopping the server, poll until the port stops accepting connections — i.e. the old
 /// process has released the socket — so the replacement can bind it. Bounded so we never hang
 /// if something else holds the port; on timeout we start anyway (the post-spawn health wait

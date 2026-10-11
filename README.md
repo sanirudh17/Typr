@@ -63,6 +63,7 @@ Transcription runs **fully offline** — on your CPU with Whisper, Parakeet or N
 
 **Three transcription engines**
 - **Local Whisper on CPU, with optional NVIDIA acceleration.** Runs entirely on your machine. NVIDIA support is downloaded separately and includes its matching CUDA libraries, so no system-wide CUDA install is required. Four model sizes, ~190 MB to ~1.5 GB.
+- **Remove NVIDIA support** from Engine settings to reclaim its disk space. Whisper returns to CPU and your downloaded speech models are kept.
 - **Local Parakeet on the CPU.** NVIDIA's Parakeet TDT 0.6B, run in-process — no GPU, no sidecar process, no CUDA. One model, ~640 MB, covering 25 European languages with automatic detection.
 - **Groq Cloud.** `whisper-large-v3` for accuracy, or `whisper-large-v3-turbo` for lower latency.
 
@@ -87,8 +88,8 @@ Transcription runs **fully offline** — on your CPU with Whisper, Parakeet or N
 **Write Mode**
 - Select text in an editable field, invoke the Write hotkey, speak an edit, and invoke it again.
 - Subsequent edits reuse the previous unchanged passage for up to five minutes. The last instruction accompanies the current text as context; the latest instruction takes priority. Changing the document, field or app prevents an automatic replacement. Select a new passage to start over.
-- Codex and other xterm/Windows terminal highlights are screen selections. Highlight the text first; Write Mode copies it with Ctrl+Insert and opens a themed rewrite preview. Copy the result into the prompt yourself. It never clears a terminal input or submits a command. Hosts with different copy shortcuts may not support capture.
-- Clipboard contents are preserved during capture and regular editor replacement. Clicking **Copy rewrite** intentionally updates the clipboard. Rewrites are excluded from dictation history.
+- Write Mode is unavailable in terminals, including Codex TUI and embedded xterm controls. Use an editable field for rewriting. Normal dictation still works in terminals.
+- Clipboard contents are preserved during capture and editor replacement. Rewrites are excluded from dictation history.
 
 **Background resource use**
 - Inactive CPU recognizers are released after engine changes. After three minutes without local dictation, the remaining recognizer is released while the recorder is idle. The next use reloads it, which can add a short cold-start delay; prewarming begins at record-start where possible.

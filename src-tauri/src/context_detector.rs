@@ -48,7 +48,7 @@ impl ForegroundApp {
 /// Resolve a PID to its executable basename (e.g. "Code.exe"). Returns "" on any failure
 /// (process gone, access denied, empty path). Windows-only.
 #[cfg(windows)]
-fn process_name_from_pid(pid: u32) -> String {
+pub(crate) fn process_name_from_pid(pid: u32) -> String {
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
     use windows_sys::Win32::Foundation::CloseHandle;

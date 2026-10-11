@@ -4,8 +4,6 @@
 #[derive(Clone)]
 pub struct Selection {
     pub text: String,
-    /// Terminal highlights are copies of the screen, not editable selections.
-    pub terminal: bool,
     #[cfg(windows)]
     target: native::Target,
     #[cfg(windows)]
@@ -36,18 +34,47 @@ impl Selection {
     }
 }
 fn normalize_lines(text: &str) -> String { text.replace("\r\n", "\n").replace('\r', "\n") }
-fn copy_origin_allowed(terminal: bool, owner_process: Option<u32>, target_process: u32) -> bool {
-    owner_process == Some(target_process) || (terminal && owner_process.is_none())
+fn copy_origin_allowed(owner_process: Option<u32>, target_process: u32) -> bool {
+    owner_process == Some(target_process)
+}
+const TERMINAL_UNSUPPORTED: &str = "Write Mode isn't available in terminals. Select text in an editor to rewrite it.";
+fn require_editor_surface(process_name: &str, window_class: &str, focused_class: &str) -> Result<(), String> {
+    let class = focused_class.to_ascii_lowercase();
+    if crate::context_detector::is_terminal_process(process_name)
+        || crate::context_detector::is_native_terminal_class(window_class)
+        || crate::context_detector::is_native_terminal_class(focused_class)
+        || class == "xterm" || class.starts_with("xterm-") {
+        return Err(TERMINAL_UNSUPPORTED.into());
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod copy_tests {
     use super::*;
     #[test]
-    fn unowned_clipboard_is_allowed_only_for_terminal_previews() {
-        assert!(copy_origin_allowed(true, None, 42));
-        assert!(!copy_origin_allowed(false, None, 42));
-        assert!(copy_origin_allowed(false, Some(42), 42));
-        assert!(!copy_origin_allowed(true, Some(43), 42));
+    fn clipboard_capture_requires_same_owner_process() {
+        assert!(!copy_origin_allowed(None, 42));
+        assert!(copy_origin_allowed(Some(42), 42));
+        assert!(!copy_origin_allowed(Some(43), 42));
+    }
+    #[test]
+    fn terminal_surfaces_are_rejected_before_selection_capture() {
+        for (process, window, focused) in [
+            ("Orca.exe", "Chrome_WidgetWin_1", "xterm-helper-textarea"),
+            ("Code.exe", "Chrome_WidgetWin_1", "xterm-screen"),
+            ("WindowsTerminal.exe", "", ""),
+            ("randomhost.exe", "ConsoleWindowClass", ""),
+            ("randomhost.exe", "", "ConEmuChild"),
+            ("PuTTY.exe", "PuTTY", ""),
+        ] {
+            assert_eq!(require_editor_surface(process, window, focused).unwrap_err(), TERMINAL_UNSUPPORTED);
+        }
+    }
+    #[test]
+    fn editable_fields_in_terminal_hosting_apps_remain_available() {
+        for process in ["Orca.exe", "Code.exe", "Chrome.exe", "Notepad.exe"] {
+            assert!(require_editor_surface(process, "Chrome_WidgetWin_1", "textarea").is_ok());
+        }
     }
     #[test]
     fn equivalent_editor_line_endings_match() {
@@ -81,7 +108,7 @@ pub fn replace(
 }
 #[cfg(windows)]
 mod native {
-    use super::Selection;
+    use super::{require_editor_surface, Selection};
     use std::{
         thread::sleep,
         time::{Duration, Instant},
@@ -145,7 +172,6 @@ mod native {
         process: u32,
         focus: usize,
         runtime_id: Vec<i32>,
-        terminal: bool,
     }
     #[derive(Clone, PartialEq)]
     pub(super) struct Anchor {
@@ -164,6 +190,11 @@ mod native {
             if process == std::process::id() {
                 return Err("Select text in another app before starting Write Mode.".into());
             }
+            let process_name = crate::context_detector::process_name_from_pid(process);
+            let mut window_class = [0u16; 128];
+            let count = GetClassNameW(window, &mut window_class);
+            let window_class = String::from_utf16_lossy(&window_class[..count.max(0) as usize]);
+            require_editor_surface(&process_name, &window_class, "")?;
             let mut gui = GUITHREADINFO {
                 cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
                 ..Default::default()
@@ -177,10 +208,7 @@ mod native {
             }
             let element = automation.GetFocusedElement().map_err(err)?;
             let class = element.CurrentClassName().map_err(err)?.to_string();
-            let mut window_class = [0u16; 128];
-            let count = GetClassNameW(window, &mut window_class);
-            let window_class = String::from_utf16_lossy(&window_class[..count.max(0) as usize]);
-            let terminal = class == "xterm-helper-textarea" || matches!(window_class.as_str(), "ConsoleWindowClass" | "CASCADIA_HOSTING_WINDOW_CLASS");
+            require_editor_surface(&process_name, &window_class, &class)?;
             if element.CurrentIsPassword().map_err(err)?.as_bool() {
                 return Err("Write Mode cannot read password fields.".into());
             }
@@ -190,10 +218,10 @@ mod native {
             if let Ok(value) =
                 element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             {
-                if value.CurrentIsReadOnly().map_err(err)?.as_bool() && !terminal {
+                if value.CurrentIsReadOnly().map_err(err)?.as_bool() {
                     return Err("This text is read-only. Select text in an editor.".into());
                 }
-            } else if !terminal && element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
+            } else if element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
                 && element
                     .GetCurrentPatternAs::<IUIAutomationTextEditPattern>(UIA_TextEditPatternId)
                     .is_err()
@@ -230,7 +258,6 @@ mod native {
                     process,
                     focus: gui.hwndFocus.0 as usize,
                     runtime_id,
-                    terminal,
                 },
             ))
         }
@@ -283,7 +310,7 @@ mod native {
         let _com=Apartment::new()?;
         let (_,element,target)=focused()?;
         let (text,anchor)=anchored_selection(&element,false)?;
-        Ok(Selection { text, terminal:false, target, anchor:Some(anchor) })
+        Ok(Selection { text, target, anchor:Some(anchor) })
     }
     pub(super) fn observed_passage(marker: &Selection) -> Result<String,String> {
         let _com=Apartment::new()?;
@@ -316,15 +343,13 @@ mod native {
         let (_automation, element, target) = focused()?;
         cancel.check()?;
         let (text, anchor) = unsafe {
-            if target.terminal {
-                (copy_selection(&target).map_err(|error| format!("Highlight the text in your terminal first, then start Write Mode. {error}"))?, None)
-            } else if element
+            if element
                 .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
                 .is_ok()
             {
                 let (text, anchor) = anchored_selection(&element, false)?;
                 if text.trim().is_empty() {
-                    if let Some(previous) = previous.filter(|last| last.target == target && last.anchor.is_some() && !last.terminal) {
+                    if let Some(previous) = previous.filter(|last| last.target == target && last.anchor.is_some()) {
                         return select_previous(&element, previous, cancel);
                     }
                 }
@@ -339,7 +364,6 @@ mod native {
         }
         Ok(Selection {
             text,
-            terminal: target.terminal,
             target,
             anchor,
         })
@@ -349,7 +373,6 @@ mod native {
         text: &str,
         cancel: &crate::write_mode::Cancellation,
     ) -> Result<Option<String>, String> {
-        if selection.terminal { return Err("Terminal highlights cannot be replaced safely. Copy the rewrite from its preview.".into()); }
         let _com = Apartment::new()?;
         cancel.check()?;
         wait_modifiers()?;
@@ -388,7 +411,7 @@ mod native {
                     })?;
                     let (text, actual) = text_selection(element)?;
                     if normalized(&text) != normalized(&previous.text) || normalized(&actual.prefix) != normalized(&anchor.prefix) || normalized(&actual.suffix) != normalized(&anchor.suffix) { return Err(CHANGED.into()); }
-                    return Ok(Selection { text, target:previous.target.clone(), anchor:Some(actual), terminal:false });
+                    return Ok(Selection { text, target:previous.target.clone(), anchor:Some(actual) });
                 }
                 search.MoveEndpointByRange(TextPatternRangeEndpoint_Start,&range,TextPatternRangeEndpoint_End).map_err(err)?;
             }
@@ -605,9 +628,7 @@ mod native {
         if !native_focus_matches(target) {
             return Err(CHANGED.into());
         }
-        // Ctrl+Insert copies terminal highlights without sending Ctrl+C to the
-        // running process or colliding with global Ctrl+Shift+C shortcuts.
-        key_chord(if target.terminal { enigo::Key::Insert } else { enigo::Key::C })?;
+        key_chord(enigo::Key::C)?;
         let start = Instant::now();
         while unsafe { GetClipboardSequenceNumber() } == saved.sequence.unwrap()
             && start.elapsed() < Duration::from_millis(700)
@@ -619,9 +640,6 @@ mod native {
             return Err("No selected text was copied. Highlight text and retry Write Mode.".into());
         }
         {
-            // Chromium's clipboard API can leave no owner HWND even when the
-            // clipboard has valid text. Permit that only for terminal previews,
-            // which never replace or submit terminal input automatically.
             let owner_process = match unsafe { GetClipboardOwner() } {
                 Ok(owner) => {
                     let mut process = 0;
@@ -631,7 +649,7 @@ mod native {
                 Err(error) if error.code().0 == 0 => None,
                 Err(error) => return Err(err(error)),
             };
-            if !super::copy_origin_allowed(target.terminal, owner_process, target.process)
+            if !super::copy_origin_allowed(owner_process, target.process)
                 || !native_focus_matches(target) {
                 // A different application copied something while Ctrl+C was in
                 // flight. Keep its newer clipboard rather than claiming ownership.

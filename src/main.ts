@@ -98,9 +98,12 @@ const localSettings = document.getElementById("local-settings")!;
 const whisperHardware = document.getElementById("whisper-hardware-settings")!;
 const whisperAcceleration = document.getElementById("whisper-acceleration") as HTMLSelectElement;
 const cudaDownload = document.getElementById("cuda-download-btn") as HTMLButtonElement;
+const cudaDelete = document.getElementById("cuda-delete-btn") as HTMLButtonElement;
 const cudaStatus = document.getElementById("cuda-runtime-status")!;
 let cudaInstalled = false;
+let cudaPresent = false;
 let cudaDownloading = false;
+let cudaDeleting = false;
 const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
 const downloadBtn = document.getElementById("download-btn")!;
@@ -599,15 +602,23 @@ function setEngine(engine: string) {
 function showCudaStatus() {
   const selected = whisperAcceleration.value === "cuda";
   cudaDownload.classList.toggle("hidden", !selected || cudaInstalled);
-  cudaDownload.disabled = cudaDownloading;
+  cudaDownload.disabled = cudaDownloading || cudaDeleting;
   cudaDownload.textContent = cudaDownloading ? "Downloading…" : "Download NVIDIA support";
-  if (!cudaDownloading) cudaStatus.textContent = selected
+  cudaDelete.classList.toggle("hidden", !cudaPresent);
+  cudaDelete.disabled = cudaDownloading || cudaDeleting;
+  cudaDelete.textContent = cudaDeleting ? "Removing…" : "Delete NVIDIA support";
+  whisperAcceleration.disabled = cudaDeleting;
+  syncCustomSelectDisplay(whisperAcceleration);
+  if (!cudaDownloading && !cudaDeleting) cudaStatus.textContent = selected
     ? cudaInstalled ? "NVIDIA support installed." : "CPU will be used until NVIDIA support is downloaded."
     : "";
 }
 async function refreshCudaStatus() {
-  try { cudaInstalled = await invoke<boolean>("check_cuda_runtime"); }
-  catch { cudaInstalled = false; }
+  try {
+    [cudaInstalled, cudaPresent] = await Promise.all([
+      invoke<boolean>("check_cuda_runtime"), invoke<boolean>("check_cuda_runtime_present"),
+    ]);
+  } catch { cudaInstalled = false; cudaPresent = false; }
   showCudaStatus();
 }
 whisperAcceleration.addEventListener("change", async () => {
@@ -616,18 +627,48 @@ whisperAcceleration.addEventListener("change", async () => {
   await saveSettings();
 });
 cudaDownload.addEventListener("click", async () => {
-  if (cudaDownloading) return;
+  if (cudaDownloading || cudaDeleting) return;
   cudaDownloading = true;
   showCudaStatus();
   cudaStatus.textContent = "Downloading NVIDIA support…";
   try {
     await invoke("download_cuda_runtime");
     cudaInstalled = true;
+    cudaPresent = true;
     cudaDownloading = false;
     showCudaStatus();
   } catch (error) {
     cudaDownloading = false;
     showCudaStatus();
+    cudaStatus.textContent = String(error);
+  }
+});
+cudaDelete.addEventListener("click", async () => {
+  if (cudaDownloading || cudaDeleting) return;
+  cudaDeleting = true;
+  currentSettings.whisperAcceleration = "cpu";
+  closeAllCustomSelects();
+  showCudaStatus();
+  cudaStatus.textContent = "Removing NVIDIA support…";
+  try {
+    await invoke("delete_cuda_runtime");
+    currentSettings.whisperAcceleration = "cpu";
+    whisperAcceleration.value = "cpu";
+    cudaInstalled = false;
+    cudaPresent = false;
+    cudaDeleting = false;
+    showCudaStatus();
+    cudaStatus.textContent = "NVIDIA support removed. Whisper uses CPU; your models are unchanged.";
+  } catch (error) {
+    // Deletion may fail after the server is stopped. Reflect the persisted CPU
+    // choice and keep removal available for any remaining runtime files.
+    try {
+      const settings = await invoke<Settings>("get_settings");
+      currentSettings.whisperAcceleration = settings.whisperAcceleration || "cpu";
+      whisperAcceleration.value = currentSettings.whisperAcceleration;
+    } catch { /* Keep the last known choice if settings cannot be read. */ }
+    cudaDeleting = false;
+    await refreshCudaStatus();
     cudaStatus.textContent = String(error);
   }
 });
@@ -2361,6 +2402,8 @@ function positionCustomPanel(trigger: HTMLElement, panel: HTMLElement) {
 function syncCustomSelectDisplay(select: HTMLSelectElement) {
   const wrapper = (select as unknown as { _customWrapper?: HTMLElement })._customWrapper;
   if (!wrapper) return;
+  const trigger = wrapper.querySelector<HTMLButtonElement>(".custom-select-trigger");
+  if (trigger) trigger.disabled = select.disabled;
   const valueSpan = wrapper.querySelector<HTMLElement>(".custom-select-value");
   if (!valueSpan) return;
   const opt = select.options[select.selectedIndex];

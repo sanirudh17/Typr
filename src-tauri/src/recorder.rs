@@ -122,9 +122,6 @@ impl Recorder {
             *state = RecordingState::Transcribing; // Reserve the recorder while reading the selection.
             *self.write_cancel.lock().unwrap() = Some(cancellation.clone());
         }
-        crate::overlay::set_write_mode(app, true);
-        let _ = app.emit("recording-state", RecordingState::Transcribing);
-        update_overlay(app, &RecordingState::Transcribing, true);
         let recent = {
             let mut last = self.write_recent.lock().unwrap();
             if last.as_ref().is_some_and(|edit| !edit.valid()) { *last = None; }
@@ -140,6 +137,9 @@ impl Recorder {
         };
         let previous_instruction = recent.filter(|last| last.selection.same_passage(&selection)).map(|last| last.instruction);
         *self.write_session.lock().unwrap() = Some(crate::write_mode::Session { selection, settings: settings.clone(), cancellation, previous_instruction });
+        // Show recording UI only after an editable selection was accepted.
+        // Unsupported terminal attempts must not flash a processing spinner.
+        crate::overlay::set_write_mode(app, true);
         let nemotron = app_dir.join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
         let parakeet = app_dir.join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
         if let Err(e) = self.start_recording(app, &settings.microphone, None, &settings.engine, Some(&nemotron), Some(&parakeet)) {
@@ -690,11 +690,6 @@ impl Recorder {
             let result = async {
                 write.cancellation.check()?;
                 let edited = crate::write_mode::rewrite(&write.selection.text, &replaced, write.previous_instruction.as_deref(), settings, &write.cancellation).await?;
-                if write.selection.terminal {
-                    write.cancellation.check()?;
-                    crate::write_preview::show(app, &edited, &settings.theme)?;
-                    return Ok("Write Mode rewrite ready to copy".to_string());
-                }
                 let target = write.selection.clone();
                 let text = edited.clone();
                 let cancel = write.cancellation.clone();

@@ -11,7 +11,7 @@ pub const CUDA_SHA256: &str = "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b3
 const CUDA_URL: &str = "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip";
 const MAX_ARCHIVE: u64 = 750 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 1536 * 1024 * 1024;
-static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const REQUIRED: &[&str] = &["whisper-cli.exe", "whisper-server.exe", "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu-x64.dll", "ggml-cuda.dll", "cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll"];
 
 pub fn cuda_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -24,6 +24,9 @@ pub fn installed_at(directory: &Path) -> bool {
 }
 pub fn cuda_installed(app: &AppHandle) -> bool {
     cuda_directory(app).is_ok_and(|directory| installed_at(&directory))
+}
+pub fn cuda_present(app: &AppHandle) -> bool {
+    cuda_directory(app).is_ok_and(|directory| directory.symlink_metadata().is_ok())
 }
 pub fn uses_cuda(app: &AppHandle) -> bool {
     app.state::<crate::settings::RuntimeSettings>().acceleration.lock().unwrap().as_str() == "cuda"
@@ -53,6 +56,82 @@ fn runtime_file(name: &str) -> bool {
 fn archive_filename(path: &str) -> Option<&str> {
     let name = path.strip_prefix("Release/")?;
     if name.contains(['/', '\\']) || !runtime_file(name) { None } else { Some(name) }
+}
+
+fn is_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        // Includes directory junctions, not just symbolic links.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))] { metadata.file_type().is_symlink() }
+}
+
+/// Only remove our pinned, flat runtime. Never recurse into models or links.
+fn runtime_removal_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let directory = root.join(format!("whisper-cuda-{RELEASE}"));
+    let metadata = match directory.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err("NVIDIA runtime directory is not a regular folder. No files were removed.".into());
+    }
+    let parent = root.canonicalize().map_err(|e| e.to_string())?;
+    let resolved = directory.canonicalize().map_err(|e| e.to_string())?;
+    if resolved != parent.join(format!("whisper-cuda-{RELEASE}")) {
+        return Err("NVIDIA runtime is outside its expected folder. No files were removed.".into());
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&resolved).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.path().symlink_metadata().map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if !metadata.is_file() || is_link(&metadata)
+            || !name.to_str().is_some_and(|name| name == "verified.txt" || runtime_file(name)) {
+            return Err("NVIDIA runtime contains unexpected files. No files were removed.".into());
+        }
+        files.push(entry.path());
+    }
+    // Keep the installation marker until the runtime files have been removed.
+    files.sort_by_key(|path| path.file_name().is_some_and(|name| name == "verified.txt"));
+    Ok(files)
+}
+
+fn remove_runtime_at(root: &Path) -> Result<(), String> {
+    let files = runtime_removal_files(root)?;
+    for path in files {
+        let started = std::time::Instant::now();
+        loop {
+            match std::fs::remove_file(&path) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && started.elapsed() < Duration::from_secs(2) => {
+                        // Windows may release a killed server's DLL handles shortly after kill().
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                Err(_) => return Err("Could not remove NVIDIA support. Whisper now uses CPU; retry deletion after closing other Whisper processes.".into()),
+            }
+        }
+    }
+    match std::fs::remove_dir(root.join(format!("whisper-cuda-{RELEASE}"))) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove the NVIDIA runtime folder: {error}")),
+    }
+}
+
+/// Caller reserves the idle recorder; the callback persists its CPU settings.
+pub async fn remove_cuda(app: &AppHandle, prepare_cpu: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let _lock = RUNTIME_LOCK.try_lock().map_err(|_| "NVIDIA support is already downloading or being removed.")?;
+    let directory = cuda_directory(app)?;
+    let root = directory.parent().ok_or("Invalid runtime directory.")?;
+    runtime_removal_files(root)?;
+    prepare_cpu()?;
+    *app.state::<crate::settings::RuntimeSettings>().acceleration.lock().unwrap() = "cpu".into();
+    crate::whisper_server::with_server_stopped(|| remove_runtime_at(root)).await
 }
 fn digest_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -108,7 +187,7 @@ fn install_archive(archive: &Path, staging: &Path, destination: &Path) -> Result
 }
 
 pub async fn download_cuda(app: AppHandle) -> Result<(), String> {
-    let _lock = DOWNLOAD_LOCK.try_lock().map_err(|_| "NVIDIA support is already downloading.")?;
+    let _lock = RUNTIME_LOCK.try_lock().map_err(|_| "NVIDIA support is already downloading or being removed.")?;
     let destination = cuda_directory(&app)?;
     if installed_at(&destination) { return Ok(()); }
     let root = destination.parent().ok_or("Invalid runtime directory.")?;
@@ -166,6 +245,74 @@ pub async fn download_cuda(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn removal_fixture() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("typr-runtime-removal-{}", crate::vocabulary::new_id()));
+        let directory = root.join(format!("whisper-cuda-{RELEASE}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in REQUIRED { std::fs::write(directory.join(name), b"fixture only").unwrap(); }
+        std::fs::write(directory.join("verified.txt"), CUDA_SHA256).unwrap();
+        (root, directory)
+    }
+    #[test] fn deleting_gpu_runtime_preserves_models_cpu_runtime_and_sibling_versions() {
+        let (root, directory) = removal_fixture();
+        let model = root.join("ggml-small.bin");
+        let cpu = root.join("cpu");
+        let other = root.join("whisper-cuda-other");
+        std::fs::write(&model, b"speech model").unwrap();
+        std::fs::create_dir(&cpu).unwrap(); std::fs::write(cpu.join("whisper.dll"), b"CPU").unwrap();
+        std::fs::create_dir(&other).unwrap(); std::fs::write(other.join("keep.txt"), b"other version").unwrap();
+        assert!(installed_at(&directory));
+        remove_runtime_at(&root).unwrap();
+        assert!(!directory.exists()); assert!(!installed_at(&directory));
+        assert_eq!(std::fs::read(&model).unwrap(), b"speech model");
+        assert_eq!(std::fs::read(cpu.join("whisper.dll")).unwrap(), b"CPU");
+        assert_eq!(std::fs::read(other.join("keep.txt")).unwrap(), b"other version");
+        remove_runtime_at(&root).unwrap(); // Repeated deletion is harmless.
+        std::fs::remove_file(model).unwrap(); std::fs::remove_file(cpu.join("whisper.dll")).unwrap();
+        std::fs::remove_file(other.join("keep.txt")).unwrap();
+        std::fs::remove_dir(cpu).unwrap(); std::fs::remove_dir(other).unwrap(); std::fs::remove_dir(root).unwrap();
+    }
+    #[test] fn partial_runtime_can_be_removed_without_a_verification_marker() {
+        let (root, directory) = removal_fixture();
+        std::fs::remove_file(directory.join("verified.txt")).unwrap();
+        std::fs::remove_file(directory.join("ggml-cuda.dll")).unwrap();
+        assert!(!installed_at(&directory));
+        remove_runtime_at(&root).unwrap(); assert!(!directory.exists());
+        std::fs::remove_dir(root).unwrap();
+    }
+    #[test] fn unexpected_contents_are_rejected_before_any_runtime_file_is_deleted() {
+        let (root, directory) = removal_fixture();
+        let notes = directory.join("user-notes.txt");
+        std::fs::write(&notes, b"keep").unwrap();
+        assert!(remove_runtime_at(&root).unwrap_err().contains("unexpected"));
+        assert!(installed_at(&directory)); assert!(notes.exists());
+        std::fs::remove_file(notes).unwrap();
+        let nested = directory.join("nested"); std::fs::create_dir(&nested).unwrap();
+        assert!(remove_runtime_at(&root).is_err()); assert!(installed_at(&directory));
+        std::fs::remove_dir(nested).unwrap();
+        remove_runtime_at(&root).unwrap(); std::fs::remove_dir(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test] fn linked_runtime_directory_is_not_deleted() {
+        let (root, directory) = removal_fixture();
+        remove_runtime_at(&root).unwrap();
+        let outside = root.join("protected"); std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("whisper.dll"), b"keep").unwrap();
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command",
+            "$null = New-Item -ItemType Junction -Path $env:TYPR_REMOVE_TEST_LINK -Target $env:TYPR_REMOVE_TEST_TARGET -ErrorAction Stop"])
+            .env("TYPR_REMOVE_TEST_LINK", &directory).env("TYPR_REMOVE_TEST_TARGET", &outside);
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+        assert!(command.status().unwrap().success());
+        assert!(is_link(&directory.symlink_metadata().unwrap()));
+        assert!(remove_runtime_at(&root).unwrap_err().contains("regular folder"));
+        assert_eq!(std::fs::read(outside.join("whisper.dll")).unwrap(), b"keep");
+        // Nonrecursive removal unlinks the fixture junction, never its target.
+        std::fs::remove_dir(directory).unwrap();
+        std::fs::remove_file(outside.join("whisper.dll")).unwrap();
+        std::fs::remove_dir(outside).unwrap(); std::fs::remove_dir(root).unwrap();
+    }
     #[test] fn checksum_failure_never_publishes_a_runtime() {
         let root = std::env::temp_dir().join(format!("typr-runtime-check-{}",crate::vocabulary::new_id()));
         std::fs::create_dir(&root).unwrap(); let archive=root.join("bad.zip");

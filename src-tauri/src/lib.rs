@@ -28,7 +28,6 @@ pub mod vocab_correct;
 pub mod email_assemble;
 pub mod overlay;
 pub mod write_mode;
-pub mod write_preview;
 pub mod selection;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

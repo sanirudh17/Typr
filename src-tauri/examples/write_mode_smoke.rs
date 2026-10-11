@@ -61,22 +61,11 @@ mod native {
                 let mut title=[0u16;512]; let count=GetWindowTextW(GetForegroundWindow(),title.as_mut_ptr(),title.len() as i32);
                 assert!(String::from_utf16_lossy(&title[..count.max(0) as usize]).contains("Typr terminal fixture"),"Focus the disposable terminal fixture first");
             }
-            let selected=selection::capture().unwrap_or_else(|error| {
-                unsafe {
-                    use windows::{core::Interface, Win32::{System::Com::*,UI::Accessibility::*}};
-                    CoInitializeEx(None,COINIT_MULTITHREADED).ok().unwrap();
-                    let automation:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).unwrap();
-                    let element=automation.GetFocusedElement().unwrap();
-                    eprintln!("Fixture focus: class={} control={:?} text_pattern={}",element.CurrentClassName().unwrap(),element.CurrentControlType().unwrap(),element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId).is_ok());
-                    let _=automation.cast::<IUIAutomation2>(); CoUninitialize();
-                    use windows::Win32::System::DataExchange::{GetClipboardOwner, IsClipboardFormatAvailable};
-                    eprintln!("Fixture clipboard: owner={:?} unicode={:?}",GetClipboardOwner(),IsClipboardFormatAvailable(13));
-                }
-                panic!("{error}");
-            }); assert!(selected.terminal);
-            assert_eq!(selected.text,"A disposable terminal prompt.");
-            assert!(selection::replace(&selected,"Must never be pasted",&Cancellation::default()).is_err());
-            println!("PASS: xterm field captured via terminal copy; direct replacement blocked");
+            let sequence=unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+            let error=selection::capture().err().expect("Terminal capture must be rejected");
+            assert!(error.contains("Write Mode isn't available in terminals"), "{error}");
+            assert_eq!(unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() },sequence);
+            println!("PASS: terminal Write Mode rejected; clipboard untouched");
             return;
         }
         unsafe {
@@ -91,7 +80,6 @@ mod native {
                 let cancel=Cancellation::default();
                 let selected=selection::capture().unwrap();
                 assert_eq!(selected.text.trim(),ORIGINAL);
-                assert!(!selected.terminal);
                 assert!(selection::replace(&selected,REVISED,&cancel).unwrap().is_none());
                 let marker=selected.with_edited_text(REVISED.into());
                 writeln!(input,"caret").unwrap(); line.clear(); output.read_line(&mut line).unwrap();

@@ -1,6 +1,0 @@
-{
-  "identifier": "write-preview",
-  "description": "Close and drag the local terminal rewrite preview.",
-  "windows": ["write-preview"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-close"]
-}

@@ -7,6 +7,7 @@
 - Whisper runs on CPU by default. The installer includes the matching CPU executables and DLLs, without the large CUDA runtime.
 - Engine settings offer a separate NVIDIA support download. The pinned official archive is verified with SHA-256 and checked for complete runtime files before it becomes available.
 - NVIDIA support is retained in app data across app updates. Failed GPU execution can recover through CPU Whisper.
+- Delete NVIDIA support in Engine settings to reclaim the runtime's disk space. Removal stops the Whisper server, returns Whisper to CPU, and preserves speech models. It is available even when CPU is selected, and waits until recording is idle.
 - The EXE installer removes known obsolete runtime files from previous installations while keeping models and user data.
 
 ### Background memory
@@ -20,8 +21,8 @@
 - Follow-up edits use the current rewritten passage and the preceding instruction, with the latest instruction taking priority.
 - For five minutes, the same unchanged passage can be selected again automatically in supported editors. Changed documents, fields, or windows stop this behavior.
 - Spoken editing instructions bypass Snippet replacements.
-- xterm and Windows terminal highlights can be copied with Ctrl+Insert and rewritten in a themed preview. Copy the result into the terminal prompt manually; Typr never replaces or submits terminal input.
-- Terminal capture supports clipboard text without an owner window, while retaining focus, sequence, size, and clipboard preservation checks. A known different clipboard owner is rejected.
+- Write Mode rejects terminal surfaces before microphone capture or AI processing, with a clear message instead of a processing spinner. Regular editable fields in Orca and VS Code remain supported; normal dictation in terminals is unchanged.
+- Removed the terminal rewrite preview and its clipboard shortcut workaround. Editor clipboard capture requires the focused app to own the fresh copy.
 
 ## [v0.3.0] - 2026-10-11
 

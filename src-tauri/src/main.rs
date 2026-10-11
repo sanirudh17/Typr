@@ -763,20 +763,29 @@ fn check_cuda_runtime(app: tauri::AppHandle) -> bool {
     typr_lib::whisper_runtime::cuda_installed(&app)
 }
 #[tauri::command]
-fn show_write_preview(window: tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "write-preview" { return Err("Unavailable outside the rewrite preview.".into()); }
-    window.center().map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())
-}
-#[tauri::command]
-fn copy_write_preview(window: tauri::WebviewWindow, text: String) -> Result<(), String> {
-    if window.label() != "write-preview" || text.chars().count() > 16000 || text.contains('\0') { return Err("The rewrite could not be copied.".into()); }
-    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).map_err(|_| "The clipboard is busy. Try copying again.".into())
+fn check_cuda_runtime_present(app: tauri::AppHandle) -> bool {
+    typr_lib::whisper_runtime::cuda_present(&app)
 }
 #[tauri::command]
 async fn download_cuda_runtime(app: tauri::AppHandle) -> Result<(), String> {
     typr_lib::whisper_runtime::download_cuda(app).await
+}
+
+#[tauri::command]
+async fn delete_cuda_runtime(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.recorder.run_when_idle(|| {
+            tauri::async_runtime::block_on(typr_lib::whisper_runtime::remove_cuda(&app, || {
+                let mut settings = state.settings.lock().unwrap();
+                let mut cpu = settings.clone();
+                cpu.whisper_acceleration = "cpu".into();
+                cpu.save(&state.app_dir)?;
+                *settings = cpu;
+                Ok(())
+            }))
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1079,8 +1088,8 @@ async fn do_write(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
                     let _ = tx.try_send(HotkeyEvent { source: HotkeySource::CancelWrite, state: ShortcutState::Pressed });
                 }
             }).map_err(|_| "Escape is unavailable for cancellation. Close the app using it and retry Write Mode.".to_string())?;
-            prewarm_local(app);
             let result = state.recorder.start_write(app, &settings, &state.app_dir).await;
+            if result.is_ok() && state.recorder.get_state() == RecordingState::Recording { prewarm_local(app); }
             if result.is_err() || state.recorder.get_state() == RecordingState::Ready { let _ = app.global_shortcut().unregister("Escape"); }
             result
         }
@@ -1235,9 +1244,9 @@ fn main() {
             save_settings,
             list_microphones,
             check_cuda_runtime,
-            show_write_preview,
-            copy_write_preview,
+            check_cuda_runtime_present,
             download_cuda_runtime,
+            delete_cuda_runtime,
             get_recording_state,
             get_amplitude,
             get_frequency_bands,
