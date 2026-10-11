@@ -1,12 +1,12 @@
 param(
-    [string]$Destination = (Join-Path $PSScriptRoot '../src-tauri/binaries'),
+    [string]$Destination = (Join-Path $PSScriptRoot '../src-tauri/binaries/cpu'),
     [string]$ArchivePath
 )
 $ErrorActionPreference = 'Stop'
 # Keep the executable and all runtime DLLs from one verified official build.
 # Partial DLL sets can exit before main() with STATUS_DLL_NOT_FOUND.
 $release = 'b5454'
-$expectedHash = 'AFEF0B881C500958921C3F5523B50E59EE2EC9B6F5CBD25B324C51ED308A957A'
+$expectedHash = '6BA69E3482D7826214F90A6A9C84CA07782AEC1E1D0C6A7C30C994FD5D816CCB'
 if (Test-Path -LiteralPath $Destination) {
     $item = Get-Item -LiteralPath $Destination
     if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -19,7 +19,7 @@ if (Test-Path -LiteralPath $Destination) {
 if (!$ArchivePath) {
     $ArchivePath = Join-Path ([IO.Path]::GetTempPath()) ('typr-whisper-' + [Guid]::NewGuid().ToString('N') + '.zip')
     & curl.exe --fail --location --silent --show-error --output $ArchivePath (
-        'https://github.com/ggml-org/whisper.cpp/releases/download/' + $release + '/whisper-bin-win-cuda-12.4.0-x64.zip')
+        'https://github.com/ggml-org/whisper.cpp/releases/download/' + $release + '/whisper-bin-x64.zip')
     if ($LASTEXITCODE -ne 0) { throw 'Whisper runtime download failed.' }
 }
 if ((Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash -ne $expectedHash) {
@@ -28,16 +28,19 @@ if ((Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash -ne $expecte
 $unpack = Join-Path ([IO.Path]::GetTempPath()) ('typr-whisper-unpack-' + [Guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $ArchivePath -DestinationPath $unpack
 $source = Join-Path $unpack 'Release'
-foreach ($name in @('whisper-cli.exe', 'whisper-server.exe', 'whisper.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-cpu-x64.dll', 'ggml-cuda.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'cudart64_12.dll')) {
+foreach ($name in @('whisper-cli.exe', 'whisper-server.exe', 'whisper.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-cpu-x64.dll')) {
     if (!(Test-Path -LiteralPath (Join-Path $source $name) -PathType Leaf)) { throw ('Incomplete archive: ' + $name) }
 }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 $mapping = @{
     'whisper-cpp-x86_64-pc-windows-msvc.exe' = 'whisper-cli.exe'
-    'whisper-cpp-cuda-x86_64-pc-windows-msvc.exe' = 'whisper-cli.exe'
-    'whisper-server-cuda-x86_64-pc-windows-msvc.exe' = 'whisper-server.exe'
+    'whisper-server-x86_64-pc-windows-msvc.exe' = 'whisper-server.exe'
 }
-foreach ($dll in Get-ChildItem -LiteralPath $source -File -Filter '*.dll') { $mapping[$dll.Name] = $dll.Name }
+foreach ($dll in Get-ChildItem -LiteralPath $source -File -Filter '*.dll') {
+    if ($dll.Name -in @('whisper.dll','ggml.dll','ggml-base.dll') -or $dll.Name -like 'ggml-cpu-*.dll') {
+        $mapping[$dll.Name] = $dll.Name
+    }
+}
 foreach ($entry in $mapping.GetEnumerator()) {
     $inputStream = [IO.File]::OpenRead((Join-Path $source $entry.Value))
     try {
@@ -45,7 +48,7 @@ foreach ($entry in $mapping.GetEnumerator()) {
         try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
     } finally { $inputStream.Dispose() }
 }
-foreach ($name in @('whisper-cpp-x86_64-pc-windows-msvc.exe', 'whisper-cpp-cuda-x86_64-pc-windows-msvc.exe', 'whisper-server-cuda-x86_64-pc-windows-msvc.exe')) {
+foreach ($name in @('whisper-cpp-x86_64-pc-windows-msvc.exe', 'whisper-server-x86_64-pc-windows-msvc.exe')) {
     # Help is supported by both binaries. --version is not a CLI option in this
     # pinned build. Capture normal stderr without PowerShell 5 treating it as a
     # terminating NativeCommandError under ErrorActionPreference=Stop.
@@ -70,4 +73,4 @@ foreach ($name in @('whisper-cpp-x86_64-pc-windows-msvc.exe', 'whisper-cpp-cuda-
         }
     } finally { $process.Dispose() }
 }
-Write-Output ('Complete Whisper runtime prepared in ' + [IO.Path]::GetFullPath($Destination))
+Write-Output ('CPU Whisper runtime prepared in ' + [IO.Path]::GetFullPath($Destination))

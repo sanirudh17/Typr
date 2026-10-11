@@ -1,5 +1,28 @@
 # Changelog - Typr
 
+## Unreleased
+
+### Smaller installer and optional NVIDIA support
+
+- Whisper runs on CPU by default. The installer includes the matching CPU executables and DLLs, without the large CUDA runtime.
+- Engine settings offer a separate NVIDIA support download. The pinned official archive is verified with SHA-256 and checked for complete runtime files before it becomes available.
+- NVIDIA support is retained in app data across app updates. Failed GPU execution can recover through CPU Whisper.
+- The EXE installer removes known obsolete runtime files from previous installations while keeping models and user data.
+
+### Background memory
+
+- Inactive Parakeet and Nemotron models are released after an engine change. The remaining model is released after three idle minutes, while the recorder is ready.
+- Model loading is started again on the next use. This can add a short cold-start delay after inactivity.
+- Long recordings release excess audio-buffer capacity after processing.
+
+### Write Mode
+
+- Follow-up edits use the current rewritten passage and the preceding instruction, with the latest instruction taking priority.
+- For five minutes, the same unchanged passage can be selected again automatically in supported editors. Changed documents, fields, or windows stop this behavior.
+- Spoken editing instructions bypass Snippet replacements.
+- xterm and Windows terminal highlights can be copied with Ctrl+Insert and rewritten in a themed preview. Copy the result into the terminal prompt manually; Typr never replaces or submits terminal input.
+- Terminal capture supports clipboard text without an owner window, while retaining focus, sequence, size, and clipboard preservation checks. A known different clipboard owner is rejected.
+
 ## [v0.3.0] - 2026-10-11
 
 Write Mode, confirmed dictionary learning, dynamic Groq models, and dictation reliability improvements for Windows.

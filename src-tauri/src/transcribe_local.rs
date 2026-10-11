@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::ShellExt;
+use tauri::AppHandle;
 
 static LOCAL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 fn local_client() -> &'static reqwest::Client {
@@ -191,9 +190,7 @@ pub async fn transcribe_local(
         .map(|count| count.get().min(12).to_string())
         .unwrap_or_else(|_| "12".to_string());
 
-    let resource_path = app.path().resource_dir().unwrap().join("binaries");
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
+    let gpu = crate::whisper_runtime::uses_cuda(app);
 
     let (samples, sample_rate) = match crate::audio_chunker::read_wav_samples(audio_path) {
         Ok(res) => res,
@@ -222,7 +219,8 @@ pub async fn transcribe_local(
     // transcribe with a stale model (e.g. right after downloading a new model).
     let intended_key = model_path.to_string_lossy().to_string();
     let current = crate::whisper_server::current_model_key();
-    if !crate::whisper_server::warm_server_matches(current.as_deref(), &intended_key) {
+    if !crate::whisper_server::warm_server_matches(current.as_deref(), &intended_key)
+        || crate::whisper_server::current_backend_is_gpu() != gpu {
         println!(
             "[Typr] Warm server model mismatch (have {:?}, want {}). Ensuring correct model...",
             current, intended_key
@@ -327,144 +325,14 @@ pub async fn transcribe_local(
 
     println!("[Typr] Persistent HTTP server failed or incomplete. Falling back to sidecars...");
 
-    // 2. Try GPU (CUDA) execution as fallback
-    println!(
-        "[Typr] Attempting whisper.cpp GPU (CUDA) execution with model {:?} using {} threads",
-        model_path, cuda_threads
-    );
-    let started_gpu = Instant::now();
-
-    let cuda_result = if chunks.len() <= 1 {
-        let cuda_cmd_args = vec![
-            "-m".to_string(),
-            model_path.to_str().unwrap().to_string(),
-            "-f".to_string(),
-            audio_path.to_str().unwrap().to_string(),
-            "-t".to_string(),
-            cuda_threads.clone(),
-            "-dev".to_string(),
-            "0".to_string(),
-            "-fa".to_string(),
-            "-bs".to_string(),
-            "5".to_string(),
-            "-mc".to_string(),
-            "0".to_string(),
-            "-nf".to_string(),
-            "-l".to_string(),
-            "en".to_string(),
-        ];
-        app.shell()
-            .sidecar("whisper-cpp-cuda")
-            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-            .env("PATH", &new_path)
-            .args(cuda_cmd_args)
-            .output()
-            .await
-            .map(|output| {
-                if output.status.success() {
-                    checked_transcript(&String::from_utf8_lossy(&output.stdout), &samples, sample_rate)
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("Exit status: {:?}, Stderr: {}", output.status, stderr))
-                }
-            })
-            .map_err(|e| e.to_string())
-            .and_then(|r| r)
-    } else {
-        run_sidecar_chunks(
-            app,
-            "whisper-cpp-cuda",
-            model_path,
-            &chunks,
-            sample_rate,
-            &cuda_threads,
-            &new_path,
-        )
-        .await
-    };
-
-    match cuda_result {
-        Ok(text) => {
-            println!(
-                "[Typr] GPU (CUDA) Whisper completed in {:?}. Output: {}",
-                started_gpu.elapsed(),
-                text
-            );
-            return Ok(text);
-        }
-        Err(error_details) => {
-            println!(
-                "[Typr] GPU (CUDA) execution failed or not available. Error: {}. Falling back to CPU...",
-                error_details
-            );
+    // CUDA is attempted only after the user installs and enables it.
+    if gpu {
+        match run_sidecar_chunks(app, "whisper-cpp-cuda", model_path, &chunks, sample_rate, &cuda_threads).await {
+            Ok(text) => return Ok(text),
+            Err(error) => println!("[Typr] NVIDIA Whisper failed: {error}. Recovering with CPU."),
         }
     }
-
-    // 3. CPU Fallback Path
-    println!(
-        "[Typr] Running CPU fallback sidecar with model {:?} using {} threads",
-        model_path, cpu_threads
-    );
-    let started_cpu = Instant::now();
-
-    let cpu_result = if chunks.len() <= 1 {
-        let mut cpu_cmd_args = vec![
-            "-m".to_string(),
-            model_path.to_str().unwrap().to_string(),
-            "-f".to_string(),
-            audio_path.to_str().unwrap().to_string(),
-            "-t".to_string(),
-            cpu_threads.clone(),
-            "-bs".to_string(),
-            "5".to_string(),
-            "-mc".to_string(),
-            "0".to_string(),
-            "-nf".to_string(),
-            "-l".to_string(),
-            "en".to_string(),
-        ];
-        cpu_cmd_args.extend(sidecar_backend_args("whisper-cpp"));
-        app.shell()
-            .sidecar("whisper-cpp")
-            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-            .env("PATH", &new_path)
-            .args(cpu_cmd_args)
-            .output()
-            .await
-            .map(|output| {
-                if output.status.success() {
-                    checked_transcript(&String::from_utf8_lossy(&output.stdout), &samples, sample_rate)
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("whisper.cpp CPU fallback failed with exit status: {:?}. Stderr: {}", output.status, stderr))
-                }
-            })
-            .map_err(|e| format!("Failed to run whisper.cpp CPU fallback: {}", e))
-            .and_then(|r| r)
-    } else {
-        run_sidecar_chunks(
-            app,
-            "whisper-cpp",
-            model_path,
-            &chunks,
-            sample_rate,
-            &cpu_threads,
-            &new_path,
-        )
-        .await
-    };
-
-    match cpu_result {
-        Ok(text) => {
-            println!(
-                "[Typr] CPU Fallback Whisper completed in {:?}. Output: {}",
-                started_cpu.elapsed(),
-                text
-            );
-            Ok(text)
-        }
-        Err(e) => Err(format!("Failed to run whisper.cpp CPU fallback: {}", e)),
-    }
+    run_sidecar_chunks(app, "whisper-cpp", model_path, &chunks, sample_rate, &cpu_threads).await
 }
 
 async fn run_sidecar_chunks(
@@ -474,7 +342,6 @@ async fn run_sidecar_chunks(
     chunks: &[crate::audio_chunker::Chunk<'_>],
     sample_rate: u32,
     threads: &str,
-    new_path: &str,
 ) -> Result<String, String> {
     let mut parts: Vec<(String, bool)> = Vec::with_capacity(chunks.len());
     let temp_dir = std::env::temp_dir();
@@ -502,14 +369,11 @@ async fn run_sidecar_chunks(
         ];
         args.extend(sidecar_backend_args(sidecar_name));
 
-        let res = app
-            .shell()
-            .sidecar(sidecar_name)
-            .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-            .env("PATH", new_path)
-            .args(args)
-            .output()
-            .await;
+        let command = crate::whisper_runtime::command(app, false, sidecar_name.contains("cuda"));
+        let res = match command {
+            Ok(command) => command.args(args).output().await.map_err(|error| error.to_string()),
+            Err(error) => Err(error),
+        };
 
         let _ = std::fs::remove_file(&chunk_file);
 

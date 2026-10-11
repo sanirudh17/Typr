@@ -22,9 +22,8 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "externalBin": [
-      "binaries/whisper-cpp",
-      "binaries/whisper-cpp-cuda",
-      "binaries/whisper-server-cuda"
+      "binaries/cpu/whisper-cpp",
+      "binaries/cpu/whisper-server"
     ],
     "icon": [
       "icons/32x32.png",
@@ -34,8 +33,9 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "binaries/*.dll"
-    ]
+      "binaries/cpu/*.dll"
+    ],
+    "windows": { "nsis": { "installerHooks": "windows/installer-hooks.nsh" } }
   },
   "plugins": {
     "updater": {

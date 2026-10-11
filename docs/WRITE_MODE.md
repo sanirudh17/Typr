@@ -10,17 +10,21 @@ Write Mode rewrites selected text in another Windows app from a spoken editing i
 
 The Write shortcut always toggles recording, including when ordinary dictation uses push to talk. It uses the selected speech engine and microphone. The Write shortcut can be changed in Recording settings.
 
-Press **Escape** during capture or processing to cancel. The selected text is kept. To undo a completed edit, press **Ctrl+Z** in the edited app; no highlighting is needed. Undo follows that app’s own undo behavior. Typr has no separate revert shortcut or retained edit cache and does not reserve **Ctrl+Alt+Backspace**.
+After a successful edit, keep the same editor focused and give a follow-up instruction, such as "Make the second bullet shorter." In editors that expose their document and selection through accessibility, Typr can select the unchanged rewritten passage again for up to five minutes. It uses the current text and previous instruction as context, with the latest instruction taking priority. Moving to another document or changing the passage manually requires a fresh selection.
+
+In xterm and Windows terminals, highlight the text first. Typr uses **Ctrl+Insert** to copy the screen selection and opens a rewrite preview, instead of replacing terminal input. Click **Copy rewrite** and paste it into your prompt yourself. No command is submitted. Hosts that do not support this copy shortcut may still reject capture; selecting text in a normal editor remains an alternative.
+
+Press **Escape** during capture or processing to cancel. The selected text is kept. To undo a completed edit, press **Ctrl+Z** in the edited app; no highlighting is needed. Undo follows that app’s own undo behavior. Typr has no separate revert shortcut and does not reserve **Ctrl+Alt+Backspace**.
 
 ## Safety and limits
 
-- Windows UI Automation reads the selection first. A **Ctrl+C** fallback is available only for otherwise supported editable fields without a text selection pattern. Password fields, read-only fields, unsupported controls, and changed focus or selection are rejected. Compatibility depends on the editor’s accessibility support.
+- Windows UI Automation reads editor selections first. A **Ctrl+C** fallback is available for otherwise supported editable fields without a text selection pattern. Recognized terminal controls use **Ctrl+Insert** and a preview. Password fields, other read-only fields, unsupported controls, and changed focus or selection are rejected. Compatibility depends on the editor’s accessibility support.
 - Selection is limited to **6,000 characters**, the spoken instruction to **2,000 characters**, and the AI response to **16,000 characters**. The AI request times out after **30 seconds**. Documents too large to verify safely are rejected.
 - Replacement uses a plain text paste into the existing selection. Typr never sends **Ctrl+A**. Rich text styling is not reconstructed.
 - Existing clipboard formats are saved and restored after copy or paste if Typr still owns the clipboard change. A newer user copy is preserved. A busy clipboard or formats that cannot be saved safely can prevent an edit.
 - AI failures and invalid or incomplete responses keep the original text. The editing instruction is never pasted as a dictation fallback.
 
-The selected passage and transcribed instruction are sent to Groq. The selected text and rewrite are used for the current operation and are excluded from dictation history and logs. Typr does not retain them for undo. The existing recording and diagnostic policy still applies to the spoken instruction and its audio.
+The selected passage and transcribed instruction are sent to Groq. The selected text and rewrite are excluded from dictation history and logs. The most recent successful in-place edit and its instruction are retained only in memory for up to five minutes for follow-up edits, not for undo. A terminal preview retains its editable result until the preview is closed. The existing recording and diagnostic policy still applies to the spoken instruction and its audio.
 
 ## Run this checkout
 
@@ -50,7 +54,7 @@ npm run tauri dev
 
 Recorded checks for the feature worktree: TypeScript `tsc --noEmit`, Vite production build, `cargo check`, and `cargo build --bin typr` succeeded. The built frontend was previewed with mocked IPC at **1160×720** and **700×500** in light and dark themes, with no page errors or horizontal overflow. The latest visual review covered Write Mode at **700**, **1366**, and **1920** pixel widths in both themes. All four engine panels and the other settings pages were also checked at **700**, **1160**, **1366**, and **1920** pixel widths without horizontal overflow. The settings reuse the incumbent controls and theme tokens; engine labels and toggle groups accommodate narrow windows.
 
-The latest `cargo test --lib -j2 --quiet` run completed with **423 passed, 0 failed, and 2 ignored**. Three focused Write Mode tests passed: cancellation blocks keyboard input, a late worker cannot send input after cancellation, and a legacy revert setting is ignored and is not saved again. The ignored checks are opt-in evaluations; the new Groq cleanup replay was also run explicitly and passed.
+The initial Write Mode `cargo test --lib -j2 --quiet` run completed with **423 passed, 0 failed, and 2 ignored**. Three focused Write Mode tests passed: cancellation blocks keyboard input, a late worker cannot send input after cancellation, and a legacy revert setting is ignored and is not saved again. The ignored checks are opt-in evaluations; the new Groq cleanup replay was also run explicitly and passed. For the subsequent CPU packaging, memory, and follow-up editing changes, see [the resource and Write Mode review](CPU_AND_WRITE_MODE_REVIEW.md).
 
 Native checks confirmed that **Ctrl+Z** restored the entire original test document after a two-line bullet paste in Chrome textarea and contenteditable fields and Edge textarea and contenteditable fields. These four cases were verified against the document contents. Notepad also restored the entire original probe document, with line endings normalized for comparison. Word was not verified because its automation startup stalled. Compatibility still depends on the target app’s editable control and undo behavior.
 

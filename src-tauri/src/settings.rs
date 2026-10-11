@@ -4,12 +4,19 @@ use std::path::PathBuf;
 
 use crate::context_detector::AppRule;
 
+/// Native runtime preference shared with the framework-independent library.
+pub struct RuntimeSettings {
+    pub acceleration: std::sync::Mutex<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     pub microphone: String,
     pub engine: String,
     #[serde(rename = "whisperModel")]
     pub whisper_model: String,
+    #[serde(rename = "whisperAcceleration", default = "default_whisper_acceleration")]
+    pub whisper_acceleration: String,
     #[serde(rename = "groqApiKey")]
     pub groq_api_key: String,
     #[serde(rename = "recordingMode")]
@@ -76,6 +83,7 @@ fn default_suggestion()->u32 {10}
 fn default_phrase()->u32 {12}
 
 fn default_write_hotkey() -> String { "CmdOrCtrl+Shift+W".into() }
+fn default_whisper_acceleration() -> String { "cpu".into() }
 
 fn default_parakeet_model() -> String {
     "v3".to_string()
@@ -130,6 +138,7 @@ impl Default for Settings {
             microphone: "default".to_string(),
             engine: "local".to_string(),
             whisper_model: "medium.en-q5_0".to_string(),
+            whisper_acceleration: default_whisper_acceleration(),
             groq_api_key: String::new(),
             recording_mode: "toggle".to_string(),
             hotkey: "CmdOrCtrl+Shift+Space".to_string(),
@@ -189,6 +198,7 @@ impl Settings {
     /// window close would be pointless. Enabling autostart forces background on;
     /// disabling autostart leaves background as the user set it.
     pub fn normalize_startup(&mut self) {
+        if self.whisper_acceleration != "cuda" { self.whisper_acceleration = "cpu".into(); }
         self.learn_from_corrections=true;
         self.dictionary_cloud_hints=true;
         self.learning_observation_seconds=self.learning_observation_seconds.clamp(10,60);
@@ -203,6 +213,14 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn whisper_is_cpu_by_default_and_unknown_acceleration_is_normalized() {
+        let default = Settings::default(); assert_eq!(default.whisper_acceleration,"cpu");
+        let mut legacy = serde_json::to_value(&default).unwrap(); legacy.as_object_mut().unwrap().remove("whisperAcceleration");
+        assert_eq!(serde_json::from_value::<Settings>(legacy).unwrap().whisper_acceleration,"cpu");
+        let mut settings = default; settings.whisper_acceleration="unknown".into(); settings.normalize_startup();
+        assert_eq!(settings.whisper_acceleration,"cpu");
+        settings.whisper_acceleration="cuda".into(); settings.normalize_startup(); assert_eq!(settings.whisper_acceleration,"cuda");
+    }
     #[test] fn learning_defaults_and_limits() {
         let mut s=Settings::default(); assert!(s.learn_from_corrections); assert!(s.dictionary_cloud_hints);
         assert_eq!((s.learning_observation_seconds,s.learning_suggestion_seconds,s.learning_max_phrase_chars),(60,10,12));

@@ -286,7 +286,7 @@
             <div class="setting-row">
               <div class="setting-label">
                 <span class="label-text">Transcription engine</span>
-                <span class="label-hint">Local Whisper needs an NVIDIA GPU. Local Parakeet &amp; Nemotron run on any modern CPU. Cloud is fastest and needs a Groq API key.</span>
+                <span class="label-hint">Local engines run on your CPU. Whisper also supports optional NVIDIA acceleration. Cloud needs a Groq API key.</span>
               </div>
               <div class="setting-control">
                 <div class="toggle-group">
@@ -317,6 +317,22 @@
             </div>
             <div id="download-progress" class="hidden">
               <div id="progress-bar"><div id="progress-fill"></div></div>
+            </div>
+            <div class="setting-row setting-child" id="whisper-hardware-settings">
+              <div class="setting-label">
+                <label for="whisper-acceleration" class="label-text">Whisper processing</label>
+                <span class="label-hint">CPU works out of the box. NVIDIA support is a separate 685 MB download and uses about 1.2 GB on disk.</span>
+              </div>
+              <div class="setting-control ai-model-control">
+                <div class="ai-model-picker">
+                <select id="whisper-acceleration" aria-describedby="cuda-runtime-status">
+                  <option value="cpu">CPU</option>
+                  <option value="cuda">NVIDIA GPU</option>
+                </select>
+                <button id="cuda-download-btn" class="btn-secondary hidden" type="button">Download NVIDIA support</button>
+                </div>
+                <p id="cuda-runtime-status" class="ai-model-status" role="status" aria-live="polite"></p>
+              </div>
             </div>
             <div class="setting-row setting-child hidden" id="cloud-settings">
               <div class="setting-label">
@@ -720,7 +736,7 @@
               <div class="setting-row">
                 <div class="setting-label">
                   <span class="label-text">Rewrite selected text</span>
-                  <span class="label-hint">Select text in another app and speak an editing instruction.</span>
+                  <span class="label-hint">Select text and speak an edit. Follow-up edits can reuse the last unchanged passage. Terminal rewrites open a preview to copy.</span>
                 </div>
                 <div class="setting-control"><div class="toggle-group" aria-label="Write Mode">
                   <button id="write-off" class="toggle-btn active" aria-pressed="true">Off</button>

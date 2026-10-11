@@ -12,6 +12,7 @@ export default defineConfig(async () => ({
         main: "index.html",
         overlay: "src/overlay.html",
         learning: "src/learning.html",
+        writePreview: "src/write-preview.html",
       },
     },
   },

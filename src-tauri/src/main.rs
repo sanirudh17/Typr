@@ -396,8 +396,10 @@ async fn save_settings(
     let model_changed = old_settings.whisper_model != settings.whisper_model;
     let parakeet_model_changed = old_settings.parakeet_model != settings.parakeet_model;
     let nemotron_model_changed = old_settings.nemotron_model != settings.nemotron_model;
+    let acceleration_changed = old_settings.whisper_acceleration != settings.whisper_acceleration;
 
     settings.save(&state.app_dir)?;
+    *app.state::<typr_lib::settings::RuntimeSettings>().acceleration.lock().unwrap() = settings.whisper_acceleration.clone();
     *state.settings.lock().unwrap() = settings.clone();
     state.recorder.learning.set_enabled(settings.learn_from_corrections);
 
@@ -439,6 +441,19 @@ async fn save_settings(
     let app_dir_clone = state.app_dir.clone();
     let settings_clone = settings.clone();
     tauri::async_runtime::spawn(async move {
+        // Settings saves can arrive faster than a model loads. Drop stale work
+        // before it can reload an engine the user has already left.
+        let current = app_clone.state::<AppState>().settings.lock().unwrap().clone();
+        if current.engine != settings_clone.engine || current.whisper_model != settings_clone.whisper_model
+            || current.parakeet_model != settings_clone.parakeet_model || current.nemotron_model != settings_clone.nemotron_model
+            || current.whisper_acceleration != settings_clone.whisper_acceleration { return; }
+        let recorder = app_clone.state::<AppState>().recorder.clone();
+        let next_engine = settings_clone.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || recorder.run_when_idle(|| {
+            if next_engine != "parakeet" { typr_lib::transcribe_parakeet::try_release_model(); }
+            if next_engine != "nemotron" { typr_lib::transcribe_nemotron::try_release_model(); }
+            Ok(())
+        })).await;
         // If we just left the Whisper engine (for Parakeet or Cloud), stop the CUDA server now
         // to free VRAM instead of waiting on the idle reaper. Previously only the Cloud switch
         // did this, so Whisper -> Parakeet kept the dGPU engaged for ~3 minutes.
@@ -456,7 +471,7 @@ async fn save_settings(
         // Warm the engine we switched TO, so the first dictation isn't stalled by a cold load.
         match settings_clone.engine.as_str() {
             "local" => {
-                if engine_changed || model_changed {
+                if engine_changed || model_changed || acceleration_changed {
                     let model_path = app_dir_clone
                         .join(transcribe_local::model_filename(&settings_clone.whisper_model));
                     println!("[Typr] On-demand engine/model change: ensuring Whisper server is running with {:?}", model_path);
@@ -744,6 +759,27 @@ fn list_microphones() -> Vec<audio::MicDevice> {
 }
 
 #[tauri::command]
+fn check_cuda_runtime(app: tauri::AppHandle) -> bool {
+    typr_lib::whisper_runtime::cuda_installed(&app)
+}
+#[tauri::command]
+fn show_write_preview(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "write-preview" { return Err("Unavailable outside the rewrite preview.".into()); }
+    window.center().map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn copy_write_preview(window: tauri::WebviewWindow, text: String) -> Result<(), String> {
+    if window.label() != "write-preview" || text.chars().count() > 16000 || text.contains('\0') { return Err("The rewrite could not be copied.".into()); }
+    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).map_err(|_| "The clipboard is busy. Try copying again.".into())
+}
+#[tauri::command]
+async fn download_cuda_runtime(app: tauri::AppHandle) -> Result<(), String> {
+    typr_lib::whisper_runtime::download_cuda(app).await
+}
+
+#[tauri::command]
 fn get_recording_state(state: State<AppState>) -> RecordingState {
     state.recorder.get_state()
 }
@@ -996,6 +1032,15 @@ fn prewarm_local(app: &tauri::AppHandle) {
         let settings = state.settings.lock().unwrap();
         (settings.engine.clone(), settings.whisper_model.clone())
     };
+    if engine == "parakeet" {
+        let state = app.state::<AppState>();
+        let variant = state.settings.lock().unwrap().parakeet_model.clone();
+        let directory = state.app_dir.join(typr_lib::transcribe_parakeet::model_dir_name(&variant));
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = typr_lib::transcribe_parakeet::prewarm(&directory) { eprintln!("[Typr] Parakeet prewarm: {error}"); }
+        });
+        return;
+    }
     if engine != "local" {
         return;
     }
@@ -1009,7 +1054,7 @@ fn prewarm_local(app: &tauri::AppHandle) {
     let warm_matches = typr_lib::whisper_server::warm_server_matches(
         typr_lib::whisper_server::current_model_key().as_deref(),
         &model_path.to_string_lossy(),
-    );
+    ) && typr_lib::whisper_server::current_backend_is_gpu() == typr_lib::whisper_runtime::uses_cuda(app);
     if !typr_lib::whisper_server::should_prewarm(&engine, warm_matches) {
         return;
     }
@@ -1147,12 +1192,16 @@ fn main() {
     let history = History::load(&app_dir);
     let dictionary = Dictionary::load(&app_dir);
     let initial_hotkey = settings.hotkey.clone();
+    let runtime_settings = typr_lib::settings::RuntimeSettings {
+        acceleration: Mutex::new(settings.whisper_acceleration.clone()),
+    };
     let recorder=Recorder::new();
     recorder.learning.set_enabled(settings.learn_from_corrections);
 
     let (hotkey_tx, hotkey_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(32);
 
     tauri::Builder::default()
+        .manage(runtime_settings)
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1185,6 +1234,10 @@ fn main() {
             list_ai_models,
             save_settings,
             list_microphones,
+            check_cuda_runtime,
+            show_write_preview,
+            copy_write_preview,
+            download_cuda_runtime,
             get_recording_state,
             get_amplitude,
             get_frequency_bands,
@@ -1504,6 +1557,12 @@ fn main() {
                     let state = handle_for_reaper.state::<AppState>();
                     let recorder_ready =
                         state.recorder.get_state() == RecordingState::Ready;
+                    state.recorder.reap_write_context();
+                    let engine = state.settings.lock().unwrap().engine.clone();
+                    let recorder = state.recorder.clone();
+                    let _ = tokio::task::spawn_blocking(move || recorder.run_when_idle(|| {
+                        typr_lib::model_cache::reap(&engine); Ok(())
+                    })).await;
                     let server_running = typr_lib::whisper_server::is_server_running();
                     let idle = typr_lib::whisper_server::time_since_activity()
                         .unwrap_or(std::time::Duration::ZERO);

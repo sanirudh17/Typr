@@ -4,6 +4,8 @@
 #[derive(Clone)]
 pub struct Selection {
     pub text: String,
+    /// Terminal highlights are copies of the screen, not editable selections.
+    pub terminal: bool,
     #[cfg(windows)]
     target: native::Target,
     #[cfg(windows)]
@@ -11,13 +13,45 @@ pub struct Selection {
 }
 
 pub fn capture() -> Result<Selection, String> {
+    capture_with_previous(None, &crate::write_mode::Cancellation::default())
+}
+pub fn capture_with_previous(previous: Option<&Selection>, cancel: &crate::write_mode::Cancellation) -> Result<Selection, String> {
     #[cfg(windows)]
     {
-        native::capture()
+        native::capture(previous, cancel)
     }
     #[cfg(not(windows))]
     {
+        let _ = (previous, cancel);
         Err("Write Mode currently supports Windows.".into())
+    }
+}
+impl Selection {
+    pub fn with_edited_text(&self, text: String) -> Self {
+        let mut next = self.clone(); next.text = text; next
+    }
+    pub fn same_passage(&self, other: &Self) -> bool {
+        #[cfg(windows)] { self.target == other.target && self.anchor == other.anchor && normalize_lines(&self.text) == normalize_lines(&other.text) }
+        #[cfg(not(windows))] { self.text == other.text }
+    }
+}
+fn normalize_lines(text: &str) -> String { text.replace("\r\n", "\n").replace('\r', "\n") }
+fn copy_origin_allowed(terminal: bool, owner_process: Option<u32>, target_process: u32) -> bool {
+    owner_process == Some(target_process) || (terminal && owner_process.is_none())
+}
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    #[test]
+    fn unowned_clipboard_is_allowed_only_for_terminal_previews() {
+        assert!(copy_origin_allowed(true, None, 42));
+        assert!(!copy_origin_allowed(false, None, 42));
+        assert!(copy_origin_allowed(false, Some(42), 42));
+        assert!(!copy_origin_allowed(true, Some(43), 42));
+    }
+    #[test]
+    fn equivalent_editor_line_endings_match() {
+        assert_eq!(normalize_lines("one\r\ntwo\rthree"), "one\ntwo\nthree");
     }
 }
 /// Read-only, bounded anchor for a normal dictation insertion. Unlike Write
@@ -84,7 +118,7 @@ mod native {
         "This app could not expose its selected text. Select text in an editable field and try again.".into()
     }
     fn normalized(text: &str) -> String {
-        text.replace("\r\n", "\n").replace('\r', "\n")
+        super::normalize_lines(text)
     }
     struct Apartment;
     impl Apartment {
@@ -111,6 +145,7 @@ mod native {
         process: u32,
         focus: usize,
         runtime_id: Vec<i32>,
+        terminal: bool,
     }
     #[derive(Clone, PartialEq)]
     pub(super) struct Anchor {
@@ -141,6 +176,11 @@ mod native {
                 v2.SetTransactionTimeout(1500).map_err(err)?;
             }
             let element = automation.GetFocusedElement().map_err(err)?;
+            let class = element.CurrentClassName().map_err(err)?.to_string();
+            let mut window_class = [0u16; 128];
+            let count = GetClassNameW(window, &mut window_class);
+            let window_class = String::from_utf16_lossy(&window_class[..count.max(0) as usize]);
+            let terminal = class == "xterm-helper-textarea" || matches!(window_class.as_str(), "ConsoleWindowClass" | "CASCADIA_HOSTING_WINDOW_CLASS");
             if element.CurrentIsPassword().map_err(err)?.as_bool() {
                 return Err("Write Mode cannot read password fields.".into());
             }
@@ -150,10 +190,10 @@ mod native {
             if let Ok(value) =
                 element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             {
-                if value.CurrentIsReadOnly().map_err(err)?.as_bool() {
+                if value.CurrentIsReadOnly().map_err(err)?.as_bool() && !terminal {
                     return Err("This text is read-only. Select text in an editor.".into());
                 }
-            } else if element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
+            } else if !terminal && element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
                 && element
                     .GetCurrentPatternAs::<IUIAutomationTextEditPattern>(UIA_TextEditPatternId)
                     .is_err()
@@ -190,6 +230,7 @@ mod native {
                     process,
                     focus: gui.hwndFocus.0 as usize,
                     runtime_id,
+                    terminal,
                 },
             ))
         }
@@ -242,7 +283,7 @@ mod native {
         let _com=Apartment::new()?;
         let (_,element,target)=focused()?;
         let (text,anchor)=anchored_selection(&element,false)?;
-        Ok(Selection { text, target, anchor:Some(anchor) })
+        Ok(Selection { text, terminal:false, target, anchor:Some(anchor) })
     }
     pub(super) fn observed_passage(marker: &Selection) -> Result<String,String> {
         let _com=Apartment::new()?;
@@ -270,15 +311,23 @@ mod native {
             Ok(())
         }
     }
-    pub(super) fn capture() -> Result<Selection, String> {
+    pub(super) fn capture(previous: Option<&Selection>, cancel: &crate::write_mode::Cancellation) -> Result<Selection, String> {
         let _com = Apartment::new()?;
         let (_automation, element, target) = focused()?;
+        cancel.check()?;
         let (text, anchor) = unsafe {
-            if element
+            if target.terminal {
+                (copy_selection(&target).map_err(|error| format!("Highlight the text in your terminal first, then start Write Mode. {error}"))?, None)
+            } else if element
                 .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
                 .is_ok()
             {
-                let (text, anchor) = text_selection(&element)?;
+                let (text, anchor) = anchored_selection(&element, false)?;
+                if text.trim().is_empty() {
+                    if let Some(previous) = previous.filter(|last| last.target == target && last.anchor.is_some() && !last.terminal) {
+                        return select_previous(&element, previous, cancel);
+                    }
+                }
                 (text, Some(anchor))
             } else {
                 (copy_selection(&target)?, None)
@@ -290,6 +339,7 @@ mod native {
         }
         Ok(Selection {
             text,
+            terminal: target.terminal,
             target,
             anchor,
         })
@@ -299,6 +349,7 @@ mod native {
         text: &str,
         cancel: &crate::write_mode::Cancellation,
     ) -> Result<Option<String>, String> {
+        if selection.terminal { return Err("Terminal highlights cannot be replaced safely. Copy the rewrite from its preview.".into()); }
         let _com = Apartment::new()?;
         cancel.check()?;
         wait_modifiers()?;
@@ -315,6 +366,34 @@ mod native {
             return Err(CHANGED.into());
         }
         paste_checked(text, selection, cancel)
+    }
+    fn select_previous(element: &IUIAutomationElement, previous: &Selection, cancel: &crate::write_mode::Cancellation) -> Result<Selection, String> {
+        let anchor = previous.anchor.as_ref().ok_or(CHANGED)?;
+        unsafe {
+            let pattern: IUIAutomationTextPattern = element.GetCurrentPatternAs(UIA_TextPatternId).map_err(err)?;
+            let document = pattern.DocumentRange().map_err(err)?;
+            let expected = normalized(&format!("{}{}{}",anchor.prefix,previous.text,anchor.suffix));
+            let document_text = document.GetText(MAX_DOCUMENT + 1).map_err(err)?.to_string();
+            if normalized(&document_text) != expected { return Err(CHANGED.into()); }
+            let passage = document_text.strip_prefix(&anchor.prefix).and_then(|s| s.strip_suffix(&anchor.suffix)).ok_or(CHANGED)?;
+            let search = document.Clone().map_err(err)?;
+            for _ in 0..32 {
+                let range = search.FindText(&windows::core::BSTR::from(passage),false,false).map_err(|_| CHANGED)?;
+                let before = document.Clone().map_err(err)?;
+                before.MoveEndpointByRange(TextPatternRangeEndpoint_End,&range,TextPatternRangeEndpoint_Start).map_err(err)?;
+                if normalized(&before.GetText(MAX_DOCUMENT).map_err(err)?.to_string()) == normalized(&anchor.prefix) {
+                    cancel.with_active_input(|| {
+                        if !native_focus_matches(&previous.target) { return Err(CHANGED.into()); }
+                        range.Select().map_err(err)
+                    })?;
+                    let (text, actual) = text_selection(element)?;
+                    if normalized(&text) != normalized(&previous.text) || normalized(&actual.prefix) != normalized(&anchor.prefix) || normalized(&actual.suffix) != normalized(&anchor.suffix) { return Err(CHANGED.into()); }
+                    return Ok(Selection { text, target:previous.target.clone(), anchor:Some(actual), terminal:false });
+                }
+                search.MoveEndpointByRange(TextPatternRangeEndpoint_Start,&range,TextPatternRangeEndpoint_End).map_err(err)?;
+            }
+        }
+        Err(CHANGED.into())
     }
     // Verify the active selection, including expanded editing responses.
     fn text_selection_unbounded(
@@ -526,7 +605,9 @@ mod native {
         if !native_focus_matches(target) {
             return Err(CHANGED.into());
         }
-        key_chord(enigo::Key::C)?;
+        // Ctrl+Insert copies terminal highlights without sending Ctrl+C to the
+        // running process or colliding with global Ctrl+Shift+C shortcuts.
+        key_chord(if target.terminal { enigo::Key::Insert } else { enigo::Key::C })?;
         let start = Instant::now();
         while unsafe { GetClipboardSequenceNumber() } == saved.sequence.unwrap()
             && start.elapsed() < Duration::from_millis(700)
@@ -534,13 +615,24 @@ mod native {
             sleep(Duration::from_millis(10));
         }
         let sequence = unsafe { GetClipboardSequenceNumber() };
-        if sequence != saved.sequence.unwrap() {
-            let owner = unsafe { GetClipboardOwner() }.map_err(err)?;
-            let mut process = 0;
-            unsafe {
-                GetWindowThreadProcessId(owner, Some(&mut process));
-            }
-            if process != target.process || !native_focus_matches(target) {
+        if sequence == saved.sequence.unwrap() {
+            return Err("No selected text was copied. Highlight text and retry Write Mode.".into());
+        }
+        {
+            // Chromium's clipboard API can leave no owner HWND even when the
+            // clipboard has valid text. Permit that only for terminal previews,
+            // which never replace or submit terminal input automatically.
+            let owner_process = match unsafe { GetClipboardOwner() } {
+                Ok(owner) => {
+                    let mut process = 0;
+                    unsafe { GetWindowThreadProcessId(owner, Some(&mut process)); }
+                    Some(process)
+                }
+                Err(error) if error.code().0 == 0 => None,
+                Err(error) => return Err(err(error)),
+            };
+            if !super::copy_origin_allowed(target.terminal, owner_process, target.process)
+                || !native_focus_matches(target) {
                 // A different application copied something while Ctrl+C was in
                 // flight. Keep its newer clipboard rather than claiming ownership.
                 return Err(CHANGED.into());
@@ -550,6 +642,7 @@ mod native {
         let text = {
             let _open = Clipboard::open()?;
             unsafe {
+                if GetClipboardSequenceNumber() != sequence { return Err(CHANGED.into()); }
                 let handle = GetClipboardData(13).map_err(|_| {
                     "No selected text was copied. Select text in an editor and retry."
                 })?;
@@ -570,6 +663,7 @@ mod native {
             }
         };
         saved.restore()?;
+        if focused()?.2 != *target { return Err(CHANGED.into()); }
         Ok(text)
     }
     fn paste_checked(

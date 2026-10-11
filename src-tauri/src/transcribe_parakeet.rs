@@ -275,13 +275,14 @@ pub fn start_live_session(model_dir: &Path,
         worker: Some(worker) })
 }
 
-/// Drop the cached model, freeing ~640 MB. NOT currently wired up: the model is deliberately
-/// kept loaded across engine switches so returning to Parakeet stays fast (rebuilding costs
-/// ~4-6s). Retained for a future memory-pressure path that would trade that latency back.
+/// Drop the cached recognizer. Record-start prewarming hides most reload time.
 pub fn release_model() {
     if let Ok(mut guard) = RECOGNIZER.lock() {
         *guard = None;
     }
+}
+pub fn try_release_model() {
+    if let Ok(mut guard) = RECOGNIZER.try_lock() { if guard.take().is_some() { println!("[Typr] Released idle Parakeet model"); } }
 }
 
 /// Build and cache the recognizer WITHOUT transcribing, so the first dictation after Parakeet
@@ -291,6 +292,7 @@ pub fn release_model() {
 /// when the recognizer is already built for `model_dir`. Blocking and CPU-bound — call it from a
 /// blocking task, never on an async worker.
 pub fn prewarm(model_dir: &Path) -> Result<(), String> {
+    crate::model_cache::note_activity();
     if !model_files_present(model_dir) {
         return Err(format!(
             "Parakeet model not found in {}. Download it from the Engine tab.",

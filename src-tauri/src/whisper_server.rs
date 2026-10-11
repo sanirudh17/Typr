@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_shell::process::CommandChild;
-use tauri_plugin_shell::ShellExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+static CURRENT_GPU: AtomicBool = AtomicBool::new(false);
+pub fn current_backend_is_gpu() -> bool { CURRENT_GPU.load(Ordering::SeqCst) }
 
 static HEALTH_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 fn health_client() -> &'static reqwest::Client {
@@ -120,11 +122,12 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
     }
 
     let model_key = model_path.to_string_lossy().to_string();
+    let gpu = crate::whisper_runtime::uses_cuda(app);
 
     let already_running = {
         let child_guard = SERVER_CHILD.lock().unwrap();
         let model_guard = CURRENT_MODEL.lock().unwrap();
-        child_guard.is_some() && model_guard.as_ref() == Some(&model_key)
+        child_guard.is_some() && model_guard.as_ref() == Some(&model_key) && current_backend_is_gpu() == gpu
     };
 
     if already_running {
@@ -151,20 +154,16 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
     wait_for_port_free().await;
 
     println!(
-        "[Typr] Starting persistent GPU Whisper HTTP Server with model {:?}",
-        model_path
+        "[Typr] Starting persistent {} Whisper HTTP Server with model {:?}",
+        if gpu { "CUDA" } else { "CPU" }, model_path
     );
-
-    let resource_path = app.path().resource_dir().unwrap().join("binaries");
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{};{}", resource_path.to_str().unwrap(), current_path);
 
     // Optimize threads to 4 when running on GPU to avoid driver thread contention
     let threads = std::thread::available_parallelism()
-        .map(|count| count.get().min(4).to_string())
+        .map(|count| count.get().min(if gpu { 4 } else { 12 }).to_string())
         .unwrap_or_else(|_| "4".to_string());
 
-    let cmd_args = vec![
+    let mut cmd_args = vec![
         "-m".to_string(),
         model_path.to_str().unwrap().to_string(),
         "--host".to_string(),
@@ -173,9 +172,6 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "8080".to_string(),
         "-t".to_string(),
         threads,
-        "-dev".to_string(),
-        "0".to_string(),
-        "-fa".to_string(),
         // Beam search, whisper.cpp's own default. `-bs 1` is greedy decoding, and greedy
         // decoding silently deletes enumerated speech: measured on a real 62s dictation
         // containing a seven-item numbered list, `-bs 1` returned ZERO of the seven items
@@ -212,11 +208,8 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
         "en".to_string(),
     ];
 
-    let spawn_result = app
-        .shell()
-        .sidecar("whisper-server-cuda")
-        .map_err(|e| format!("Failed to create server sidecar: {}", e))?
-        .env("PATH", new_path)
+    cmd_args.extend(if gpu { vec!["-dev", "0", "-fa"] } else { vec!["-ng"] }.into_iter().map(str::to_string));
+    let spawn_result = crate::whisper_runtime::command(app, true, gpu)?
         .args(cmd_args)
         .spawn();
 
@@ -225,6 +218,7 @@ pub async fn ensure_running(app: &AppHandle, model_path: &PathBuf) -> Result<(),
             // Capture the pid before moving the child so the log-monitor task can
             // identify itself and avoid clobbering a newer server's state on exit.
             let server_pid = child.pid();
+            CURRENT_GPU.store(gpu, Ordering::SeqCst);
             {
                 let mut child_guard = SERVER_CHILD.lock().unwrap();
                 *child_guard = Some(child);

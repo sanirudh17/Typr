@@ -21,7 +21,7 @@ Press a hotkey, speak, and your words are typed straight into the window you are
 
 A voice-to-text dictation app for Windows. Press a hotkey, speak, and your words are typed into whatever window you are already in — Gmail, VS Code, WhatsApp, a terminal.
 
-Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU with Parakeet — or through the **Groq Cloud API** when you want the lowest latency. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
+Transcription runs **fully offline** — on your CPU with Whisper, Parakeet or Nemotron, or with optional NVIDIA acceleration for Whisper — or through the **Groq Cloud API** when you want the lowest latency. An optional AI pass cleans up filler words and punctuation, and can match its writing style to the app you are dictating into.
 
 > **New here?** Follow the step-by-step [**Setup guide**](#download--install) — about five minutes, and it covers the one-time model download.
 
@@ -62,7 +62,7 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 - **Live waveform overlay** while recording, so you can see audio is actually reaching the app.
 
 **Three transcription engines**
-- **Local Whisper with CUDA acceleration.** Runs entirely on your machine. Ships its own CUDA libraries, so no system-wide CUDA install is required. Four model sizes, ~190 MB to ~1.5 GB.
+- **Local Whisper on CPU, with optional NVIDIA acceleration.** Runs entirely on your machine. NVIDIA support is downloaded separately and includes its matching CUDA libraries, so no system-wide CUDA install is required. Four model sizes, ~190 MB to ~1.5 GB.
 - **Local Parakeet on the CPU.** NVIDIA's Parakeet TDT 0.6B, run in-process — no GPU, no sidecar process, no CUDA. One model, ~640 MB, covering 25 European languages with automatic detection.
 - **Groq Cloud.** `whisper-large-v3` for accuracy, or `whisper-large-v3-turbo` for lower latency.
 
@@ -84,6 +84,17 @@ Transcription runs **fully offline** — on your GPU with Whisper, or on any CPU
 - **Dictionary** — preferred spellings bias supported recognition engines and guide contextual AI cleanup. Current Parakeet/Nemotron decoders use these terms through AI cleanup. Dictionary never applies a deterministic replacement rule; ambiguous recognition can still be wrong.
 - **Snippets** — exact find-and-replace rules. Good for a word that is always misheard the same way, or for expanding a shortcut like `brb` or `my email`. A shortcut dictated on its own pastes the saved expansion directly, without AI cleanup. Leave case matching off for spoken triggers, since speech engines often capitalize standalone phrases.
 
+**Write Mode**
+- Select text in an editable field, invoke the Write hotkey, speak an edit, and invoke it again.
+- Subsequent edits reuse the previous unchanged passage for up to five minutes. The last instruction accompanies the current text as context; the latest instruction takes priority. Changing the document, field or app prevents an automatic replacement. Select a new passage to start over.
+- Codex and other xterm/Windows terminal highlights are screen selections. Highlight the text first; Write Mode copies it with Ctrl+Insert and opens a themed rewrite preview. Copy the result into the prompt yourself. It never clears a terminal input or submits a command. Hosts with different copy shortcuts may not support capture.
+- Clipboard contents are preserved during capture and regular editor replacement. Clicking **Copy rewrite** intentionally updates the clipboard. Rewrites are excluded from dictation history.
+
+**Background resource use**
+- Inactive CPU recognizers are released after engine changes. After three minutes without local dictation, the remaining recognizer is released while the recorder is idle. The next use reloads it, which can add a short cold-start delay; prewarming begins at record-start where possible.
+- Active recordings are never evicted. Large raw-audio allocations are trimmed after transcription; idle microphones remain paused.
+- Local resource audits: `cargo run --example profile_model_memory` and `cargo run --example write_mode_smoke` from `src-tauri`. The editor smoke check creates a disposable Windows fixture and uses no cloud requests.
+
 **Around the app**
 - **History** with search and export to JSON or Markdown.
 - **Tray / background mode** and optional start on login, so the hotkey works without the window open.
@@ -102,7 +113,7 @@ Everything between releasing the hotkey and text appearing runs as one pipeline.
    (cpal, any rate)          (what every Whisper model expects)
         │
         ▼
-  transcription ───────────► Local Whisper (GPU) · Local Parakeet (CPU) · Groq Cloud
+  transcription ───────────► Local Whisper (CPU / optional GPU) · Local Parakeet (CPU) · Groq Cloud
                              long audio is split at speech boundaries first
         │
         ▼
@@ -137,7 +148,7 @@ Everything between releasing the hotkey and text appearing runs as one pipeline.
 
 | | Local Whisper | Local Parakeet | Groq Cloud |
 |---|---|---|---|
-| Runs on | Your GPU (CUDA) | Any modern CPU | Groq's servers |
+| Runs on | CPU; optional NVIDIA CUDA | Any modern CPU | Groq's servers |
 | Network | None | None | Required |
 | Audio leaves your machine | No | No | Yes |
 | Model download | 190 MB – 1.5 GB | ~640 MB | None |
@@ -301,7 +312,7 @@ You can check whenever you like from **General → Updates**. A failed check on 
 >
 > **On 0.1.2?** You can update from inside the app, but 0.1.2 has no title-bar message — it only shows the new version under **General → Updates**, so you have to look. From 0.1.3 on, Typr comes and tells you.
 
-Each update downloads the full ~300 MB installer rather than a small patch, because the bundled CUDA runtime dominates the package. It replaces your install in place; it does not accumulate copies.
+The next CPU build downloads the complete small installer. For optional NVIDIA support, open **Engine**, choose **NVIDIA GPU** under **Whisper processing**, then click **Download NVIDIA support**. The pinned, checksum-verified download is about 685 MB and occupies about 1.2 GB after extraction; it is reused across app updates. Speech models are separate downloads. The published 0.3.0 installers still contain the older bundled CUDA runtime.
 
 ---
 
@@ -314,40 +325,23 @@ Each update downloads the full ~300 MB installer rather than a small patch, beca
 
 ### Sidecar binaries (required)
 
-The app runs `whisper.cpp` as a sidecar. `src-tauri/binaries/` is gitignored, so you must supply three executables yourself:
-
-| File | Role |
-|---|---|
-| `whisper-cpp.exe` | CPU fallback |
-| `whisper-cpp-cuda.exe` | GPU direct |
-| `whisper-server-cuda.exe` | persistent HTTP server |
-
-The CPU and GPU entries can use the same `whisper-cli` executable. The persistent server requires the separate `whisper-server` executable.
-
-For Windows x64, prepare a complete official runtime in an empty `src-tauri/binaries/` directory:
+CPU Whisper runs through two sidecars. `src-tauri/binaries/cpu/` is gitignored.
+Prepare the pinned official CPU runtime before compiling:
 
 ```powershell
 powershell -NoProfile -File scripts/prepare-whisper-runtime.ps1
 ```
 
-This pins and checks the archive hash, copies all matching runtime DLLs, supplies Tauri's target-suffixed executable names, and verifies that the CLI loads. It refuses to replace existing binaries or write through a directory junction.
+The script checks the archive hash, supplies target-suffixed `whisper-cpp` and
+`whisper-server` executable names, copies their matching Whisper/ggml CPU DLLs,
+and checks that both executables start. It refuses to overwrite a nonempty
+folder or follow a directory junction. Only this CPU directory is bundled.
 
-*Build them:*
-
-```bash
-git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
-cd whisper.cpp
-cmake -B build -DGGML_CUDA=ON
-cmake --build build --config Release
-
-cp build/bin/whisper-cli.exe    ../Typr/src-tauri/binaries/whisper-cpp.exe
-cp build/bin/whisper-cli.exe    ../Typr/src-tauri/binaries/whisper-cpp-cuda.exe
-cp build/bin/whisper-server.exe ../Typr/src-tauri/binaries/whisper-server-cuda.exe
-```
-
-*Or download them* from the [whisper.cpp releases page](https://github.com/ggml-org/whisper.cpp/releases) and rename them as above.
-
-For manual builds, copy **all DLLs from the same build** into `src-tauri/binaries/`, including `whisper.dll`, `ggml.dll`, `ggml-base.dll`, the CPU backend, and the CUDA/cuBLAS runtime when enabled. Copying only the CUDA libraries can leave the executables unable to load. Append `-x86_64-pc-windows-msvc` before `.exe` in the three Windows sidecar filenames. The Tauri resource rule bundles every DLL in this directory.
+NVIDIA support downloads to a versioned `runtimes/whisper-cuda-b5454` folder in
+app data when requested. The download is limited in size, checked against its
+pinned SHA-256, extracted through a flat filename allowlist, and validated
+before becoming selectable. CPU remains available if downloading or CUDA fails.
+Local Parakeet and Nemotron do not need this download.
 
 ### Run and build
 
@@ -420,7 +414,7 @@ npx tsc --noEmit             # frontend typecheck
 | Backend | Rust |
 | Frontend | TypeScript, vanilla CSS, [Vite](https://vitejs.dev) |
 | Audio capture | [`cpal`](https://github.com/RustAudio/cpal) |
-| Local inference | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp) with CUDA, run as a sidecar |
+| Local inference | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp) on CPU or optional CUDA, run as a sidecar |
 | Local Parakeet | [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/) (statically linked), NVIDIA Parakeet TDT 0.6B |
 | Cloud transcription | Groq (`whisper-large-v3`, `whisper-large-v3-turbo`) |
 | AI cleanup | Groq chat completions (Qwen 3.8, GPT-OSS) |
@@ -479,7 +473,7 @@ Your Groq API key is stored in plaintext in `config.json`. It never leaves your 
 
 Where your audio and text go depends on which engine you choose, so it is worth being precise:
 
-**Fully offline** — with the **Local Whisper** engine and **AI cleanup off**, nothing leaves your machine. Audio is transcribed on your GPU and typed straight into the focused window.
+**Fully offline** — with the **Local Whisper** engine and **AI cleanup off**, nothing leaves your machine. Audio is transcribed on your CPU or your optional NVIDIA runtime and typed straight into the focused window.
 
 **Sent to Groq** — two features are network-backed, and both are opt-in:
 - The **Groq Cloud** engine uploads your recorded audio to Groq for transcription.
@@ -500,7 +494,7 @@ Another application may already own that combination — Windows gives it to who
 A Whisper model has to be downloaded first, from the Engine tab. Without one there is nothing to transcribe with.
 
 **Local transcription is slow.**
-The local engine is only fast with CUDA. Confirm the three CUDA DLLs are present next to the sidecar binaries, and that your NVIDIA drivers are current. On a machine without an NVIDIA GPU, the Groq Cloud engine will be far quicker.
+Whisper is slower on CPU, especially with larger models. For NVIDIA acceleration, download GPU support in Engine settings and keep your NVIDIA driver current. Parakeet and Nemotron are alternatives optimized for local CPU use.
 
 **Cloud transcription fails or retries.**
 Check the API key in Engine, and that you have network access. Groq's free tier is rate-limited per minute — rapid back-to-back dictations can hit that ceiling, which shows up as a retry rather than an error.

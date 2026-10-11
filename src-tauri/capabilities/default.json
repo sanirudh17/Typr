@@ -20,17 +20,12 @@
       "identifier": "shell:allow-execute",
       "allow": [
         {
-          "name": "binaries/whisper-cpp",
+          "name": "binaries/cpu/whisper-cpp",
           "sidecar": true,
           "args": true
         },
         {
-          "name": "binaries/whisper-cpp-cuda",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "binaries/whisper-server-cuda",
+          "name": "binaries/cpu/whisper-server",
           "sidecar": true,
           "args": true
         }

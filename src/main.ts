@@ -12,6 +12,7 @@ interface Settings {
   microphone: string;
   engine: string;
   whisperModel: string;
+  whisperAcceleration: string;
   groqApiKey: string;
   recordingMode: string;
   hotkey: string;
@@ -94,6 +95,12 @@ const nemotronModelSelect = document.getElementById("nemotron-model-select") as 
 const nemotronDownloadBtn = document.getElementById("nemotron-download-btn") as HTMLButtonElement;
 const nemotronDeleteBtn = document.getElementById("nemotron-delete-btn") as HTMLButtonElement;
 const localSettings = document.getElementById("local-settings")!;
+const whisperHardware = document.getElementById("whisper-hardware-settings")!;
+const whisperAcceleration = document.getElementById("whisper-acceleration") as HTMLSelectElement;
+const cudaDownload = document.getElementById("cuda-download-btn") as HTMLButtonElement;
+const cudaStatus = document.getElementById("cuda-runtime-status")!;
+let cudaInstalled = false;
+let cudaDownloading = false;
 const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
 const downloadBtn = document.getElementById("download-btn")!;
@@ -481,6 +488,10 @@ async function loadSettings() {
 
   // Engine
   setEngine(currentSettings.engine);
+  whisperAcceleration.value = currentSettings.whisperAcceleration === "cuda" ? "cuda" : "cpu";
+  currentSettings.whisperAcceleration = whisperAcceleration.value;
+  syncCustomSelectDisplay(whisperAcceleration);
+  await refreshCudaStatus();
 
   // Model — select the stored model. All four options (full + English-quantized, small +
   // medium) are valid selections, so an existing "small"/"medium" choice is kept as-is.
@@ -571,6 +582,7 @@ function setEngine(engine: string) {
   engineNemotron.classList.toggle("active", e === "nemotron");
   engineCloud.classList.toggle("active", e === "cloud");
   localSettings.classList.toggle("hidden", e !== "local");
+  whisperHardware.classList.toggle("hidden", e !== "local");
   parakeetSettings.classList.toggle("hidden", e !== "parakeet");
   nemotronSettings.classList.toggle("hidden", e !== "nemotron");
   cloudSettings.classList.toggle("hidden", e !== "cloud");
@@ -583,6 +595,48 @@ function setEngine(engine: string) {
   nemotronDownloadProgress.classList.toggle("hidden", !(e === "nemotron" && nemotronDownloading));
   updateEngineSetupNote();
 }
+
+function showCudaStatus() {
+  const selected = whisperAcceleration.value === "cuda";
+  cudaDownload.classList.toggle("hidden", !selected || cudaInstalled);
+  cudaDownload.disabled = cudaDownloading;
+  cudaDownload.textContent = cudaDownloading ? "Downloading…" : "Download NVIDIA support";
+  if (!cudaDownloading) cudaStatus.textContent = selected
+    ? cudaInstalled ? "NVIDIA support installed." : "CPU will be used until NVIDIA support is downloaded."
+    : "";
+}
+async function refreshCudaStatus() {
+  try { cudaInstalled = await invoke<boolean>("check_cuda_runtime"); }
+  catch { cudaInstalled = false; }
+  showCudaStatus();
+}
+whisperAcceleration.addEventListener("change", async () => {
+  currentSettings.whisperAcceleration = whisperAcceleration.value;
+  showCudaStatus();
+  await saveSettings();
+});
+cudaDownload.addEventListener("click", async () => {
+  if (cudaDownloading) return;
+  cudaDownloading = true;
+  showCudaStatus();
+  cudaStatus.textContent = "Downloading NVIDIA support…";
+  try {
+    await invoke("download_cuda_runtime");
+    cudaInstalled = true;
+    cudaDownloading = false;
+    showCudaStatus();
+  } catch (error) {
+    cudaDownloading = false;
+    showCudaStatus();
+    cudaStatus.textContent = String(error);
+  }
+});
+listen<DownloadProgress>("cuda-download-progress", ({ payload }) => {
+  if (!cudaDownloading) return;
+  cudaStatus.textContent = payload.percent >= 95
+    ? "Checking and installing NVIDIA support…"
+    : `Downloading NVIDIA support… ${Math.floor(payload.percent)}%`;
+});
 
 function setParakeetModel(variant: string) {
   const v = variant === "v2" ? "v2" : "v3";

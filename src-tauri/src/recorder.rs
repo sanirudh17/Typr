@@ -58,6 +58,7 @@ pub struct Recorder {
     review_saves: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
     write_session: Arc<Mutex<Option<crate::write_mode::Session>>>,
     write_cancel: Arc<Mutex<Option<crate::write_mode::Cancellation>>>,
+    write_recent: Arc<Mutex<Option<crate::write_mode::RecentEdit>>>,
 }
 
 impl Recorder {
@@ -73,6 +74,7 @@ impl Recorder {
             review_saves: Arc::new(Mutex::new(Vec::new())),
             write_session: Arc::new(Mutex::new(None)),
             write_cancel: Arc::new(Mutex::new(None)),
+            write_recent: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -98,6 +100,10 @@ impl Recorder {
     pub fn get_state(&self) -> RecordingState {
         self.state.lock().unwrap().clone()
     }
+    pub fn reap_write_context(&self) {
+        let mut recent = self.write_recent.lock().unwrap();
+        if recent.as_ref().is_some_and(|last| !last.valid()) { *recent = None; }
+    }
 
     pub fn is_write_active(&self) -> bool { self.write_cancel.lock().unwrap().is_some() }
 
@@ -119,13 +125,21 @@ impl Recorder {
         crate::overlay::set_write_mode(app, true);
         let _ = app.emit("recording-state", RecordingState::Transcribing);
         update_overlay(app, &RecordingState::Transcribing, true);
-        let selection = tokio::task::spawn_blocking(crate::selection::capture).await
+        let recent = {
+            let mut last = self.write_recent.lock().unwrap();
+            if last.as_ref().is_some_and(|edit| !edit.valid()) { *last = None; }
+            last.clone()
+        };
+        let previous = recent.as_ref().map(|last| last.selection.clone());
+        let capture_cancel = cancellation.clone();
+        let selection = tokio::task::spawn_blocking(move || crate::selection::capture_with_previous(previous.as_ref(), &capture_cancel)).await
             .map_err(|_| "Could not read the selected text.".to_string()).and_then(|r| r);
         let selection = match selection.and_then(|s| { cancellation.check()?; Ok(s) }) {
             Ok(selection) => selection,
             Err(e) => { self.reset_ready(app); return Err(e); }
         };
-        *self.write_session.lock().unwrap() = Some(crate::write_mode::Session { selection, settings: settings.clone(), cancellation });
+        let previous_instruction = recent.filter(|last| last.selection.same_passage(&selection)).map(|last| last.instruction);
+        *self.write_session.lock().unwrap() = Some(crate::write_mode::Session { selection, settings: settings.clone(), cancellation, previous_instruction });
         let nemotron = app_dir.join(transcribe_nemotron::model_dir_name(&settings.nemotron_model));
         let parakeet = app_dir.join(transcribe_parakeet::model_dir_name(&settings.parakeet_model));
         if let Err(e) = self.start_recording(app, &settings.microphone, None, &settings.engine, Some(&nemotron), Some(&parakeet)) {
@@ -180,6 +194,7 @@ impl Recorder {
         nemotron_model_dir: Option<&std::path::Path>,
         parakeet_model_dir: Option<&std::path::Path>,
     ) -> Result<(), String> {
+        crate::model_cache::note_activity();
         // 1. Transition state to Recording while holding the state lock briefly
         self.learning.cancel(app);
         {
@@ -656,7 +671,7 @@ impl Recorder {
             } else {
                 None
             };
-            (standalone.clone().unwrap_or_else(|| dict.apply_replacements(&raw_text)), standalone)
+            (if write_session.is_some() { raw_text.clone() } else { standalone.clone().unwrap_or_else(|| dict.apply_replacements(&raw_text)) }, standalone)
         };
         crate::debug_log::log(app_dir, &format!("STAGE 2 [dictionary]: {}", replaced));
 
@@ -674,13 +689,26 @@ impl Recorder {
         if let Some(write) = write_session {
             let result = async {
                 write.cancellation.check()?;
-                let edited = crate::write_mode::rewrite(&write.selection.text, &replaced, settings, &write.cancellation).await?;
+                let edited = crate::write_mode::rewrite(&write.selection.text, &replaced, write.previous_instruction.as_deref(), settings, &write.cancellation).await?;
+                if write.selection.terminal {
+                    write.cancellation.check()?;
+                    crate::write_preview::show(app, &edited, &settings.theme)?;
+                    return Ok("Write Mode rewrite ready to copy".to_string());
+                }
                 let target = write.selection.clone();
                 let text = edited.clone();
                 let cancel = write.cancellation.clone();
                 let warning = tokio::task::spawn_blocking(move || crate::selection::replace(&target, &text, &cancel)).await
                     .map_err(|_| "Could not replace the selection safely.".to_string())??;
-                if let Some(message) = warning { notify_user(app, &message); } else { let _ = app.emit("show-toast", "Text updated. Use Ctrl+Z in your editor to undo."); }
+                if let Some(message) = warning {
+                    *self.write_recent.lock().unwrap() = None;
+                    notify_user(app, &message);
+                } else {
+                    *self.write_recent.lock().unwrap() = Some(crate::write_mode::RecentEdit {
+                        selection: write.selection.with_edited_text(edited), instruction: replaced.clone(), created: Instant::now(),
+                    });
+                    let _ = app.emit("show-toast", "Text updated. Use Ctrl+Z in your editor to undo.");
+                }
                 Ok("Write Mode edit applied".to_string())
             }.await;
             // Selected text and rewritten content never enter dictation history/logs.
@@ -972,6 +1000,8 @@ impl Recorder {
     /// stop-to-text pipeline finishes (or on transcription error), so the spinner clears
     /// only after the AI cleanup pass rather than ~1-2s before the paste lands.
     fn reset_ready(&self, app: &AppHandle) {
+        // Measure idle time from completion, including long recordings.
+        crate::model_cache::note_activity();
         let mut state = self.state.lock().unwrap();
         *state = RecordingState::Ready;
         *self.nemotron_session.lock().unwrap() = None;

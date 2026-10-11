@@ -194,7 +194,12 @@ impl AudioRecorder {
 
     /// Release the raw capture buffer. Called by the recorder after the engine is done with it.
     pub fn clear_samples(&self) {
-        self.samples.lock().unwrap().clear();
+        let mut samples = self.samples.lock().unwrap();
+        samples.clear();
+        // A long dictation must not retain its peak allocation for the entire
+        // tray session. Keep a small reusable buffer for the next recording.
+        let second = self.source_sample_rate as usize * self.source_channels as usize;
+        if samples.capacity() > second * 10 { samples.shrink_to(second * 2); }
     }
 
     pub fn source_sample_rate(&self) -> u32 {
@@ -1247,6 +1252,15 @@ impl StreamingResampler {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_capture_allocation_is_released_after_transcription() {
+        let recorder = super::AudioRecorder::new();
+        let second = recorder.source_sample_rate as usize * recorder.source_channels as usize;
+        recorder.samples.lock().unwrap().resize(second * 80, 0.01);
+        recorder.clear_samples();
+        let samples = recorder.samples.lock().unwrap();
+        assert!(samples.is_empty()); assert!(samples.capacity() <= second * 2);
+    }
     use super::*;
 
     fn legacy_resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {

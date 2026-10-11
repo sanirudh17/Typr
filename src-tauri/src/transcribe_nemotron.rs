@@ -70,8 +70,12 @@ pub fn release_model() {
         *guard = None;
     }
 }
+pub fn try_release_model() {
+    if let Ok(mut guard) = RECOGNIZER.try_lock() { if guard.take().is_some() { println!("[Typr] Released idle Nemotron model"); } }
+}
 
 pub fn prewarm(model_dir: &Path) -> Result<(), String> {
+    crate::model_cache::note_activity();
     if !model_files_present(model_dir) {
         return Err(format!(
             "Nemotron model not found in {}. Download it from the Engine tab.",
