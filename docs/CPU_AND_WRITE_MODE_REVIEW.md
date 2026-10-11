@@ -6,8 +6,8 @@ These changes were developed on `optional-cuda-and-write-mode-fixes`, based on p
 
 - CPU is the default Whisper backend, including migration from settings without a hardware preference.
 - The bundled runtime contains two executables and twelve matching CPU DLLs: 12,329,984 bytes total. Neither CUDA nor unrelated native inference DLLs are included.
-- The MSI file inventory contains fifteen files totaling 55,612,416 bytes before installer compression, with no CUDA files. WebView2 is a separate shared system runtime.
-- The optimized review build produces a 12,157,144-byte EXE installer (12.2 MB) and a 19,881,984-byte MSI (19.9 MB). The previous published EXE was 370,584,087 bytes; the MSI was 686,821,376 bytes. The EXE is approximately 96.7% smaller.
+- The MSI file inventory contains fifteen files totaling 55,474,688 bytes before installer compression, with no CUDA files. WebView2 is a separate shared system runtime.
+- The final optimized build from merged main produces a 12,169,721-byte EXE installer (12.2 MB) and a 19,873,792-byte MSI (19.9 MB). The previous published EXE was 370,584,087 bytes; the MSI was 686,821,376 bytes. The EXE is approximately 96.7% smaller.
 - NVIDIA acceleration requires a separate explicit download in Engine settings: 684,913,404 bytes, with about 1.2 GB extracted on disk. It is stored outside the installation folder and reused across app updates.
 - **Delete NVIDIA support** remains available whenever runtime files are present, including when CPU is selected. Removal requires an idle recorder, persists the CPU choice, stops the Whisper server, and removes only the pinned runtime's flat files. Speech models, the bundled CPU runtime, and sibling runtime versions are preserved. Interrupted deletion can be retried. Windows junctions and unexpected folder contents are rejected before deletion.
 - Runtime removal was checked with disposable placeholder files and a real Windows junction, without downloading the large CUDA archive again or installing it in the user's app data. The UI's download/removal/error paths were checked with mocked IPC; GPU inference and live GPU-process teardown were not exercised in this pass.
@@ -19,7 +19,7 @@ These changes were developed on `optional-cuda-and-write-mode-fixes`, based on p
 
 The original hidden cloud-engine app and its WebView processes consumed approximately 232 MiB of private memory after startup. A ten-second idle sample showed no measurable CPU use. The UI/WebView background behavior was therefore retained.
 
-The final rebuilt app was also launched hidden with the existing cloud-engine configuration and sampled after startup. Its eight processes totaled 274.9 MiB of private memory and no measurable CPU over ten seconds, with no startup errors. This run did not reduce the WebView baseline; WebView allocations varied between launches. The material reduction verified below is the release of retained recognizer weights. The disposable audit instance was stopped afterward without modifying user documents.
+During the preceding review, the rebuilt app was launched hidden with the existing cloud-engine configuration and sampled after startup. Its eight processes totaled 274.9 MiB of private memory and no measurable CPU over ten seconds, with no startup errors. This run did not reduce the WebView baseline; WebView allocations varied between launches. The material reduction verified below is the release of retained recognizer weights. The disposable audit instance was stopped afterward without modifying user documents. A repeat sample after the final merge was skipped because an existing Typr process was running; that process was left untouched.
 
 A separate local-only audit loaded the installed Nemotron 3.5 and Parakeet v3 models and exercised the production cache eviction functions:
 
