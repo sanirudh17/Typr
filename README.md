@@ -206,7 +206,7 @@ Qwen is the bootstrap default. Fallback cleanup prefers another available family
 ### Step 1 — Install the app
 
 1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
-2. Under **Assets**, download **`Typr_0.1.7_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+2. Under **Assets**, download **`Typr_0.3.0_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
 3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
 4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
@@ -289,6 +289,8 @@ If nothing is typed, see [Troubleshooting](#troubleshooting).
 
 From **0.1.3** onward Typr tells you when it can update itself. On startup it quietly asks GitHub whether a newer release exists; if one does, a message appears in the title bar — *"Typr 0.1.4 is available"* — with **Update** and **Later** beside it. Installing runs with a progress bar and no setup wizard: Typr closes, updates, and comes back. Your settings, history, dictionary, and downloaded models are all left alone.
 
+**Upgrading to 0.3.0 from 0.2.2 or earlier:** download and run the installer from Releases once. The updater signing key was rotated, so those older builds cannot verify this release with their original key. Installing over the existing copy keeps your local data and downloaded models. Future updates use the replacement key.
+
 Nothing is ever downloaded or installed without you clicking **Update**.
 
 **Pressing Later dismisses that version for good.** It will not reappear on later launches, no matter how many times you restart. When a *newer* version is released the message returns, because it only stays quiet about the exact version you dismissed. A dismissed update is never lost — **General → Updates** still lists it and will still install it on demand.
@@ -359,44 +361,47 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.1.7_x64-setup.exe` (~278 MB)
-- `src-tauri/target/release/bundle/msi/Typr_0.1.7_x64_en-US.msi` (~436 MB)
+- `src-tauri/target/release/bundle/nsis/Typr_0.3.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/msi/Typr_0.3.0_x64_en-US.msi`
 
 To skip the first-run model download for your users, drop a `ggml-small.bin` into `src-tauri/binaries/` before building.
 
 ### Cutting a release (updater signing)
 
-The updater only trusts bundles signed with the private key matching `plugins.updater.pubkey`
-in `tauri.conf.json`. **A release built without the key still installs fine, but no existing
-install will ever accept it as an update** — the signature check fails silently on the client.
+The updater only trusts installers signed with the private key matching `plugins.updater.pubkey`
+in `tauri.conf.json`. Build the installers first, then sign and cryptographically verify the NSIS
+installer using the secure local credential store. Keep private keys and passwords outside Git.
+The signing tool requires a nonempty password and rejects the revoked key.
 
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/typr.key"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-npm run tauri build
+```powershell
+npm run tauri -- build --ci --no-sign --bundles nsis,msi
+powershell -NoProfile -File scripts/sign-local-release.ps1 -Version 0.3.0
+powershell -NoProfile -File scripts/write-latest-json.ps1 -Version 0.3.0 -NotesFile release-notes-v0.3.0.md
 ```
 
-This writes `Typr_<version>_x64-setup.exe` plus a matching `.sig` next to it. Upload **both**,
-together with a `latest.json` describing the release, as assets on the GitHub release. The
-updater fetches `latest.json` from the *latest* release tag, so it must be attached to
-whichever release should be handed out.
+The local signing script reads the external key and a Windows-protected password, restores its
+temporary environment afterward, and refuses a signature that fails verification against the
+configured public key. It writes a matching `.sig` next to the installer. Upload the installer,
+MSI, `.sig`, BOM-free `latest.json`, and release checksums as GitHub release assets. The updater
+fetches `latest.json` from the latest release tag. Do not publish an unverified signature.
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "notes": "What changed",
-  "pub_date": "2026-09-14T00:00:00Z",
+  "pub_date": "2026-10-11T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.2.0/Typr_0.2.0_x64-setup.exe"
+      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.3.0/Typr_0.3.0_x64-setup.exe"
     }
   }
 }
 ```
 
-Keep `~/.tauri/typr.key` backed up somewhere safe and out of the repository. If it is lost,
-existing installs can never be updated again — every user would have to reinstall by hand.
+Keep the external updater key and password securely backed up. If the key is lost or rotated,
+existing clients using that key need a manual installation to trust its replacement. Updater
+signatures are separate from Windows Authenticode signing; SmartScreen may still warn.
 
 ### Tests
 
