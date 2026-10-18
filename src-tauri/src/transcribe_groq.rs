@@ -11,8 +11,9 @@ fn groq_client() -> &'static reqwest::Client {
             // audio too, so a 5s total ceiling aborted healthy long dictations mid-upload and
             // burned all three retries on them — a ~1 minute recording is ~2 MB of WAV. The
             // total ceiling stays generous; the caller decides when to give up.
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(60))
+            .no_proxy()
             .build()
             .unwrap_or_default()
     })
@@ -42,6 +43,25 @@ pub async fn transcribe_groq(
     audio_path: &PathBuf,
     _prompt: &str,
     model: &str,
+) -> Result<String, String> {
+    // One deadline includes upload, response decoding, every chunk and retry.
+    // Previously three independent 60-second requests could stall a dictation.
+    let bytes = std::fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
+    let budget = cloud_budget_ms(bytes);
+    tokio::time::timeout(Duration::from_millis(budget),
+        transcribe_groq_inner(api_key, audio_path, _prompt, model)).await
+        .map_err(|_| format!("Cloud transcription exceeded {} seconds. Nothing was pasted; try again or choose a local engine.", budget / 1000))?
+}
+
+fn cloud_budget_ms(wav_bytes: u64) -> u64 {
+    // Typr sends mono 16 kHz PCM16. Give larger uploads additional room,
+    // without letting a short/medium capture occupy the recorder indefinitely.
+    let seconds = wav_bytes.saturating_sub(44) / 32_000;
+    8_000 + seconds.saturating_sub(30).saturating_mul(40).min(22_000)
+}
+
+async fn transcribe_groq_inner(
+    api_key: &str, audio_path: &PathBuf, _prompt: &str, model: &str,
 ) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("Groq API key not set. Please enter your API key in settings.".to_string());
@@ -97,7 +117,7 @@ async fn post_groq_chunk(
     audio_bytes: Vec<u8>,
     model: &str,
 ) -> Result<String, String> {
-    let max_retries = 3;
+    let max_retries = 2;
     let mut last_error = String::new();
 
     for attempt in 1..=max_retries {
@@ -112,7 +132,7 @@ async fn post_groq_chunk(
             .text("model", groq_model_id(model))
             .text("language", "en")
             .text("temperature", "0")
-            .text("response_format", "json")
+            .text("response_format", "verbose_json")
             .part("file", file_part);
 
         println!("[Typr] Sending Groq transcription attempt {}/{}", attempt, max_retries);
@@ -120,6 +140,8 @@ async fn post_groq_chunk(
         let response_result = groq_client()
             .post("https://api.groq.com/openai/v1/audio/transcriptions")
             .header("Authorization", format!("Bearer {}", api_key))
+            // Leave time for one retry within the shared outer deadline.
+            .timeout(Duration::from_millis(cloud_budget_ms(audio_bytes.len() as u64) / 2))
             .multipart(form)
             .send()
             .await;
@@ -132,12 +154,7 @@ async fn post_groq_chunk(
                         .await
                         .map_err(|e| format!("Failed to parse Groq response: {}", e))?;
 
-                    let text = json["text"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .ok_or("No 'text' field in Groq response".to_string())?;
-
-                    return Ok(text);
+                    return response_text(&json);
                 } else {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
@@ -173,9 +190,36 @@ async fn post_groq_chunk(
     ))
 }
 
+fn response_text(json: &serde_json::Value) -> Result<String, String> {
+    let text = json["text"].as_str().ok_or("No 'text' field in Groq response")?;
+    // Secondary evidence, not a blacklist of words like "thanks" or "bye".
+    // Never remove individual low-confidence words from a real sentence.
+    let confidently_no_speech = json["segments"].as_array().is_some_and(|segments|
+        !segments.is_empty() && segments.iter().all(|s|
+            s["no_speech_prob"].as_f64().is_some_and(|p| p >= 0.8)
+            && s["avg_logprob"].as_f64().is_some_and(|p| p < -1.0)));
+    Ok(if confidently_no_speech { String::new() } else { text.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn medium_cloud_requests_have_one_bounded_deadline() {
+        assert_eq!(cloud_budget_ms(30 * 32000 + 44), 8000);
+        assert_eq!(cloud_budget_ms(90 * 32000 + 44), 10400);
+        assert_eq!(cloud_budget_ms(u64::MAX), 30000);
+    }
+    #[test]
+    fn silence_confidence_does_not_blacklist_genuine_greetings_or_drop_words() {
+        let noise = serde_json::json!({"text":"Thank you.","segments":[{"no_speech_prob":0.99,"avg_logprob":-1.5}]});
+        assert_eq!(response_text(&noise).unwrap(), "");
+        let spoken = serde_json::json!({"text":"Thank you.","segments":[{"no_speech_prob":0.01,"avg_logprob":-0.2}]});
+        assert_eq!(response_text(&spoken).unwrap(), "Thank you.");
+        let mixed = serde_json::json!({"text":"Keep all final words.","segments":[{"no_speech_prob":0.99,"avg_logprob":-1.5},{"no_speech_prob":0.01,"avg_logprob":-0.2}]});
+        assert_eq!(response_text(&mixed).unwrap(), "Keep all final words.");
+        assert_eq!(response_text(&serde_json::json!({"text":"Bye."})).unwrap(), "Bye.");
+    }
 
     #[tokio::test]
     async fn test_empty_api_key() {

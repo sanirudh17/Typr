@@ -50,7 +50,7 @@ Transcription runs **fully offline** — on your CPU with Whisper, Parakeet or N
 **Auto-Learning Dictionary**
 - Manage preferred spellings, aliases, categories and context notes.
 - Local correction observation is always active and suggests names you fix after dictation. The slim bar asks **Add ‘word’ to dictionary?** Choose **Yes** to add it; **No**, Escape or expiry discard it.
-- Local Whisper uses ranked recognition hints even with AI cleanup off. Confirmed terms also accompany cloud recognition and context-aware AI cleanup automatically.
+- Confirmed terms guide context-aware AI cleanup for every speech engine. Whisper recognition prompts remain disabled because regression recordings showed omitted speech when bias prompts were used. Dictionary guidance cannot guarantee an unfamiliar name from ambiguous audio.
 - Current Parakeet/Nemotron decoders do not support hotword biasing. Edit observation depends on Windows accessibility support; add terms directly in **Dictionary** when observation is unavailable.
 - [Details, privacy, limitations and a short check](docs/AUTO_LEARNING_DICTIONARY.md).
 - [Focused check using saved dictionary words](docs/DICTIONARY_FOCUSED_CHECK.md).
@@ -165,7 +165,7 @@ Groq offers two speech models. `whisper-large-v3` is the more accurate of the tw
 
 **AI cleanup models**
 
-The model picker discovers available Groq text models using your saved API key. It checks on launch, after a key change, and hourly (including while running in the tray). **Refresh** checks manually, with a short cooldown to avoid repeated requests. AI cleanup and Write Mode share this selection.
+The model pickers discover available Groq text models using your saved API key. They check on launch, after a key change, and hourly (including while running in the tray). **Refresh** checks manually, with a short cooldown to avoid repeated requests. AI cleanup and Write Mode have independent selections; changing one leaves the other unchanged. Existing settings inherit the previous shared choice once.
 
 The last successful catalog is cached locally for offline use. Failed refreshes keep your selection. If a successful refresh no longer lists it, Typr chooses an available replacement, preferring the same family, and displays the change. Discovery sends no audio or transcript; only the API key authenticates the model-list request.
 
@@ -519,7 +519,7 @@ The model has to be downloaded from the Engine tab first — it is not bundled w
 Long recordings are split into overlapping pieces so no words are lost at the joins, and the overlap is normally removed automatically. Occasionally the model repeats a phrase within a single piece, which the AI cleanup pass strips if it is enabled.
 
 **A name is always transcribed wrong.**
-Add the preferred spelling to Dictionary first. Whisper/Groq receive recognition hints; Parakeet/Nemotron require AI cleanup for contextual spelling guidance. Optional aliases and context notes can help disambiguate. If you want an unconditional replacement, use a Snippet.
+Add the preferred spelling to Dictionary first and enable AI cleanup for contextual spelling guidance. Recognition prompts are disabled in local and Groq Whisper to avoid the previously observed speech omissions; Parakeet/Nemotron do not support these hotwords. Optional aliases and context notes can help disambiguate. If you want an unconditional replacement, use a Snippet.
 
 ---
 

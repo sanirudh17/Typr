@@ -1,5 +1,6 @@
 pub mod settings;
 pub mod audio;
+pub mod speech_detection;
 pub mod audio_chunker;
 pub mod transcribe_local;
 pub mod transcribe_groq;

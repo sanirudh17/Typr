@@ -897,6 +897,10 @@ impl Recorder {
             if strip_filler {
                 final_text_inner = crate::cleanup::strip_filler_words(&final_text_inner);
             }
+            if settings.ai_format == "raw" && !terminal_focus_once {
+                final_text_inner = ai_postprocess::preserve_raw_layout(
+                    if strip_filler { &replaced_stripped } else { &replaced }, &final_text_inner);
+            }
             final_text_inner
         } else {
             deterministic

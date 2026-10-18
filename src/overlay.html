@@ -247,7 +247,11 @@
         }
       }
 
+      let lastPillState = "";
       window.__setPillState = function(state, writeMode = false) {
+        const key = `${state}:${writeMode}`;
+        if (lastPillState === key) return;
+        lastPillState = key;
         writeCaption.style.display = writeMode && state !== "ready" ? "block" : "none";
         writeCaption.textContent = state === "recording" ? "Write Mode · Speak your edit · Esc cancels" : "Write Mode · Processing edit · Esc cancels";
         isRunning = false;
@@ -290,6 +294,22 @@
           bars.forEach(bar => bar.style.height = "2px");
         }
       };
+      // Pull authoritative state after reload/resume and acknowledge that this
+      // WebView is alive. The native watchdog can recreate a stalled document.
+      let snapshotPending = false;
+      async function syncPill() {
+        if (snapshotPending) return;
+        snapshotPending = true;
+        try {
+          const snapshot = await invoke("get_overlay_snapshot");
+          window.__setPillState(snapshot.state, snapshot.writeMode);
+        } catch (error) { console.error("pill state:", error); }
+        finally { snapshotPending = false; }
+      }
+      syncPill();
+      setInterval(syncPill, 1000);
+      window.addEventListener("pageshow", syncPill);
+      document.addEventListener("visibilitychange", syncPill);
     </script>
   </body>
 </html>

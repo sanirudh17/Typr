@@ -32,6 +32,9 @@ pub struct Settings {
     pub ai_enabled: bool,
     #[serde(rename = "aiModel", default = "default_ai_model")]
     pub ai_model: String,
+    /// Empty in old configs: inherit the saved cleanup choice once on load.
+    #[serde(rename = "writeModel", default)]
+    pub write_model: String,
     #[serde(rename = "aiProfile", default = "default_ai_profile")]
     pub ai_profile: String,
     #[serde(rename = "aiPromptFormat", default = "default_ai_prompt_format")]
@@ -147,6 +150,7 @@ impl Default for Settings {
             cloud_model: "accurate".to_string(),
             ai_enabled: false,
             ai_model: "qwen/qwen3.8-27b".to_string(),
+            write_model: default_ai_model(),
             ai_profile: "cleanup".to_string(),
             ai_prompt_format: "natural".to_string(),
             ai_tone: "default".to_string(),
@@ -198,6 +202,7 @@ impl Settings {
     /// window close would be pointless. Enabling autostart forces background on;
     /// disabling autostart leaves background as the user set it.
     pub fn normalize_startup(&mut self) {
+        if self.write_model.trim().is_empty() { self.write_model = self.ai_model.clone(); }
         if self.whisper_acceleration != "cuda" { self.whisper_acceleration = "cpu".into(); }
         self.learn_from_corrections=true;
         self.dictionary_cloud_hints=true;
@@ -213,6 +218,19 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_model_migrates_once_and_remains_independent() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("writeModel");
+        legacy["aiModel"] = "openai/gpt-oss-120b".into();
+        let mut loaded: Settings = serde_json::from_value(legacy).unwrap();
+        loaded.normalize_startup();
+        assert_eq!(loaded.write_model, "openai/gpt-oss-120b");
+        loaded.ai_model = "qwen/qwen3.8-27b".into();
+        loaded.normalize_startup();
+        assert_eq!(loaded.write_model, "openai/gpt-oss-120b");
+        assert_eq!(serde_json::from_str::<Settings>(&serde_json::to_string(&loaded).unwrap()).unwrap(), loaded);
+    }
     #[test] fn whisper_is_cpu_by_default_and_unknown_acceleration_is_normalized() {
         let default = Settings::default(); assert_eq!(default.whisper_acceleration,"cpu");
         let mut legacy = serde_json::to_value(&default).unwrap(); legacy.as_object_mut().unwrap().remove("whisperAcceleration");

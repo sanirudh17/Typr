@@ -483,6 +483,49 @@ async fn request_cleanup(api_key: &str, text: &str, model: &str, system_prompt: 
 }
 
 fn accept_cleanup(text: &str, cleaned: &str, system_prompt: &str) -> Result<(String, bool), String> {
+    let (accepted, recovered) = accept_cleanup_inner(text, cleaned, system_prompt)?;
+    let accepted = if system_prompt.contains("- Formatting: return the cleaned text with no structural changes at all") {
+        preserve_raw_layout(text, &accepted)
+    } else { accepted };
+    Ok((accepted, recovered))
+}
+
+/// Raw formatting retains the transcript's whitespace boundaries while allowing
+/// aligned spelling/punctuation repairs. Ambiguous multiline alignment keeps the
+/// complete original rather than guessing where its line breaks should go.
+pub fn preserve_raw_layout(source: &str, edited: &str) -> String {
+    static TOKENS: OnceLock<regex::Regex> = OnceLock::new();
+    let re = TOKENS.get_or_init(|| regex::Regex::new(r"\S+").unwrap());
+    let before: Vec<_> = re.find_iter(source).collect();
+    let after: Vec<_> = re.find_iter(edited).collect();
+    let multiline = source.contains(['\r', '\n']);
+    let aligned = before.len() == after.len() && (!multiline || before.iter().zip(&after).all(|(a,b)| {
+        let original = fidelity_words(a.as_str());
+        let replacement = fidelity_words(b.as_str());
+        original.len() == replacement.len() && original.iter().zip(&replacement)
+            .all(|(a,b)| spelling_equivalent(a,b))
+    }));
+    if aligned {
+        let mut restored = String::with_capacity(edited.len());
+        let mut end = 0;
+        for (original, replacement) in before.iter().zip(&after) {
+            restored.push_str(&source[end..original.start()]);
+            restored.push_str(replacement.as_str());
+            end = original.end();
+        }
+        restored.push_str(&source[end..]);
+        restored
+    } else if multiline {
+        source.to_string()
+    } else {
+        edited.lines().map(|line| {
+            let line = line.trim();
+            if source.trim_start().starts_with("- ") { line } else { line.strip_prefix("- ").unwrap_or(line) }
+        }).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ")
+    }
+}
+
+fn accept_cleanup_inner(text: &str, cleaned: &str, system_prompt: &str) -> Result<(String, bool), String> {
     let cleaned = preserve_modifier_punctuation(text, cleaned);
     // Normalize only dictionary spellings proposed by this completion before
     // alignment. Otherwise an unchanged word inside a multiword term becomes
@@ -1261,6 +1304,37 @@ where F: FnMut(String, String) -> Fut,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raw_style_keeps_line_breaks_tabs_and_blank_lines() {
+        let source = "Review the invoice.\r\n\r\nKeep\tthe final attachment.";
+        assert_eq!(preserve_raw_layout(source, "Review the invoice. Keep the final attachment."), source);
+        assert_eq!(preserve_raw_layout("Fix the speling.\nKeep the ending.", "Fix the spelling. Keep the ending."), "Fix the spelling.\nKeep the ending.");
+        assert_eq!(preserve_raw_layout(source, "Review the invoice."), source);
+        assert_eq!(preserve_raw_layout("Deploy to supper base.\nFix issue.", "Deploy to Supabase. Fix the issue."), "Deploy to supper base.\nFix issue.");
+        assert_eq!(preserve_raw_layout("One point. Another point.", "- One point.\n- Another point."), "One point. Another point.");
+        let prompt = build_system_prompt(CLEANUP_PROMPT, "default", "raw", "");
+        assert_eq!(accept_cleanup(source, "Review the invoice. Keep the final attachment.", &prompt).unwrap().0, source);
+    }
+    #[test]
+    fn all_auto_styles_keep_the_fidelity_contract_and_accept_layout_only_edits() {
+        let source = "Keep the first sentence. Keep all final words.";
+        for base in [CLEANUP_PROMPT, CONTEXT_MESSAGING, CONTEXT_EMAIL, CONTEXT_PROFESSIONAL, CONTEXT_DEVELOPER] {
+            for tone in ["default", "formal", "casual", "concise"] {
+                for format in ["default", "bullets", "paragraphs", "raw"] {
+                    let prompt = build_system_prompt(base, tone, format, "Use British spelling.");
+                    assert!(prompt.contains("NEVER add quotation marks"));
+                    assert!(prompt.contains("Do not paraphrase"));
+                    assert!(prompt.contains("Use British spelling."));
+                    let proposal = match format {
+                        "bullets" => "- Keep the first sentence.\n- Keep all final words.",
+                        "paragraphs" => "Keep the first sentence.\n\nKeep all final words.",
+                        _ => source,
+                    };
+                    assert_eq!(accept_cleanup(source, proposal, &prompt).unwrap().0, proposal);
+                }
+            }
+        }
+    }
     use crate::ai_models::reasoning_effort_for;
 
     #[test]

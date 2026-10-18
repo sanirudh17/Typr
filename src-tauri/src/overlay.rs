@@ -8,6 +8,28 @@ static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_RUNNING: AtomicBool = AtomicBool::new(false);
 static CURRENT_STATE: Mutex<(RecordingState, bool)> = Mutex::new((RecordingState::Ready, false));
 static PENDING_UPDATE: Mutex<Option<(RecordingState, bool)>> = Mutex::new(None);
+static LAST_HEARTBEAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+pub fn heartbeat() { LAST_HEARTBEAT.store(clock_ms(), Ordering::SeqCst); }
+pub fn snapshot() -> serde_json::Value {
+    heartbeat();
+    let (state, show) = get_current_state();
+    serde_json::json!({"state": if !show { "ready" } else { match state {
+        RecordingState::Ready => "ready", RecordingState::Recording => "recording",
+        RecordingState::Transcribing => "processing",
+    }}, "writeMode": WRITE_MODE.load(Ordering::SeqCst)})
+}
+
+fn heartbeat_stale(now: u64, last: u64) -> bool { now.saturating_sub(last) > 8_000 }
+
+fn overlay_position(origin: (i32, i32), size: (u32, u32), scale: f64) -> (f64, f64) {
+    (origin.0 as f64 + (size.0 as f64 - 300.0 * scale) / 2.0,
+     origin.1 as f64 + size.1 as f64 - 160.0 * scale)
+}
 
 pub fn is_overlay_ready() -> bool {
     OVERLAY_READY.load(Ordering::SeqCst)
@@ -46,11 +68,9 @@ pub fn reposition_overlay(window: &WebviewWindow) {
     if let Some(m) = monitor {
         let size = m.size();
         let scale = m.scale_factor();
-        let logical_w = size.width as f64 / scale;
-        let logical_h = size.height as f64 / scale;
-        let x = (logical_w - 300.0) / 2.0;
-        let y = logical_h - 160.0;
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+        let origin = m.position();
+        let (x, y) = overlay_position((origin.x, origin.y), (size.width, size.height), scale);
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x.round() as i32, y: y.round() as i32 }));
     }
 }
 
@@ -87,6 +107,7 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .shadow(false);
 
     let window = builder.build().map_err(|e| e.to_string())?;
+    heartbeat(); // Give the new document time to load before the watchdog checks it.
     let _ = window.set_ignore_cursor_events(true);
     set_overlay_ready(false);
     let curr = get_current_state();
@@ -151,6 +172,7 @@ fn start_watchdog_if_needed(app: &AppHandle) {
                         reposition_overlay(&win);
                         let _ = win.show();
                         !win.is_visible().unwrap_or(false)
+                            || heartbeat_stale(clock_ms(), LAST_HEARTBEAT.load(Ordering::SeqCst))
                     }
                     None => true,
                 };
@@ -158,12 +180,17 @@ fn start_watchdog_if_needed(app: &AppHandle) {
                     let (curr_state, curr_show) = get_current_state();
                     if is_active_state(&curr_state) && curr_show {
                         eprintln!("[Typr] Watchdog detected invisible/missing overlay, recreating");
-                        if let Ok(new_win) = create_overlay_window(&handle) {
-                            let _ = new_win.set_always_on_top(true);
-                            reposition_overlay(&new_win);
-                            let _ = new_win.show();
-                            let _ = new_win.unminimize();
-                        }
+                        heartbeat();
+                        let main_handle = handle.clone();
+                        let _ = handle.run_on_main_thread(move || {
+                            let (state, show) = get_current_state();
+                            if is_active_state(&state) && show {
+                                if let Ok(new_win) = create_overlay_window(&main_handle) {
+                                    reposition_overlay(&new_win);
+                                    let _ = new_win.show();
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -181,10 +208,13 @@ pub fn set_write_mode(app: &AppHandle, active: bool) {
 }
 
 pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) {
+    let was_active = is_active_state(&get_current_state().0);
     set_current_state(state.clone(), show_pill);
 
     if show_pill {
         if let Some(win) = app.get_webview_window("overlay") {
+            // Re-sync the cached native visibility after sleep/tray transitions.
+            if !was_active { heartbeat(); let _ = win.hide(); }
             let _ = win.set_always_on_top(true);
             reposition_overlay(&win);
             let _ = win.show();
@@ -223,6 +253,13 @@ pub fn update_overlay(app: &AppHandle, state: &RecordingState, show_pill: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn placement_respects_secondary_monitor_origin_and_dpi() {
+        assert_eq!(overlay_position((-1920, 0), (1920, 1080), 1.0), (-1110.0, 920.0));
+        assert_eq!(overlay_position((1920, -100), (2560, 1440), 1.5), (2975.0, 1100.0));
+        assert!(!heartbeat_stale(8500, 1000));
+        assert!(heartbeat_stale(10000, 1000));
+    }
 
     #[test]
     fn test_active_state_detection() {

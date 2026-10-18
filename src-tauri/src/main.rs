@@ -286,6 +286,9 @@ fn resync_visibility(w: &tauri::WebviewWindow) {
     }
 }
 
+#[tauri::command]
+fn get_overlay_snapshot() -> serde_json::Value { typr_lib::overlay::snapshot() }
+
 /// Shows the main window once the frontend DOM has committed and painted its initial frame.
 /// Keeps the window invisible during cold-start WebView2 initialization to avoid the black/blank flash.
 #[tauri::command]
@@ -1233,6 +1236,7 @@ fn main() {
             hotkey_tx: hotkey_tx.clone(),
         })
         .invoke_handler(tauri::generate_handler![
+            get_overlay_snapshot,
             check_parakeet_downloaded,
             download_parakeet_model,
             delete_parakeet_model,

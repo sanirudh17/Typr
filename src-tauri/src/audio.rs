@@ -15,6 +15,25 @@ pub struct MicDevice {
     pub is_default: bool,
 }
 
+/// Keep stereo microphones with an inverted or silent channel from cancelling
+/// quiet speech. Use the strongest channel only when averaging loses >90% energy.
+pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 { return samples.to_vec(); }
+    let channels = channels as usize;
+    let mut energies = vec![0.0f64; channels];
+    let mut mono = Vec::with_capacity(samples.len() / channels);
+    for frame in samples.chunks_exact(channels) {
+        for (channel, sample) in frame.iter().enumerate() { energies[channel] += (*sample as f64).powi(2); }
+        mono.push(frame.iter().sum::<f32>() / channels as f32);
+    }
+    let strongest = energies.iter().enumerate().max_by(|a,b| a.1.total_cmp(b.1)).map(|(i,_)| i).unwrap_or(0);
+    let mixed_energy: f64 = mono.iter().map(|v| (*v as f64).powi(2)).sum();
+    if mixed_energy < energies[strongest] * 0.1 {
+        return samples.chunks_exact(channels).map(|frame| frame[strongest]).collect();
+    }
+    mono
+}
+
 pub fn list_microphones() -> Vec<MicDevice> {
     let host = cpal::default_host();
     let default_name = host
@@ -486,8 +505,15 @@ impl AudioRecorder {
         // the threshold.
         let gain_factor = 10f32.powf(FIXED_INPUT_GAIN_DB / 20.0);
         // Samples are interleaved: a 20 ms frame includes all device channels.
-        if is_silent_capture(&samples,
-            self.source_sample_rate * self.source_channels as u32, gain_factor) {
+        let mono = downmix_to_mono(&samples, self.source_channels);
+        let no_speech = match crate::speech_detection::contains_speech(&mono, self.source_sample_rate) {
+            Ok(found) => !found,
+            Err(error) => {
+                eprintln!("[Typr] Speech detection unavailable; using signal gate: {error}");
+                is_silent_capture(&samples, self.source_sample_rate * self.source_channels as u32, gain_factor)
+            }
+        };
+        if no_speech {
             return Err("Audio was silent".to_string());
         }
 
@@ -507,14 +533,7 @@ impl AudioRecorder {
             return Err("No audio captured".to_string());
         }
 
-        let mono: Vec<f32> = if self.source_channels > 1 {
-            samples
-                .chunks(self.source_channels as usize)
-                .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-                .collect()
-        } else {
-            samples.clone()
-        };
+        let mono = downmix_to_mono(&samples, self.source_channels);
 
         let mut resampled = resample(&mono, self.source_sample_rate, 16000);
         let diagnostics = process_speech_audio_chain(&mut resampled, 16000, FIXED_INPUT_GAIN_DB);
@@ -854,9 +873,10 @@ pub fn process_speech_audio_chain(
     // 4. 50 Hz high-pass filter
     highpass_50hz(samples, sample_rate);
 
-    // 5. p95 frame RMS target normalization (target 0.08, max gain 20x)
+    // 5. p95 RMS normalization: the extra 6 dB of ceiling helps very quiet
+    // speech; already-normal speech keeps the same 0.08 target, not a blanket boost.
     const TARGET_RMS: f32 = 0.08;
-    const MAX_GAIN: f32 = 20.0;
+    const MAX_GAIN: f32 = 40.0;
     let p95_rms = normalize_target_rms(samples, sample_rate, TARGET_RMS, MAX_GAIN);
 
     // 6. Soft-knee tanh limiter capping at 0.95
@@ -891,12 +911,12 @@ pub fn process_speech_audio_chain(
 // which is what the earlier per-chunk-gain attempt got wrong ("streaming distortion").
 // ---------------------------------------------------------------------------------------
 const STREAM_TARGET_RMS: f32 = 0.08; // same as TARGET_RMS in process_speech_audio_chain
-const STREAM_MAX_GAIN: f32 = 20.0; // same as MAX_GAIN in process_speech_audio_chain
+const STREAM_MAX_GAIN: f32 = 40.0; // same as MAX_GAIN in process_speech_audio_chain
 const STREAM_MIN_GAIN: f32 = 0.05;
 /// Minimum loudest-frame RMS for live level tracking, after pre-gain/filtering.
 /// The old 0.01 floor missed quiet speech already accepted by the capture gate
 /// (mean >= 0.003): e.g. a 0.002-amplitude voice at +12 dB has RMS ~0.0056.
-/// Keep a floor above low-level noise so it cannot drive automatic gain upward.
+/// Keep this floor for steady noise; quiet, modulated speech is checked below.
 const STREAM_GATE_RMS: f32 = 0.005;
 
 /// Direct-form-II-transposed biquad coefficients [b0, b1, b2, a1, a2] of the same 2nd-order
@@ -1015,11 +1035,20 @@ impl StreamingPreprocessor {
                 *s *= self.pre_gain;
             }
         }
+        let input_peak = chunk.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         self.highpass(chunk);
 
         let loudest = loudest_frame_rms(chunk, self.frame);
         let first_speech = self.level == 0.0;
-        if loudest >= STREAM_GATE_RMS {
+        // Quiet speech has a changing syllabic envelope. A lower threshold on
+        // its own would normalize steady hiss and pump the live model's noise.
+        let mut levels: Vec<f32> = chunk.chunks(self.frame.max(1))
+            .filter(|frame| frame.len() >= self.frame / 2)
+            .map(|frame| (frame.iter().map(|x| x*x).sum::<f32>() / frame.len() as f32).sqrt()).collect();
+        levels.sort_by(f32::total_cmp);
+        let quiet_speech = input_peak >= 0.001 && levels.len() >= 3 && loudest >= 0.001
+            && loudest > levels[levels.len() / 4].max(0.0001) * 1.8;
+        if loudest >= STREAM_GATE_RMS || quiet_speech {
             self.level = if first_speech {
                 loudest
             } else if loudest > self.level {
@@ -1687,6 +1716,29 @@ mod tests {
     }
 
     #[test]
+    fn downmix_preserves_inverted_stereo_speech_and_normal_stereo() {
+        let source: Vec<f32> = (0..1600).map(|i| (i as f32 * 0.1).sin() * 0.01).collect();
+        let inverted: Vec<f32> = source.iter().flat_map(|s| [*s, -*s]).collect();
+        let recovered = downmix_to_mono(&inverted, 2);
+        assert_eq!(recovered.len(), source.len());
+        assert!((measure_p95_frame_rms(&recovered, 16000) - measure_p95_frame_rms(&source, 16000)).abs() < 1e-6);
+        let stereo: Vec<f32> = source.iter().flat_map(|s| [*s, *s]).collect();
+        assert_eq!(downmix_to_mono(&stereo, 2), source);
+    }
+
+    #[test]
+    fn quiet_real_speech_receives_live_normalization_without_removing_samples() {
+        let (samples, rate) = crate::audio_chunker::read_wav_samples(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/test_clips/clip1_5s.wav")).unwrap();
+        let mut quiet = resample(&samples, rate, 16000);
+        for s in &mut quiet { *s *= 0.025; }
+        let length = quiet.len();
+        let mut pre = StreamingPreprocessor::new(16000, FIXED_INPUT_GAIN_DB);
+        for chunk in quiet.chunks_mut(2400) { pre.process(chunk); }
+        assert_eq!(quiet.len(), length);
+        assert!(measure_p95_frame_rms(&quiet, 16000) > 0.035);
+    }
+
+    #[test]
     fn test_tail_rms() {
         let mut s = vec![0.0f32; 16000];
         for x in s[8000..].iter_mut() {
@@ -1707,7 +1759,7 @@ mod tests {
         // nothing and the last poll interval of audio never reached the live stream.
         let mut rec = AudioRecorder::new();
         rec.set_source_format_for_test(16000, 1);
-        let pushed = tone(300.0, 16000, 1.0);
+        let (pushed, _) = crate::audio_chunker::read_wav_samples(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/test_clips/clip1_5s.wav")).unwrap();
         rec.push_raw_samples_for_test(&pushed);
         let out = std::env::temp_dir().join("typr_test_live_drain.wav");
         let res = rec.stop_and_save(&out, None);
@@ -1734,10 +1786,11 @@ mod tests {
         rec.push_raw_samples_for_test(&vec![0.0; 48000 * 2]);
         assert_eq!(rec.stop_capture().unwrap_err(), "Audio was silent");
         rec.clear_samples();
-        let mono = tone(300.0, 48000, 1.0);
+        let (source, rate) = crate::audio_chunker::read_wav_samples(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/test_clips/clip1_5s.wav")).unwrap();
+        let mono = resample(&source, rate, 48000);
         let stereo: Vec<_> = mono.iter().flat_map(|&x| [x, x]).collect();
         rec.push_raw_samples_for_test(&stereo);
-        assert_eq!(rec.stop_capture().unwrap(), 1.0);
+        assert!((rec.stop_capture().unwrap() - mono.len() as f32 / 48000.0).abs() < 1e-5);
         assert_eq!(rec.get_raw_samples_from(90000).0, stereo[90000..]);
         let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!("typr-deferred-capture-{id}.wav"));

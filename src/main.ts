@@ -21,6 +21,7 @@ interface Settings {
   nemotronModel: string;
   aiEnabled: boolean;
   aiModel: string;
+  writeModel: string;
   aiProfile: string;
   aiPromptFormat: string;
   aiTone: string;
@@ -536,6 +537,7 @@ async function loadSettings() {
   setTheme(currentSettings.theme || THEME_DEFAULT);
 
   // AI post-processing
+  currentSettings.writeModel ||= currentSettings.aiModel || AI_MODEL_DEFAULT;
   setAiEnabled(currentSettings.aiEnabled);
   setAiModel(currentSettings.aiModel || AI_MODEL_DEFAULT);
   renderWriteMode();
@@ -890,11 +892,13 @@ function setAiCatalogStatus(message: string, epoch = aiCatalogStatusEpoch): void
 }
 
 function renderAiModelChoices(): void {
-  const selected = currentSettings.aiModel || AI_MODEL_DEFAULT;
   const ids = (aiCatalog?.models.map(model => model.id) ?? STARTER_AI_MODELS).filter(validAiModelId);
   // Preserve saved IDs during offline, failed and in-progress discovery.
-  if (!ids.includes(selected)) ids.unshift(selected);
+  for (const selected of [currentSettings.aiModel, currentSettings.writeModel]) {
+    if (selected && !ids.includes(selected)) ids.unshift(selected);
+  }
   for (const id of ["ai-model-select", "write-model-select"]) {
+    const selected = (id === "write-model-select" ? currentSettings.writeModel : currentSettings.aiModel) || currentSettings.aiModel || AI_MODEL_DEFAULT;
     const select = document.getElementById(id) as HTMLSelectElement;
     select.replaceChildren(...ids.map(model => {
       const option = document.createElement("option");
@@ -934,16 +938,25 @@ async function refreshAiModels(forceRefresh = false): Promise<void> {
       const cooldown = /^Try Refresh again in (\d+) seconds\.$/.exec(catalog.warning ?? "");
       aiCatalogCooldownUntil = cooldown ? Date.now() + Number(cooldown[1]) * 1000 : 0;
       const ids = catalog.models.map(model => model.id).filter(validAiModelId);
-      const selected = currentSettings.aiModel;
-      if (catalog.source === "live" && !catalog.warning && ids.length && !ids.includes(selected)) {
-        const replacement = replacementAiModel(selected, ids);
-        if (replacement) {
-          setAiModel(replacement, statusEpoch);
-          aiCatalogNotice = `${selected} is no longer listed by Groq. Switched to ${replacement}.`;
+      if (catalog.source === "live" && !catalog.warning && ids.length) {
+        const previous = { aiModel: currentSettings.aiModel, writeModel: currentSettings.writeModel };
+        const notices: string[] = [];
+        for (const field of ["aiModel", "writeModel"] as const) {
+          const selected = currentSettings[field];
+          if (!ids.includes(selected)) {
+            const replacement = replacementAiModel(selected, ids);
+            if (replacement) {
+              currentSettings[field] = replacement;
+              notices.push(`${field === "aiModel" ? "Cleanup" : "Write Mode"}: ${selected} is no longer listed. Switched to ${replacement}.`);
+            }
+          }
+        }
+        if (notices.length) {
+          aiCatalogNotice = notices.join(" ");
           try { await saveSettings(); }
           catch {
-            currentSettings.aiModel = selected;
-            aiCatalogNotice = `Groq no longer lists ${selected}. Could not save the replacement; use Refresh to try again.`;
+            Object.assign(currentSettings, previous);
+            aiCatalogNotice = "Could not save updated model choices. Your previous choices were kept; try Refresh again.";
           }
         }
       }
@@ -1629,7 +1642,7 @@ function renderWriteMode(): void {
   writeOn.setAttribute("aria-pressed", String(enabled));
   document.getElementById("write-options")!.classList.toggle("hidden", !enabled);
   document.getElementById("write-hotkey-display")!.textContent = toDisplay(currentSettings.writeHotkey || "CmdOrCtrl+Shift+W");
-  writeModel.value = currentSettings.aiModel || AI_MODEL_DEFAULT;
+  writeModel.value = currentSettings.writeModel || currentSettings.aiModel || AI_MODEL_DEFAULT;
   syncCustomSelectDisplay(writeModel);
   updateAiKeyWarning();
 }
@@ -1651,12 +1664,9 @@ async function setWriteEnabled(enabled: boolean): Promise<void> {
 writeOff.addEventListener("click", () => void setWriteEnabled(false));
 writeOn.addEventListener("click", () => void setWriteEnabled(true));
 writeModel.addEventListener("change", () => {
-  setAiModel(writeModel.value);
+  currentSettings.writeModel = writeModel.value;
+  renderAiModelChoices();
   void saveSettings().catch((err) => { writeStatus.textContent = String(err); });
-});
-aiModelSelect.addEventListener("change", () => {
-  writeModel.value = currentSettings.aiModel;
-  syncCustomSelectDisplay(writeModel);
 });
 const writeCapture = createHotkeyCapture({
   display: document.getElementById("write-hotkey-display")!, status: document.getElementById("write-hotkey-status")!,

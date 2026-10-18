@@ -33,7 +33,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "binaries/cpu/*.dll"
+      "binaries/cpu/*.dll",
+      "assets/SILERO_LICENSE.txt"
     ],
     "windows": { "nsis": { "installerHooks": "windows/installer-hooks.nsh" } }
   },

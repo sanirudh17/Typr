@@ -147,14 +147,7 @@ impl NemotronLiveSession {
             rec.get_raw_samples_from(last_read)
         };
         if !new_samples.is_empty() {
-            let mut mono: Vec<f32> = if src_channels > 1 {
-                new_samples
-                    .chunks(src_channels as usize)
-                    .map(|f| f.iter().sum::<f32>() / f.len() as f32)
-                    .collect()
-            } else {
-                new_samples
-            };
+            let mut mono = crate::audio::downmix_to_mono(&new_samples, src_channels);
             if pre.is_none() && crate::audio::FIXED_INPUT_GAIN_DB.abs() >= 0.01 {
                 let factor = 10.0f32.powf(crate::audio::FIXED_INPUT_GAIN_DB / 20.0);
                 for s in mono.iter_mut() {
@@ -268,14 +261,7 @@ pub fn start_live_session(
                     continue;
                 }
                 last_read = new_end;
-                let mut mono: Vec<f32> = if src_channels > 1 {
-                    new_samples
-                        .chunks(src_channels as usize)
-                        .map(|f| f.iter().sum::<f32>() / f.len() as f32)
-                        .collect()
-                } else {
-                    new_samples
-                };
+                let mut mono = crate::audio::downmix_to_mono(&new_samples, src_channels);
                 if pre.is_none() && crate::audio::FIXED_INPUT_GAIN_DB.abs() >= 0.01 {
                     let factor = 10.0f32.powf(crate::audio::FIXED_INPUT_GAIN_DB / 20.0);
                     for s in mono.iter_mut() {

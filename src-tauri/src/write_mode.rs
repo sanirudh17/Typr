@@ -78,7 +78,9 @@ pub async fn rewrite(
         return Err("Keep the editing instruction shorter. Your selected text was kept.".into());
     }
     let model = crate::ai_models::effective_model(&settings.groq_api_key,
-        crate::ai_postprocess::resolve_model(&settings.ai_model));
+        crate::ai_postprocess::resolve_model(if settings.write_model.trim().is_empty() {
+            &settings.ai_model
+        } else { &settings.write_model }));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(30))
