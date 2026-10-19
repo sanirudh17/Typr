@@ -365,33 +365,9 @@ impl Recorder {
             }
         };
         
-        let duration_secs = match save_result {
-            Ok(duration) => duration,
-            Err(e) => {
-                // Capture failures used to die silently (no log line, no toast): a quick
-                // "D"/"hi" tap that falls under the 0.4 s minimum or the silence gate
-                // pasted nothing and left no trace. Log and tell the user instead.
-                crate::debug_log::log(app_dir, &format!("capture failed: {}", e));
-                let toast = match e.as_str() {
-                    "Audio too short" => "That was too short to transcribe — hold the hotkey while you speak.",
-                    "Audio was silent" => "Nothing heard — check your microphone and speak closer to it.",
-                    _ => "No audio captured — check your microphone.",
-                };
-                notify_user(app, toast);
-                *self.nemotron_session.lock().unwrap() = None;
-                *self.parakeet_session.lock().unwrap() = None;
-                self.audio_recorder.lock().unwrap().clear_samples();
-                if wav_requested { let _ = std::fs::remove_file(&temp_path); }
-                self.reset_ready(app);
-                return Err(e);
-            }
-        };
-        crate::debug_log::log(app_dir, &format!(
-            "PERF capture={capture_id} audio_ms={} capture_secs={duration_secs:.3} release_elapsed_ms={}",
-            save_started_at.elapsed().as_millis(), transcription_started_at.elapsed().as_millis()));
-
-        // Explicit local-only diagnostics. Off by default; useful when normal
-        // and fast speech need replaying through exactly the same engines.
+        // Save opt-in diagnostics before handling capture errors: a rejected
+        // silent/quiet recording is essential evidence too. Off by default;
+        // raw samples can be replayed through exactly the same engines.
         if review_audio_enabled() {
             let review_started_at = Instant::now();
             let capture = self.audio_recorder.lock().unwrap().review_capture();
@@ -423,6 +399,31 @@ impl Recorder {
                     "REVIEW AUDIO capture={capture_id} could not start save: {e}")),
             }
         }
+
+        let duration_secs = match save_result {
+            Ok(duration) => duration,
+            Err(e) => {
+                // Capture failures used to die silently (no log line, no toast): a quick
+                // "D"/"hi" tap that falls under the 0.4 s minimum or the silence gate
+                // pasted nothing and left no trace. Log and tell the user instead.
+                crate::debug_log::log(app_dir, &format!("capture failed: {}", e));
+                let toast = match e.as_str() {
+                    "Audio too short" => "That was too short to transcribe — hold the hotkey while you speak.",
+                    "Audio was silent" => "Nothing heard — check your microphone and speak closer to it.",
+                    _ => "No audio captured — check your microphone.",
+                };
+                notify_user(app, toast);
+                *self.nemotron_session.lock().unwrap() = None;
+                *self.parakeet_session.lock().unwrap() = None;
+                self.audio_recorder.lock().unwrap().clear_samples();
+                if wav_requested { let _ = std::fs::remove_file(&temp_path); }
+                self.reset_ready(app);
+                return Err(e);
+            }
+        };
+        crate::debug_log::log(app_dir, &format!(
+            "PERF capture={capture_id} audio_ms={} capture_secs={duration_secs:.3} release_elapsed_ms={}",
+            save_started_at.elapsed().as_millis(), transcription_started_at.elapsed().as_millis()));
 
         // Transcribe
         let prompt = {

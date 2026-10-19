@@ -123,6 +123,12 @@ verified the advertised benchmarks.
 
 ## Optional focused check
 
+With `TYPR_REVIEW_AUDIO=1`, stopped captures are retained locally under
+`review-audio` before capture-error handling, including clips rejected as silent
+or too short. Previously those failures returned before diagnostic saving, so
+the very clips needed to investigate gate sensitivity were lost. Retention is
+still off by default; this diagnostic change does not alter detection thresholds.
+
 1. With cloud recognition and cleanup on, say at a comfortable quiet volume:
    `Deploy the preview to Vercel. Keep all final words.` Add Vercel to Dictionary
    with its product context first if you want a saved vocabulary reference.
