@@ -35,14 +35,9 @@ static RECOGNIZER: Mutex<Option<(PathBuf, sherpa_onnx::OnlineRecognizer)>> = Mut
 // feature-window headroom, even when the recording ends on a chunk boundary.
 const TAIL_PADDING_SAMPLES: usize = 20_000; // 1.25 seconds at 16 kHz
 
-// Captured WAVs already contain 400 ms of exact zero padding. Keep at least
-// a full 1.25 s closure without decoding that comfort padding a second time.
-fn missing_tail_padding(samples: &[f32], sample_rate: u32) -> usize {
-    if sample_rate != 16_000 { return TAIL_PADDING_SAMPLES; }
-    let existing = samples.iter().rev().take(TAIL_PADDING_SAMPLES)
-        .take_while(|&&s| s == 0.0).count();
-    TAIL_PADDING_SAMPLES - existing
-}
+// Append a FRESH closure after decoding the saved input. Its 400 ms comfort
+// padding has already been consumed and cannot replace encoder lookahead here.
+// Reusing it lost a final word on a retained short, softly spoken recording.
 
 fn build_recognizer(model_dir: &Path) -> Result<sherpa_onnx::OnlineRecognizer, String> {
     let mut config = sherpa_onnx::OnlineRecognizerConfig::default();
@@ -440,7 +435,7 @@ pub async fn transcribe_nemotron(
             recognizer.decode(&stream);
         }
 
-        let tail_silence = vec![0.0f32; missing_tail_padding(&samples, sample_rate)];
+        let tail_silence = vec![0.0f32; TAIL_PADDING_SAMPLES];
         stream.accept_waveform(16000, &tail_silence);
         while recognizer.is_ready(&stream) {
             recognizer.decode(&stream);
@@ -471,15 +466,13 @@ mod tests {
     static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
-    fn batch_padding_reuses_only_exact_silence_at_the_expected_rate() {
-        assert_eq!(missing_tail_padding(&[0.1, 0.0], 16_000), 19_999);
-        let mut samples = vec![0.1; 1600];
-        samples.extend(vec![0.0; 6400]);
-        assert_eq!(missing_tail_padding(&samples, 16_000), 13_600);
-        samples.push(0.00001);
-        assert_eq!(missing_tail_padding(&samples, 16_000), 20_000);
-        assert_eq!(missing_tail_padding(&vec![0.0; 48_000], 48_000), 20_000);
-        assert_eq!(missing_tail_padding(&vec![0.0; 30_000], 16_000), 0);
+    fn finalization_retains_a_fresh_encoder_chunk_after_saved_padding() {
+        assert!(TAIL_PADDING_SAMPLES >= 17_920 + 400);
+        let source = include_str!("transcribe_nemotron.rs");
+        // Both batch and live must flush a complete fresh chunk. Do not subtract
+        // previously decoded silence from either path's encoder closure.
+        let pattern = ["let tail_silence = ", "vec![0.0f32; TAIL_PADDING_SAMPLES];"].concat();
+        assert_eq!(source.matches(&pattern).count(), 2);
     }
 
     #[tokio::test]

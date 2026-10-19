@@ -91,6 +91,10 @@ async fn transcribe_groq_inner(
     // SUM of every chunk (a 40s dictation = 2-3 chunks x retry cycle = the reported 4-5s;
     // parallel it's the slowest chunk alone). Order is preserved for merge_chunk_texts.
     let futures = chunks.iter().map(|chunk| async move {
+        if crate::speech_detection::confidently_silent_chunk(chunk.samples, sample_rate) {
+            println!("[Typr] Skipping confirmed silent cloud chunk");
+            return Ok::<(String, bool), String>((String::new(), chunk.overlaps_previous));
+        }
         let chunk_bytes = crate::audio_chunker::samples_to_wav_bytes(chunk.samples, sample_rate)?;
         let chunk_text = post_groq_chunk(api_key, chunk_bytes, model).await?;
         Ok::<(String, bool), String>((chunk_text.trim().to_string(), chunk.overlaps_previous))
@@ -196,7 +200,7 @@ fn response_text(json: &serde_json::Value) -> Result<String, String> {
     // Never remove individual low-confidence words from a real sentence.
     let confidently_no_speech = json["segments"].as_array().is_some_and(|segments|
         !segments.is_empty() && segments.iter().all(|s|
-            s["no_speech_prob"].as_f64().is_some_and(|p| p >= 0.8)
+            s["no_speech_prob"].as_f64().is_some_and(|p| p > 0.6)
             && s["avg_logprob"].as_f64().is_some_and(|p| p < -1.0)));
     Ok(if confidently_no_speech { String::new() } else { text.to_string() })
 }
@@ -214,6 +218,10 @@ mod tests {
     fn silence_confidence_does_not_blacklist_genuine_greetings_or_drop_words() {
         let noise = serde_json::json!({"text":"Thank you.","segments":[{"no_speech_prob":0.99,"avg_logprob":-1.5}]});
         assert_eq!(response_text(&noise).unwrap(), "");
+        let uncertain_noise = serde_json::json!({"text":"you","segments":[{"no_speech_prob":0.72,"avg_logprob":-1.3}]});
+        assert_eq!(response_text(&uncertain_noise).unwrap(), "");
+        let genuine_short_word = serde_json::json!({"text":"you","segments":[{"no_speech_prob":0.72,"avg_logprob":-0.3}]});
+        assert_eq!(response_text(&genuine_short_word).unwrap(), "you");
         let spoken = serde_json::json!({"text":"Thank you.","segments":[{"no_speech_prob":0.01,"avg_logprob":-0.2}]});
         assert_eq!(response_text(&spoken).unwrap(), "Thank you.");
         let mixed = serde_json::json!({"text":"Keep all final words.","segments":[{"no_speech_prob":0.99,"avg_logprob":-1.5},{"no_speech_prob":0.01,"avg_logprob":-0.2}]});

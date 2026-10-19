@@ -18,7 +18,7 @@ async fn main() -> Result<(), String> {
     let temporary = std::env::temp_dir().join(format!("typr-quiet-check-{}.wav", std::process::id()));
     let result = async {
         let mut previous = std::collections::BTreeMap::<String, String>::new();
-        for scale in [1.0, 0.025] {
+        for scale in [1.0, 0.025, 0.005] {
             let raw: Vec<f32> = source.iter().map(|s| s * scale).collect();
             let start = Instant::now();
             assert!(speech_detection::contains_speech(&raw, rate)?);

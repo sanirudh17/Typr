@@ -128,6 +128,11 @@ fn timed_words(result: &sherpa_onnx::OfflineRecognizerResult, offset: f32) -> Op
 fn decode_chunk(recognizer: &sherpa_onnx::OfflineRecognizer, audio: &[f32],
     offset: f32, overlaps_previous: bool,
 ) -> Result<audio_chunker::TimedChunkText, String> {
+    if crate::speech_detection::confidently_silent_chunk(audio, 16_000) {
+        return Ok(audio_chunker::TimedChunkText {
+            text: String::new(), words: Some(Vec::new()), overlaps_previous,
+        });
+    }
     let stream = recognizer.create_stream();
     stream.accept_waveform(16_000, audio);
     recognizer.decode(&stream);

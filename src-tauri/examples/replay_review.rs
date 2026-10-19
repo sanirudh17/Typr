@@ -28,8 +28,7 @@ fn prepare_wav(input: &Path) -> Result<TemporaryWav, String> {
         return Err("WAV contains empty, incomplete, or non-finite samples".into());
     }
     // Same sequence as AudioRecorder::save_capture, including its i16 quantization.
-    let mono: Vec<f32> = raw.chunks_exact(spec.channels as usize)
-        .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32).collect();
+    let mono = audio::downmix_to_mono(&raw, spec.channels);
     let mut samples = audio::resample(&mono, spec.sample_rate, 16_000);
     let diagnostics = audio::process_speech_audio_chain(&mut samples, 16_000, audio::FIXED_INPUT_GAIN_DB);
     println!("REPLAY AUDIO {}", serde_json::json!({

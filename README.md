@@ -219,7 +219,7 @@ Qwen is the bootstrap default. Fallback cleanup prefers another available family
 ### Step 1 — Install the app
 
 1. Go to the [**Releases page**](https://github.com/sanirudh17/Typr/releases/latest).
-2. Under **Assets**, download **`Typr_0.3.1_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
+2. Under **Assets**, download **`Typr_0.3.2_x64-setup.exe`** *(the `.msi` is an alternative if your workplace requires MSI)*.
 3. Run it. Windows SmartScreen may warn you because the installer is not code-signed — click **More info → Run anyway**.
 4. Launch **Typr**. It opens on the **Home** tab, which will be empty until you dictate for the first time. The tabs down the left side are where everything below happens.
 
@@ -314,7 +314,7 @@ You can check whenever you like from **General → Updates**. A failed check on 
 >
 > **On 0.1.2?** You can update from inside the app, but 0.1.2 has no title-bar message — it only shows the new version under **General → Updates**, so you have to look. From 0.1.3 on, Typr comes and tells you.
 
-Version 0.3.1 includes the CPU runtime in the small installer. For optional NVIDIA support, open **Engine**, choose **NVIDIA GPU** under **Whisper processing**, then click **Download NVIDIA support**. The pinned, checksum-verified download is about 685 MB and occupies about 1.2 GB after extraction; it is reused across app updates. Use **Delete NVIDIA support** to reclaim that space and return Whisper to CPU. Speech models are separate downloads.
+Version 0.3.2 includes the CPU runtime in the small installer. For optional NVIDIA support, open **Engine**, choose **NVIDIA GPU** under **Whisper processing**, then click **Download NVIDIA support**. The pinned, checksum-verified download is about 685 MB and occupies about 1.2 GB after extraction; it is reused across app updates. Use **Delete NVIDIA support** to reclaim that space and return Whisper to CPU. Speech models are separate downloads.
 
 ---
 
@@ -357,8 +357,8 @@ npm run tauri build   # installers
 ```
 
 Installers land in:
-- `src-tauri/target/release/bundle/nsis/Typr_0.3.1_x64-setup.exe`
-- `src-tauri/target/release/bundle/msi/Typr_0.3.1_x64_en-US.msi`
+- `src-tauri/target/release/bundle/nsis/Typr_0.3.2_x64-setup.exe`
+- `src-tauri/target/release/bundle/msi/Typr_0.3.2_x64_en-US.msi`
 
 Speech models are downloaded separately through Engine settings and stored in app data.
 
@@ -371,8 +371,8 @@ The signing tool requires a nonempty password and rejects the revoked key.
 
 ```powershell
 npm run tauri -- build --ci --no-sign --bundles nsis,msi
-powershell -NoProfile -File scripts/sign-local-release.ps1 -Version 0.3.1
-powershell -NoProfile -File scripts/write-latest-json.ps1 -Version 0.3.1 -NotesFile release-notes-v0.3.1.md
+powershell -NoProfile -File scripts/sign-local-release.ps1 -Version 0.3.2
+powershell -NoProfile -File scripts/write-latest-json.ps1 -Version 0.3.2 -NotesFile release-notes-v0.3.2.md
 ```
 
 The local signing script reads the external key and a Windows-protected password, restores its
@@ -383,13 +383,13 @@ fetches `latest.json` from the latest release tag. Do not publish an unverified 
 
 ```json
 {
-  "version": "0.3.1",
+  "version": "0.3.2",
   "notes": "What changed",
   "pub_date": "2026-10-11T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.3.1/Typr_0.3.1_x64-setup.exe"
+      "url": "https://github.com/sanirudh17/Typr/releases/download/v0.3.2/Typr_0.3.2_x64-setup.exe"
     }
   }
 }

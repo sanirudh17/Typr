@@ -1,5 +1,20 @@
 # Changelog - Typr
 
+## [v0.3.2] - 2026-10-19
+
+- Improve shared quiet-speech normalization and stereo cancellation handling, without trimming recordings or imposing a blanket gain increase.
+- Preserve brief words after long pauses with a sustained speech-level reference instead of amplifying the room-noise percentile.
+- Add local CPU speech detection before all recognition engines and confidence-based cloud non-speech rejection without word blacklists.
+- Avoid sending confidently silent chunks to cloud recognition and avoid aborting Parakeet on such chunks; retain any chunk with speech evidence or a detector error.
+- Fix Nemotron batch final-word loss by retaining a full fresh decoder-flush interval after prepared audio.
+- Bound cloud transcription and retry time with one deadline.
+- Separate AI cleanup and Write Mode model selections, including migration and dynamic model discovery.
+- Preserve Raw-mode line breaks and retain cleanup fidelity, negation and intelligent-layout guards.
+- Broaden correction observation to editable browser containers and value-only fields when Windows accessibility permits it; retry temporary interruptions.
+- Recover recording-pill state after resume/reload and correct placement across monitor origins and scaling.
+- Retain rejected recordings when optional local audio diagnostics are enabled.
+- Keep CPU packaging, existing user data and separately installed GPU/model downloads intact. S1-mini is not included.
+
 ## [v0.3.1] - 2026-10-11
 
 ### Smaller installer and optional NVIDIA support

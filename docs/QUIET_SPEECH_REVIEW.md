@@ -1,8 +1,9 @@
 # Quiet speech, cloud latency and independent editing models
 
-Worktree: `quiet-speech-and-cleanup`, based on v0.3.1. This update is not merged
-or published. No personal settings, dictionary entries or installed models were
-changed during development.
+Worktree: `quiet-speech-and-cleanup`, based on v0.3.1; prepared for v0.3.2.
+No personal settings, dictionary entries or installed models were changed during
+development. Diagnostic microphone recordings stay in app data and are not
+included in the repository or release.
 
 ## Findings from local logs
 
@@ -120,6 +121,47 @@ verified the advertised benchmarks.
 - No phrase-specific correction for Vercel, FluidVoice or the user's examples
   was hard-coded. Add an unfamiliar name and its context to Dictionary to give
   cleanup a spelling reference; ambiguous speech may still be misrecognized.
+
+## Version 0.3.2 final accuracy pass
+
+- Fixed sparse-speech gain estimation: a brief spoken word can fall below the
+  clip's 95th-percentile occupancy, causing the noise floor to set excessive
+  gain. The reference now also considers five sustained 20 ms frames. The
+  isolated-click case and the adaptive gain ceiling remain covered by tests.
+- Changed Silero's speech probability threshold from 0.35 to the upstream
+  balanced 0.5, keeping the short-utterance duration and normalized analysis.
+  Quiet reference speech survived at 1.0, 0.1, 0.025 and 0.005 amplitude; seeded
+  hiss with short endpoint clicks was rejected, and quiet speech in hiss kept.
+- Cloud non-speech rejection uses the usual 0.6 probability boundary only in
+  conjunction with low recognition confidence across every segment. A genuine
+  short utterance with good recognition confidence is retained.
+- A retained softly spoken microphone recording exposed a Nemotron batch
+  finalization defect: subtracting the saved WAV's 400 ms padding lost the last
+  word. A fresh complete 1.25-second decoder closure preserves the whole test
+  sentence. Warm local replay took 583 ms for Nemotron and 323 ms for Parakeet;
+  the original cloud request retained the same sentence in 277 ms.
+- The new six-second retained silent capture was correctly rejected. Its raw
+  amplitude was near zero. This is not the original failed noise capture and
+  does not establish that every room-noise condition is solved.
+- Normal, 32 dB attenuated and 46 dB attenuated clean reference audio produced
+  identical word sequences through the installed Nemotron 3.5 and Parakeet v3
+  models and live Groq large-v3. Cloud requests were 272-400 ms on this run.
+  Clean attenuation is not the same as a strained voice in background noise.
+- A sparse synthetic-word stress test exposed silent subchunks inside otherwise
+  non-silent recordings. Cloud and both Parakeet paths now skip a chunk only
+  when low energy and normalized neural analysis both identify no speech.
+  Detector errors and either form of speech evidence retain the chunk.
+- Extremely sparse isolated synthetic utterances remain model dependent. The
+  gain regression is covered separately from acoustic word-recognition claims;
+  no phrase-specific replacement or unconditional dictionary rewrite was added.
+- Final library regression suite: 503 passed, zero failed, six ignored. Signing
+  tests: 8 passed. Frontend browser checks: 16 passed, no page errors. TypeScript
+  and Vite production builds passed. Live cleanup styles and a two-step Write
+  Mode edit passed. Windows accessibility still limits some browser observers;
+  native popup support in every third-party editor is not claimed.
+
+Threshold references: [Silero VAD defaults](https://github.com/snakers4/silero-vad/blob/master/src/silero_vad/utils_vad.py),
+[Whisper no-speech handling](https://github.com/openai/whisper/blob/main/whisper/transcribe.py).
 
 ## Optional focused check
 

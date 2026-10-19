@@ -818,10 +818,22 @@ pub fn tail_rms(samples: &[f32], sample_rate: u32, ms: u32) -> f32 {
 
 pub fn normalize_target_rms(samples: &mut [f32], sample_rate: u32, target_rms: f32, max_gain: f32) -> f32 {
     let p95 = measure_p95_frame_rms(samples, sample_rate);
-    if p95 < 1e-5 {
+    // A brief word after a long pause can occupy less than 5% of the clip.
+    // Then p95 measures the room instead of the voice and over-amplifies the
+    // word into the limiter. Require five consecutive 20 ms frames so an
+    // isolated click does not become the gain reference either.
+    let frame_len = (sample_rate as usize / 50).max(1);
+    let levels: Vec<f32> = samples.chunks_exact(frame_len).map(|frame| {
+        (frame.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / frame.len() as f64).sqrt() as f32
+    }).collect();
+    let sustained = levels.windows(5).map(|frames|
+        frames.iter().copied().fold(f32::INFINITY, f32::min))
+        .fold(0.0f32, f32::max);
+    let reference = p95.max(sustained);
+    if reference < 1e-5 {
         return p95;
     }
-    let gain = (target_rms / p95).min(max_gain);
+    let gain = (target_rms / reference).min(max_gain);
     for s in samples.iter_mut() {
         *s *= gain;
     }
@@ -1657,6 +1669,24 @@ mod tests {
         assert!((post_quiet_p95 - 0.02).abs() < 1e-3);
     }
 
+    #[test]
+    fn normalization_preserves_brief_quiet_words_inside_long_pauses() {
+        let mut samples = vec![0.0002; 16000 * 12];
+        for (i, sample) in samples[16000 * 6..16000 * 6 + 3200].iter_mut().enumerate() {
+            *sample = (std::f32::consts::TAU * 220.0 * i as f32 / 16000.0).sin() * 0.08;
+        }
+        let before = samples.clone();
+        assert!(measure_p95_frame_rms(&samples, 16000) < 0.001);
+        normalize_target_rms(&mut samples, 16000, 0.08, 40.0);
+        assert_eq!(samples.len(), before.len());
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(peak < 0.15, "brief word would hit the limiter: {peak}");
+        assert!(measure_p95_frame_rms(&samples[96000..99200], 16000) > 0.07);
+        let mut click = vec![0.0002; 16000 * 4];
+        click[16000] = 0.9;
+        normalize_target_rms(&mut click, 16000, 0.08, 40.0);
+        assert!((click[0] - 0.008).abs() < 0.0001, "one click must not set the speech level");
+    }
     #[test]
     fn test_apply_tanh_limiter() {
         let mut s = vec![0.5f32, -0.75, 0.85, 1.5, 10.0, -10.0];
