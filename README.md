@@ -52,6 +52,7 @@ Transcription runs **fully offline** — on your CPU with Whisper, Parakeet or N
 - Local correction observation is always active and suggests names you fix after dictation. The slim bar asks **Add ‘word’ to dictionary?** Choose **Yes** to add it; **No**, Escape or expiry discard it.
 - Confirmed terms guide context-aware AI cleanup for every speech engine. Whisper recognition prompts remain disabled because regression recordings showed omitted speech when bias prompts were used. Dictionary guidance cannot guarantee an unfamiliar name from ambiguous audio.
 - Current Parakeet/Nemotron decoders do not support hotword biasing. Edit observation depends on Windows accessibility support; add terms directly in **Dictionary** when observation is unavailable.
+- Observation supports editable browser containers and value-only inputs when Windows exposes a stable field identity. Brief accessibility interruptions are retried; password fields, terminals and unsupported editors are excluded. See [observer and local cleanup review](docs/DICTIONARY_OBSERVER_AND_S1_REVIEW.md) for limitations and the S1-mini CPU trial.
 - [Details, privacy, limitations and a short check](docs/AUTO_LEARNING_DICTIONARY.md).
 - [Focused check using saved dictionary words](docs/DICTIONARY_FOCUSED_CHECK.md).
 

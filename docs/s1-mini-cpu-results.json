@@ -1,0 +1,90 @@
+[
+  {
+    "id": "punctuation",
+    "input": "review the invoice schedule the meeting keep the final attachment",
+    "output": "Review the invoice schedule. The meeting keep the final attachment.",
+    "ms": 366,
+    "failures": [
+      "missing schedule the meeting"
+    ]
+  },
+  {
+    "id": "negation",
+    "input": "do not delete the project the feature is not enabled keep every final word",
+    "output": "Do not delete the project. The feature is not enabled. Keep every final word.",
+    "ms": 451,
+    "failures": []
+  },
+  {
+    "id": "technical-words",
+    "input": "the picture shows our team taking a shot add a quick overlay button including robust decoding algorithms",
+    "output": "The picture shows our team taking a shot. Add a quick overlay button including robust decoding algorithms.",
+    "ms": 502,
+    "failures": []
+  },
+  {
+    "id": "names",
+    "input": "open the glint app and the tauri repository ask synara to review herdr with pi agent",
+    "output": "Open the Glint app and the Tauri repository. Ask Synara to review herdr with Pi Agent.",
+    "ms": 490,
+    "failures": []
+  },
+  {
+    "id": "literal",
+    "input": "keep src/main.rs and https://example.com/a?b=1 unchanged do not rename user_id",
+    "output": "Keep src/main.rs and https://example.com/a?b=1 unchanged. Do not rename user_id.",
+    "ms": 462,
+    "failures": []
+  },
+  {
+    "id": "short-question",
+    "input": "can you check whether the release is ready",
+    "output": "Can you check whether the release is ready?",
+    "ms": 254,
+    "failures": []
+  },
+  {
+    "id": "correction",
+    "input": "send the invoice on friday no wait thursday",
+    "output": "Send the invoice on Thursday.",
+    "ms": 186,
+    "failures": []
+  },
+  {
+    "id": "email",
+    "input": "please send it to hello at example dot com",
+    "output": "Please send it to hello@example.com.",
+    "ms": 260,
+    "failures": []
+  },
+  {
+    "id": "number",
+    "input": "the total is twenty three dollars and fifty cents",
+    "output": "The total is $23.50.",
+    "ms": 317,
+    "failures": []
+  },
+  {
+    "id": "filler-only",
+    "input": "um uh",
+    "output": "",
+    "ms": 121,
+    "failures": []
+  },
+  {
+    "id": "list",
+    "input": "first review the invoice second schedule the meeting third attach the report",
+    "output": "1. Review the invoice.\n2. Schedule the meeting.\n3. Attach the report.",
+    "ms": 524,
+    "failures": []
+  },
+  {
+    "id": "long-ending",
+    "input": "i want you to review the application and check whether the settings are saved correctly make sure the dictionary only suggests terms after a real correction and never replaces ordinary words automatically do not remove any qualifiers keep the last sentence exactly as spoken including robust decoding algorithms",
+    "output": "I want you to review the application and check whether the settings are saved correctly. Make sure the dictionary only suggests terms after a real correction and never replaces ordinary words. Automatically do not remove any qualifiers. Keep the last sentence exactly as spoken, including robust decoding algorithms.",
+    "ms": 1880,
+    "failures": [
+      "missing never replaces ordinary words automatically"
+    ]
+  }
+]

@@ -80,16 +80,56 @@ mod copy_tests {
     fn equivalent_editor_line_endings_match() {
         assert_eq!(normalize_lines("one\r\ntwo\rthree"), "one\ntwo\nthree");
     }
+    #[test]
+    fn value_only_observation_requires_a_unique_verified_insertion() {
+        assert_eq!(insertion_anchor("Prefix old suffix", "Prefix typer suffix", "typer"), Some(("Prefix ".into(), " suffix".into())));
+        assert_eq!(insertion_anchor("Prefix  suffix", "Prefix typer suffix", "typer"), Some(("Prefix ".into(), " suffix".into())));
+        assert_eq!(insertion_anchor("Prefix suffix", "Prefix typersuffix", "typer"), Some(("Prefix ".into(), "suffix".into())));
+        // An extra space outside the inserted payload is an unverified edit.
+        assert_eq!(insertion_anchor("Prefix suffix", "Prefix typer suffix", "typer"), None);
+        assert_eq!(insertion_anchor("typer", "typer", "typer"), None);
+        assert_eq!(insertion_anchor("aa", "aaa", "a"), None);
+        assert_eq!(insertion_anchor("other field", "Prefix typer suffix", "typer"), None);
+        assert_eq!(insertion_anchor("é old fin", "é Typr fin", "Typr"), Some(("é ".into(), " fin".into())));
+    }
 }
 /// Read-only, bounded anchor for a normal dictation insertion. Unlike Write
 /// Mode it permits an empty caret selection and never simulates copy.
-pub fn prepare_observation() -> Result<Selection, String> {
+pub struct Observation {
+    #[cfg(windows)] target: native::Target,
+    baseline: String,
+    anchor: Option<(String, String)>,
+}
+
+/// Value-only editors have no selection range. Bind a unique insertion against
+/// the before-paste snapshot; never guess from a word found in an old document.
+fn insertion_anchor(before: &str, after: &str, inserted: &str) -> Option<(String, String)> {
+    if inserted.is_empty() || before == after { return None; }
+    let mut found = None;
+    for (index, (position, _)) in after.match_indices(inserted).take(129).enumerate() {
+        if index == 128 { return None; }
+        let prefix = &after[..position];
+        let suffix = &after[position + inserted.len()..];
+        if before.len() >= prefix.len() + suffix.len()
+            && before.starts_with(prefix) && before.ends_with(suffix) {
+            if found.is_some() { return None; }
+            found = Some((prefix.to_string(), suffix.to_string()));
+        }
+    }
+    found
+}
+
+pub fn prepare_observation() -> Result<Observation, String> {
     #[cfg(windows)] { native::prepare_observation() }
     #[cfg(not(windows))] { Err("Edit observation currently supports Windows.".into()) }
 }
-pub fn observed_passage(marker: &Selection) -> Result<String, String> {
-    #[cfg(windows)] { native::observed_passage(marker) }
-    #[cfg(not(windows))] { let _=marker; Err("Edit observation currently supports Windows.".into()) }
+/// Connect the accessibility provider without reading the editor's contents.
+pub fn warm_observer() {
+    #[cfg(windows)] { native::warm_observer(); }
+}
+pub fn observed_passage(marker: &mut Observation, inserted: &str) -> Result<String, String> {
+    #[cfg(windows)] { native::observed_passage(marker, inserted) }
+    #[cfg(not(windows))] { let _=(marker, inserted); Err("Edit observation currently supports Windows.".into()) }
 }
 pub fn replace(
     selection: &Selection,
@@ -206,7 +246,21 @@ mod native {
                 v2.SetConnectionTimeout(1500).map_err(err)?;
                 v2.SetTransactionTimeout(1500).map_err(err)?;
             }
-            let element = automation.GetFocusedElement().map_err(err)?;
+            let mut element = automation.GetFocusedElement().map_err(err)?;
+            let walker = automation.ControlViewWalker().map_err(err)?;
+            let mut editable = false;
+            // Chromium contenteditables can focus a child paragraph/text node.
+            // Anchor the editable owner, not that changing descendant.
+            for _ in 0..8 {
+                let class = element.CurrentClassName().map_err(err)?.to_string();
+                require_editor_surface(&process_name, &window_class, &class)?;
+                if element.CurrentIsPassword().map_err(err)?.as_bool() {
+                    return Err("Password fields cannot be observed or rewritten.".into());
+                }
+                if element_is_editable(&element)? { editable = true; break; }
+                element = walker.GetParentElement(&element).map_err(err)?;
+            }
+            if !editable { return Err("This app does not expose an editable text field.".into()); }
             let class = element.CurrentClassName().map_err(err)?.to_string();
             require_editor_surface(&process_name, &window_class, &class)?;
             if element.CurrentIsPassword().map_err(err)?.as_bool() {
@@ -221,7 +275,8 @@ mod native {
                 if value.CurrentIsReadOnly().map_err(err)?.as_bool() {
                     return Err("This text is read-only. Select text in an editor.".into());
                 }
-            } else if element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
+            } else if !element_is_editable(&element)?
+                && element.CurrentControlType().map_err(err)? != UIA_EditControlTypeId
                 && element
                     .GetCurrentPatternAs::<IUIAutomationTextEditPattern>(UIA_TextEditPatternId)
                     .is_err()
@@ -260,6 +315,25 @@ mod native {
                     runtime_id,
                 },
             ))
+        }
+    }
+    fn element_is_editable(element: &IUIAutomationElement) -> Result<bool, String> {
+        unsafe {
+            if !element.CurrentIsEnabled().map_err(err)?.as_bool() { return Ok(false); }
+            if let Ok(value) = element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
+                return Ok(!value.CurrentIsReadOnly().map_err(err)?.as_bool());
+            }
+            if let Ok(text) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+                if let Ok(range) = text.DocumentRange() {
+                    if let Ok(mut value) = range.GetAttributeValue(UIA_IsReadOnlyAttributeId) {
+                        let read_only = windows::Win32::System::Variant::VariantToBoolean(&value).ok();
+                        let _ = windows::Win32::System::Variant::VariantClear(&mut value);
+                        if let Some(read_only) = read_only { return Ok(!read_only.as_bool()); }
+                    }
+                }
+            }
+            Ok(element.CurrentControlType().map_err(err)? == UIA_EditControlTypeId
+                || element.GetCurrentPatternAs::<IUIAutomationTextEditPattern>(UIA_TextEditPatternId).is_ok())
         }
     }
     fn text_selection(element: &IUIAutomationElement) -> Result<(String, Anchor), String> {
@@ -306,25 +380,41 @@ mod native {
             ))
         }
     }
-    pub(super) fn prepare_observation() -> Result<Selection, String> {
-        let _com=Apartment::new()?;
-        let (_,element,target)=focused()?;
-        let (text,anchor)=anchored_selection(&element,false)?;
-        Ok(Selection { text, target, anchor:Some(anchor) })
+    pub(super) fn warm_observer() {
+        if let Ok(_com) = Apartment::new() { let _ = focused(); }
     }
-    pub(super) fn observed_passage(marker: &Selection) -> Result<String,String> {
+    pub(super) fn prepare_observation() -> Result<super::Observation, String> {
         let _com=Apartment::new()?;
         let (_,element,target)=focused()?;
-        if target != marker.target { return Err(CHANGED.into()); }
-        let anchor=marker.anchor.as_ref().ok_or(CHANGED)?;
-        let document=unsafe {
-            let pattern: IUIAutomationTextPattern=element.GetCurrentPatternAs(UIA_TextPatternId).map_err(err)?;
-            pattern.DocumentRange().map_err(err)?.GetText(MAX_DOCUMENT+1).map_err(err)?.to_string()
-        };
-        if document.len()>MAX_DOCUMENT as usize { return Err(CHANGED.into()); }
+        let baseline = normalized(&read_document(&element)?);
+        let anchor = anchored_selection(&element,false).ok().map(|(_,anchor)|
+            (normalized(&anchor.prefix), normalized(&anchor.suffix)));
+        Ok(super::Observation { baseline, target, anchor })
+    }
+    fn read_document(element: &IUIAutomationElement) -> Result<String,String> {
+        unsafe {
+            let text = if let Ok(pattern) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+                pattern.DocumentRange().map_err(err)?.GetText(MAX_DOCUMENT+1).map_err(err)?.to_string()
+            } else {
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId).map_err(err)?
+                    .CurrentValue().map_err(err)?.to_string()
+            };
+            if text.len() > MAX_DOCUMENT as usize { return Err(CHANGED.into()); }
+            Ok(text)
+        }
+    }
+    pub(super) fn observed_passage(marker: &mut super::Observation, inserted: &str) -> Result<String,String> {
+        let _com=Apartment::new()?;
+        let (_,element,target)=focused()?;
+        if target.window != marker.target.window || target.process != marker.target.process
+            || target.runtime_id != marker.target.runtime_id { return Err(CHANGED.into()); }
+        let document=read_document(&element)?;
         let doc=normalized(&document);
-        let prefix=normalized(&anchor.prefix); let suffix=normalized(&anchor.suffix);
-        if !doc.starts_with(&prefix) || !doc.ends_with(&suffix) || doc.len()<prefix.len()+suffix.len() { return Err(CHANGED.into()); }
+        if marker.anchor.is_none() {
+            marker.anchor = super::insertion_anchor(&marker.baseline, &doc, &normalized(inserted));
+        }
+        let (prefix,suffix)=marker.anchor.as_ref().ok_or(CHANGED)?;
+        if !doc.starts_with(prefix.as_str()) || !doc.ends_with(suffix.as_str()) || doc.len()<prefix.len()+suffix.len() { return Err(CHANGED.into()); }
         let passage=&doc[prefix.len()..doc.len()-suffix.len()];
         if passage.chars().count()>6000 { return Err(CHANGED.into()); }
         Ok(passage.to_string())

@@ -25,6 +25,9 @@ pub struct Learning {
     pending: Arc<Mutex<Option<(Suggestion, Instant)>>>,
 }
 impl Learning {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
@@ -94,7 +97,7 @@ impl Learning {
     pub fn observe(
         &self,
         app: AppHandle,
-        marker: crate::selection::Selection,
+        mut marker: crate::selection::Observation,
         inserted: String,
         settings: Settings,
         known: Vec<Entry>,
@@ -113,6 +116,7 @@ impl Learning {
             let mut last = String::new();
             let mut changed_at = Instant::now();
             let mut first_poll = true;
+            let mut last_read = Instant::now();
             while started.elapsed() < duration {
                 if !first_poll {
                     std::thread::sleep(Duration::from_millis(500));
@@ -123,8 +127,12 @@ impl Learning {
                 {
                     return;
                 }
-                let passage = match crate::selection::observed_passage(&marker) {
-                    Ok(p) => p,
+                let passage = match crate::selection::observed_passage(&mut marker, &original) {
+                    Ok(p) => { last_read = Instant::now(); p },
+                    // Selection menus and browser rerendering can interrupt one
+                    // poll. No foreign field is read; retry this same anchored
+                    // target briefly instead of abandoning the whole session.
+                    Err(_) if last_read.elapsed() < Duration::from_secs(4) => continue,
                     Err(_) => return,
                 };
                 // Never infer corrections unless we first verified the actual

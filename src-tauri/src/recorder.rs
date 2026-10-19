@@ -195,6 +195,11 @@ impl Recorder {
         parakeet_model_dir: Option<&std::path::Path>,
     ) -> Result<(), String> {
         crate::model_cache::note_activity();
+        // Warm Chromium's accessibility provider while the user speaks. The
+        // actual before-paste anchor is still acquired afresh below.
+        if self.learning.is_enabled() && !self.is_write_active() {
+            std::thread::spawn(crate::selection::warm_observer);
+        }
         // 1. Transition state to Recording while holding the state lock briefly
         self.learning.cancel(app);
         {
@@ -966,8 +971,11 @@ impl Recorder {
         if !final_text.is_empty() {
             self.learning.cancel(app);
             let marker=if settings.learn_from_corrections {
-                tokio::time::timeout(Duration::from_millis(600),tauri::async_runtime::spawn_blocking(crate::selection::prepare_observation))
-                    .await.ok().and_then(Result::ok).and_then(Result::ok)
+                match tokio::time::timeout(Duration::from_millis(600),tauri::async_runtime::spawn_blocking(crate::selection::prepare_observation)).await {
+                    Ok(Ok(Ok(marker))) => Some(marker),
+                    Ok(Ok(Err(error))) => { crate::debug_log::log(app_dir, &format!("LEARNING observer unavailable: {error}")); None },
+                    _ => { crate::debug_log::log(app_dir, "LEARNING observer unavailable: accessibility timeout"); None },
+                }
             } else { None };
             if let Err(e) = paste_text(&final_text) {
                 self.reset_ready(app);
